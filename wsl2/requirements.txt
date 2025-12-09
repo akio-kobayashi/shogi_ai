@@ -1,0 +1,5 @@
+numpy<2
+cshogi
+tqdm
+pillow
+matplotlib
