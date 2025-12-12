@@ -71,7 +71,7 @@ while :; do
   echo "URL: ${url}"
 
   # NOP (サーバ負荷配慮)
-  sleep 1
+  sleep 5
 
   wget -r -np -nH --cut-dirs=2 -A "*.csa" -nc "${url}" || {
     echo "[WARN] No CSA found for ${current}"
