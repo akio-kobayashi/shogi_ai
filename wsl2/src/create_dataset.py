@@ -52,7 +52,7 @@ def extract_metadata(csa_root: str, csv_path: str) -> None:
 
     print(f"{len(csa_files)}個のCSAファイルをスキャンします...")
 
-    header = ['file_path', 'kif_index', 'rating_b', 'rating_w', 'game_result']
+    header = ['file_path', 'kif_index', 'rating_b', 'rating_w', 'game_result', 'total_moves']
     
     parser = cshogi.Parser()
 
@@ -73,10 +73,11 @@ def extract_metadata(csa_root: str, csv_path: str) -> None:
                         
                         rating_b, rating_w = kif.ratings
                         
-                        # CSA.Parser.win -> 1:先手勝ち, -1:後手勝ち, 0:引き分け
+                        # kif.win -> 1:先手勝ち, -1:後手勝ち, 0:引き分け, 2:中断
                         game_result = kif.win
+                        total_moves = len(kif.moves)
 
-                        writer.writerow([str(csa_path), i, rating_b, rating_w, game_result])
+                        writer.writerow([str(csa_path), i, rating_b, rating_w, game_result, total_moves])
 
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
