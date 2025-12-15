@@ -65,7 +65,7 @@ def extract_metadata(csa_root: str, csv_path: str) -> None:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
                     # parse_fileはジェネレータを返す
-                    kifs = parser.parse_csa_file(str(csa_path))
+                    kifs = parser.parse_file(str(csa_path))
                     for i, kif in enumerate(kifs):
                         # レーティング情報がない場合はスキップ
                         if not kif.ratings or len(kif.ratings) < 2:
