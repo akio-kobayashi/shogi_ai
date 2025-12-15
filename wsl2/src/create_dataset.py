@@ -32,8 +32,6 @@ except ImportError:
 import cshogi
 import numpy as np
 
-print("インポート後のテスト")
-
 
 # ================================
 # フェーズ1: メタデータ抽出
@@ -435,6 +433,7 @@ def run_evaluate_metadata(args: argparse.Namespace) -> None:
 # ================================
 
 def main() -> None:
+    print(f"Arguments received: {sys.argv}")
     parser = argparse.ArgumentParser(
         description="CSA棋譜からnodchip/nnue-pytorch形式の学習データを生成するスクリプト。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
