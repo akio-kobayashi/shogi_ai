@@ -63,7 +63,7 @@ def extract_metadata(csa_root: str, csv_path: str) -> None:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
                     # parse_fileはジェネレータを返す
-                    kifs = cshogi.CSA.Parser.parse_file(str(csa_path))
+                    kifs = cshogi.Parser.parse_csa_file(str(csa_path))
                     for i, kif in enumerate(kifs):
                         # レーティング情報がない場合はスキップ
                         if not kif.ratings or len(kif.ratings) < 2:
@@ -433,7 +433,6 @@ def run_evaluate_metadata(args: argparse.Namespace) -> None:
 # ================================
 
 def main() -> None:
-    print(f"Arguments received: {sys.argv}")
     parser = argparse.ArgumentParser(
         description="CSA棋譜からnodchip/nnue-pytorch形式の学習データを生成するスクリプト。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
