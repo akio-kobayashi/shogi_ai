@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+print("Pythonスクリプト実行テスト")
 """
 概要:
 CSA棋譜ファイルから、nodchip/nnue-pytorch形式の学習データおよび検証データを生成するスクリプト。
