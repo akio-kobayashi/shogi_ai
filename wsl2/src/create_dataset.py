@@ -513,3 +513,6 @@ def run_extract_metadata(args: argparse.Namespace) -> None:
 
 def run_generate_datasets(args: argparse.Namespace) -> None:
     generate_datasets_logic(args)
+
+if __name__ == "__main__":
+    main()
