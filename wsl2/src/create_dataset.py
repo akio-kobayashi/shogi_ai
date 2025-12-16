@@ -74,7 +74,7 @@ def extract_metadata(csa_root: str, csv_path: str) -> None:
                         
                         rating_b, rating_w = kif.ratings
                         
-                        # kif.win -> 1:先手勝ち, -1:後手勝ち, 0:引き分け, 2:中断
+                        # kif.win -> 1:先手勝ち, 2:後手勝ち, 0:引き分け
                         game_result = kif.win
                         total_moves = len(kif.moves)
 
