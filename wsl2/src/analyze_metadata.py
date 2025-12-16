@@ -1,0 +1,159 @@
+# -*- coding: utf-8 -*-
+"""
+概要:
+`create_dataset.py`で生成されたメタデータCSVファイルを分析するスクリプト。
+
+機能:
+1. stats: データセットの基本統計量（棋譜数、レーティング分布など）を表示する。
+2. plot: データの分布を可視化し、画像ファイルとして保存する。
+3. simulate: `create_dataset.py`の`generate`コマンドと同じ条件でフィルタリングし、
+   適用後の棋譜数をシミュレーションする。
+"""
+import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# Matplotlibの日本語設定
+try:
+    import japanize_matplotlib
+    japanize_matplotlib.japanize()
+except ImportError:
+    print("japanize_matplotlib が見つかりません。'pip install japanize-matplotlib' の実行を推奨します。", file=sys.stderr)
+
+
+def run_stats(args: argparse.Namespace) -> None:
+    """基本統計量を計算して表示する。"""
+    print("--- 基本統計量の計算 ---")
+    df = pd.read_csv(args.metadata_csv)
+
+    print(f"総棋譜数: {len(df)}")
+    print("\n--- レーティングと手数の統計 ---")
+    print(df[['rating_b', 'rating_w', 'total_moves']].describe())
+
+    print("\n--- 勝敗結果の分布 ---")
+    result_map = {1: '先手勝ち', -1: '後手勝ち', 0: '引き分け', 2: '中断'}
+    result_counts = df['game_result'].value_counts().rename(index=result_map)
+    print(result_counts)
+    print("\n--- 勝敗結果の割合 ---")
+    print(df['game_result'].value_counts(normalize=True).rename(index=result_map))
+
+
+def run_plot(args: argparse.Namespace) -> None:
+    """データの分布をプロットし、画像として保存する。"""
+    print("--- 分布の可視化 ---")
+    df = pd.read_csv(args.metadata_csv)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    # レーティングのヒストグラム
+    print("レーティングのヒストグラムを生成中...")
+    plt.figure(figsize=(12, 6))
+    plt.hist([df['rating_b'], df['rating_w']], bins=50, label=['先手', '後手'], range=(1000, 4500))
+    plt.title('レーティング分布')
+    plt.xlabel('レーティング')
+    plt.ylabel('棋譜数')
+    plt.legend()
+    plt.grid(True)
+    rating_hist_path = output_dir / "rating_histogram.png"
+    plt.savefig(rating_hist_path)
+    plt.close()
+    print(f"保存しました: {rating_hist_path}")
+
+    # 手数のヒストグラム
+    print("手数のヒストグラムを生成中...")
+    plt.figure(figsize=(12, 6))
+    plt.hist(df['total_moves'], bins=50, range=(0, 500))
+    plt.title('手数分布')
+    plt.xlabel('手数')
+    plt.ylabel('棋譜数')
+    plt.grid(True)
+    moves_hist_path = output_dir / "total_moves_histogram.png"
+    plt.savefig(moves_hist_path)
+    plt.close()
+    print(f"保存しました: {moves_hist_path}")
+
+
+def run_simulate(args: argparse.Namespace) -> None:
+    """フィルタリング条件をシミュレーションする。"""
+    print("--- フィルタリングシミュレーション ---")
+    df = pd.read_csv(args.metadata_csv)
+    
+    print(f"フィルタリング前の総棋譜数: {len(df)}")
+
+    # allowed-results のパース
+    result_map = {'win': 1, 'lose': -1, 'draw': 0, 'interrupt': 2}
+    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
+
+    # pandasのクエリでフィルタリング
+    queries = []
+    queries.append(f"({args.min_rating} <= rating_b <= {args.max_rating})")
+    queries.append(f"({args.min_rating} <= rating_w <= {args.max_rating})")
+    queries.append(f"abs(rating_b - rating_w) <= {args.max_rating_diff}")
+    queries.append(f"({args.min_moves} <= total_moves <= {args.max_moves})")
+    queries.append(f"game_result in {list(allowed_results_int)}")
+
+    if args.filter_by_rating_outcome:
+        queries.append("((rating_b > rating_w) and (game_result == 1)) or "
+                       "((rating_w > rating_b) and (game_result == -1)) or "
+                       "(rating_b == rating_w)")
+
+    final_query = " & ".join(queries)
+    print("\n適用するフィルタ条件:")
+    print(final_query)
+    
+    filtered_df = df.query(final_query)
+
+    print(f"\nフィルタリング後の総棋譜数: {len(filtered_df)}")
+    
+    remaining_ratio = len(filtered_df) / len(df) if len(df) > 0 else 0
+    print(f"残存率: {remaining_ratio:.2%}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="メタデータCSVを分析するスクリプト。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
+
+    # --- 'stats' コマンド ---
+    stats_parser = subparsers.add_parser("stats", help="データセットの基本統計量を表示します。")
+    stats_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    stats_parser.set_defaults(func=run_stats)
+
+    # --- 'plot' コマンド ---
+    plot_parser = subparsers.add_parser("plot", help="データの分布を可視化し、画像ファイルとして保存します。")
+    plot_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    plot_parser.add_argument("--output-dir", default="analysis_output", help="生成された画像を保存するディレクトリ。")
+    plot_parser.set_defaults(func=run_plot)
+
+    # --- 'simulate' コマンド ---
+    simulate_parser = subparsers.add_parser("simulate", help="フィルタリング条件を適用した結果をシミュレーションします。")
+    simulate_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    
+    # フィルタリング設定 (create_dataset.pyからコピー)
+    simulate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
+    simulate_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
+    simulate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
+    simulate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
+    simulate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
+    simulate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw,interrupt)。")
+    simulate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
+    simulate_parser.set_defaults(func=run_simulate)
+
+    args = parser.parse_args()
+    
+    if not Path(args.metadata_csv).exists():
+        print(f"エラー: メタデータファイルが見つかりません: {args.metadata_csv}", file=sys.stderr)
+        sys.exit(1)
+        
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -73,7 +73,7 @@ while :; do
   # NOP (サーバ負荷配慮)
   sleep 5
 
-  wget -r -np -nH --cut-dirs=2 -A "*.csa" -nc "${url}" || {
+  wget -r -np -nH --cut-dirs=2 -A "*.csa" -nc --wait=2 --random-wait --limit-rate=500k "${url}" || {
     echo "[WARN] No CSA found for ${current}"
   }
 

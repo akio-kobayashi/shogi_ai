@@ -3,3 +3,7 @@ cshogi
 tqdm
 pillow
 matplotlib
+PyYAML
+pandas
+
+

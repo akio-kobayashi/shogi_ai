@@ -21,6 +21,7 @@ import argparse
 import sys
 from collections import defaultdict
 from pathlib import Path
+import yaml
 
 try:
     from tqdm import tqdm
@@ -205,20 +206,48 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
 
     print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
 
+    # allowed-results のパース
+    result_map = {'win': 1, 'lose': -1, 'draw': 0, 'interrupt': 2}
+    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
+
     filtered_kifs = []
-    for kif in all_kifs:
+    for kif in tqdm(all_kifs, desc="フィルタリング中"):
         try:
             rating_b = int(kif['rating_b'])
             rating_w = int(kif['rating_w'])
-            
-            # 最低レーティングフィルタ
-            if rating_b < args.min_rating or rating_w < args.min_rating:
+            total_moves = int(kif['total_moves'])
+            game_result = int(kif['game_result'])
+
+            # レーティングフィルタ
+            if not (args.min_rating <= rating_b <= args.max_rating and
+                    args.min_rating <= rating_w <= args.max_rating):
                 continue
             
             # レーティング差フィルタ
             if abs(rating_b - rating_w) > args.max_rating_diff:
                 continue
-            
+
+            # 手数フィルタ
+            if not (args.min_moves <= total_moves <= args.max_moves):
+                continue
+
+            # 勝敗結果フィルタ
+            if game_result not in allowed_results_int:
+                continue
+
+            # レーティング通りの結果フィルタ
+            if args.filter_by_rating_outcome:
+                # レーティングが高い方が勝ったか
+                is_black_stronger = rating_b > rating_w
+                is_white_stronger = rating_w > rating_b
+                
+                # 期待される結果と実際の結果が一致しない場合はスキップ
+                if is_black_stronger and game_result != 1: # 先手勝ちを期待
+                    continue
+                if is_white_stronger and game_result != -1: # 後手勝ちを期待
+                    continue
+                # レーティングが同じ場合はどちらが勝っても良いので何もしない
+
             filtered_kifs.append(kif)
         except (ValueError, KeyError):
             continue # ヘッダや不正な行をスキップ
@@ -441,6 +470,8 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
+    parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。コマンドライン引数はYAMLの設定を上書きします。")
+    
     subparsers = parser.add_subparsers(dest="command", help="利用可能なコマンド")
 
     # --- 'extract' コマンドのパーサー ---
@@ -471,13 +502,18 @@ def main() -> None:
         "generate", help="メタデータCSVから学習データと検証データ(.bin)を生成します。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    generate_parser.add_argument("--output-dir", default="output_data", help="生成されたデータセット(.bin)とメタデータ(.csv)を保存するディレクトリ。")
-    generate_parser.add_argument("--metadata-csv", default=None, help="入力となるメタデータCSVのパス。指定しない場合は output-dir/metadata.csv になります。")
-    generate_parser.add_argument("--evaluated-metadata-csv", default=None, help="評価値付きメタデータCSVのパス。指定した場合、このCSVの評価値を使用します。")
+    generate_parser.add_argument("--output-dir", help="生成されたデータセット(.bin)とメタデータ(.csv)を保存するディレクトリ。")
+    generate_parser.add_argument("--metadata-csv", help="入力となるメタデータCSVのパス。")
+    generate_parser.add_argument("--evaluated-metadata-csv", help="評価値付きメタデータCSVのパス。指定した場合、このCSVの評価値を使用します。")
     
     # フィルタリング設定
     generate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
+    generate_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
     generate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
+    generate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
+    generate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
+    generate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw,interrupt)。")
+    generate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
     
     # データ生成設定
     generate_parser.add_argument("--win-value", type=int, default=600, help="勝敗から変換する評価値の絶対値。")
@@ -488,6 +524,23 @@ def main() -> None:
     generate_parser.add_argument("--val-split", type=float, default=0.1, help="検証データとして分割する割合 (0.0-1.0)。")
     generate_parser.set_defaults(func=run_generate_datasets)
 
+    # --- 引数のパースと設定の上書き ---
+    # 1. 部分的なパースでconfigファイルパスを取得
+    temp_args, _ = parser.parse_known_args()
+
+    # 2. YAML設定の読み込みとデフォルト値の上書き
+    if temp_args.config and Path(temp_args.config).exists():
+        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
+        with open(temp_args.config, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+        
+        # サブコマンドごとの設定をデフォルト値として適用
+        for command_name, command_args in yaml_config.items():
+            if command_name == parser.prog: # トップレベルの引数は未対応
+                continue
+            parser.set_defaults(**command_args)
+
+    # 3. 最終的なパース（コマンドライン引数がYAML設定を上書き）
     args = parser.parse_args()
 
     if args.command:
@@ -503,8 +556,8 @@ def main() -> None:
         elif args.command == "generate":
             if args.metadata_csv is None:
                 args.metadata_csv = str(Path(args.output_dir) / "metadata.csv")
-            if args.evaluated_metadata_csv is None:
-                args.evaluated_metadata_csv = str(Path(args.output_dir) / "evaluated_metadata.csv")
+            if args.evaluated_metadata_csv is None and Path(str(Path(args.output_dir) / "evaluated_metadata.csv")).exists():
+                 args.evaluated_metadata_csv = str(Path(args.output_dir) / "evaluated_metadata.csv")
             
         args.func(args)
     else:

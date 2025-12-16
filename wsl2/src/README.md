@@ -26,6 +26,46 @@ python src/create_dataset.py <command> [options]
 
 利用可能なコマンドは `extract`, `evaluate`, `generate` です。
 
+### 設定ファイル (`config.yaml`) による一括設定
+
+多くのオプションを毎回コマンドラインで指定する代わりに、`config.yaml` という設定ファイルにまとめて記述することができます。
+
+```bash
+python src/create_dataset.py -c config.yaml <command> [options]
+```
+
+`--config` (または `-c`) オプションでYAMLファイルを指定すると、その内容がデフォルト設定として読み込まれます。
+**コマンドラインで個別に指定したオプションは、YAMLファイルの設定よりも優先されます。**
+
+#### `config.yaml` の例
+
+以下は `generate` コマンドの全オプションを設定する例です。ファイルのキーはサブコマンド名に対応しています。
+
+```yaml
+generate:
+  output_dir: "filtered_data"
+  metadata_csv: "output_data/metadata.csv"
+  evaluated_metadata_csv: "output_data/evaluated_metadata.csv"
+  
+  # フィルタリング設定
+  min_rating: 2800
+  max_rating: 4000
+  max_rating_diff: 800
+  min_moves: 50
+  max_moves: 256
+  allowed_results: "win,lose" # 勝ち負けが決した棋譜のみ
+  filter_by_rating_outcome: true # レーティングが高い方が勝った棋譜のみ
+
+  # データ生成設定
+  win_value: 600
+  min_ply: 40
+  max_ply: 256
+  
+  # 実行制御
+  val_split: 0.05
+```
+
+
 ### 1. `extract` コマンド: メタデータの抽出
 
 CSAファイルが格納されているディレクトリをスキャンし、各棋譜の基本情報をCSVファイルに抽出します。この処理は時間がかかる場合があるため、一度実行すれば、`metadata.csv` が存在する場合はスキップされます。
@@ -90,7 +130,12 @@ python src/create_dataset.py generate [オプション]
 *   `--metadata-csv` (デフォルト: `<output-dir>/metadata.csv`): 入力となるメタデータCSVのパス。
 *   `--evaluated-metadata-csv` (デフォルト: `<output-dir>/evaluated_metadata.csv`): 評価値付きメタデータCSVのパス。これを指定すると、棋譜の勝敗ではなく、このCSVに含まれる評価値が使用されます。
 *   `--min-rating` (デフォルト: `3000`): 学習対象とする対局者の最低レーティング。
+*   `--max-rating` (デフォルト: `9999`): 学習対象とする対局者の最大レーティング。
 *   `--max-rating-diff` (デフォルト: `1000`): 学習対象とする対局者間のレーティング差の上限。
+*   `--min-moves` (デフォルト: `0`): 学習対象とする棋譜の最小手数。
+*   `--max-moves` (デフォルト: `999`): 学習対象とする棋譜の最大手数。
+*   `--allowed-results` (デフォルト: `"win,lose,draw"`): 含める勝敗結果をカンマ区切りで指定 (`win`, `lose`, `draw`, `interrupt`)。
+*   `--filter-by-rating-outcome` (フラグ): これを指定すると、レーティングが高い方が勝った棋譜のみを対象とします。
 *   `--win-value` (デフォルト: `600`): 棋譜の勝敗から評価値を生成する場合の絶対値 (例: 先手勝ちなら `600`、後手勝ちなら `-600`)。
 *   `--min-ply` (デフォルト: `20`): この手数未満の局面は学習データに含めません。
 *   `--max-ply` (デフォルト: `512`): 安全のための手数の上限。この手数を超える局面は学習データに含めません。
