@@ -1,0 +1,40 @@
+# create_dataset.py の設定ファイル
+
+# 'extract' コマンドの設定
+# CSAファイルからメタデータを抽出する際のデフォルト設定
+extract:
+  csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリを指定してください
+  output_dir: "output_data"
+
+# 'evaluate' コマンドの設定
+# USIエンジンで局面を評価する際のデフォルト設定
+evaluate:
+  metadata_csv: "output_data/metadata.csv"
+  engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパスを指定してください
+  output_csv: "output_data/evaluated_metadata.csv"
+  depth: 12
+  min_ply: 20
+  max_ply: 512
+
+# 'generate' コマンドの設定
+# 学習・検証データセットを生成する際のデフォルト設定
+generate:
+  output_dir: "output_data"
+  metadata_csv: "output_data/metadata.csv"
+  # 評価値付きデータセットを使う場合は下の行のコメントを外してください
+  # evaluated_metadata_csv: "output_data/evaluated_metadata.csv"
+
+  # --- フィルタリング設定 ---
+  min_rating: 3000
+  max_rating: 9999
+  max_rating_diff: 1000
+  min_moves: 40
+  max_moves: 512
+  allowed_results: "win,lose,draw"
+  filter_by_rating_outcome: false
+
+  # --- データ生成設定 ---
+  win_value: 600
+  min_ply: 20
+  max_ply: 512
+  val_split: 0.1
