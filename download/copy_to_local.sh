@@ -2,7 +2,7 @@
 # Copy CSA files from Gogle drive **efficiently** with rclone.
 # CSA files should be copied to your local machine for faster processing.
 
-SRC=~/GoogleDrive/floodgate/csa_raw/2025
+SRC=floodgate/csa_raw/2025
 DST=./csa/
 rclone copy gdrive:${SRC} ${DST} \
        --transfers 16 \
