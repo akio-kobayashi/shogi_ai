@@ -160,7 +160,16 @@ def process_kifs(
                                 psv[0]["score"] = np.int16(current_score)
                                 psv[0]["move"] = np.uint16(0) # 教師手は使わない
                                 psv[0]["gamePly"] = np.uint16(ply)
-                                psv[0]["game_result"] = np.int8(int(meta['game_result']))
+                                
+                                # game_resultを cshogi(1,2,0) -> 学習用(+1,-1,0) に変換
+                                cshogi_result = int(meta['game_result'])
+                                if cshogi_result == 1:      # 先手勝ち
+                                    write_result = 1
+                                elif cshogi_result == 2:    # 後手勝ち
+                                    write_result = -1
+                                else:                       # 引き分け(0) or その他
+                                    write_result = 0
+                                psv[0]["game_result"] = np.int8(write_result)
                                 psv.tofile(f_out)
 
                             board.push(move)
@@ -206,8 +215,8 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
 
     print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
 
-    # allowed-results のパース
-    result_map = {'win': 1, 'lose': -1, 'draw': 0, 'interrupt': 2}
+    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
+    result_map = {'win': 1, 'lose': 2, 'draw': 0}
     allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
 
     filtered_kifs = []
@@ -244,7 +253,7 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
                 # 期待される結果と実際の結果が一致しない場合はスキップ
                 if is_black_stronger and game_result != 1: # 先手勝ちを期待
                     continue
-                if is_white_stronger and game_result != -1: # 後手勝ちを期待
+                if is_white_stronger and game_result != 2: # 後手勝ち(2)を期待
                     continue
                 # レーティングが同じ場合はどちらが勝っても良いので何もしない
 
@@ -512,7 +521,7 @@ def main() -> None:
     generate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
     generate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
     generate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
-    generate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw,interrupt)。")
+    generate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw)。")
     generate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
     
     # データ生成設定

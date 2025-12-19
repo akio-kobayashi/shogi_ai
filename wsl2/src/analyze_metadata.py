@@ -35,7 +35,8 @@ def run_stats(args: argparse.Namespace) -> None:
     print(df[['rating_b', 'rating_w', 'total_moves']].describe())
 
     print("\n--- 勝敗結果の分布 ---")
-    result_map = {1: '先手勝ち', -1: '後手勝ち', 0: '引き分け', 2: '中断'}
+    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
+    result_map = {1: '先手勝ち', 2: '後手勝ち', 0: '引き分け'}
     result_counts = df['game_result'].value_counts().rename(index=result_map)
     print(result_counts)
     print("\n--- 勝敗結果の割合 ---")
@@ -84,8 +85,8 @@ def run_simulate(args: argparse.Namespace) -> None:
     
     print(f"フィルタリング前の総棋譜数: {len(df)}")
 
-    # allowed-results のパース
-    result_map = {'win': 1, 'lose': -1, 'draw': 0, 'interrupt': 2}
+    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
+    result_map = {'win': 1, 'lose': 2, 'draw': 0}
     allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
 
     # pandasのクエリでフィルタリング
@@ -142,7 +143,7 @@ def main() -> None:
     simulate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
     simulate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
     simulate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
-    simulate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw,interrupt)。")
+    simulate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw)。")
     simulate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
     simulate_parser.set_defaults(func=run_simulate)
 
