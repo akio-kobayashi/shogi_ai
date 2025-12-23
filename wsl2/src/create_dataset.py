@@ -180,132 +180,150 @@ def process_kifs(
     print(f"データセット '{output_path}' の生成が完了しました。")
 
 
+def write_bin_file(positions: list, output_path: str):
+    """
+    局面情報のリストから、PackedSfenValue形式の.binファイルを生成する。
+    """
+    print(f"データセット '{output_path}' の生成を開始します。対象局面数: {len(positions)}")
+    board = cshogi.Board()
+    psv = np.zeros(1, dtype=cshogi.PackedSfenValue)
+
+    with open(output_path, "wb") as f_out:
+        for pos in tqdm(positions, desc=f"Writing {Path(output_path).name}"):
+            try:
+                board.set_sfen(pos['sfen'])
+                board.to_psfen(psv)
+
+                # game_resultを cshogi(1,2,0) -> 学習用(+1,-1,0) に変換
+                cshogi_result = int(pos['game_result'])
+                if cshogi_result == 1:
+                    write_result = 1
+                elif cshogi_result == 2:
+                    write_result = -1
+                else:
+                    write_result = 0
+
+                psv[0]["score"] = np.int16(pos['eval_score_cp'])
+                psv[0]["move"] = np.uint16(0)
+                psv[0]["gamePly"] = np.uint16(pos['ply'])
+                psv[0]["game_result"] = np.int8(write_result)
+                psv.tofile(f_out)
+            except Exception as e:
+                print(f"\nデータ書き込みエラー: {pos} ({e})", file=sys.stderr)
+
+def write_hdf5_file(positions: list, output_path: str):
+    """
+    局面情報のリストから、メタデータ付きのHDF5ファイルを生成する。
+    """
+    import h5py
+    print(f"データセット '{output_path}' の生成を開始します。対象局面数: {len(positions)}")
+
+    # 各データを格納するリストを準備
+    packed_sfens = []
+    scores = []
+    game_plies = []
+    game_results = []
+    ratings_b = []
+    ratings_w = []
+
+    board = cshogi.Board()
+    psv_buffer = np.zeros(1, dtype=cshogi.PackedSfenValue)
+
+    for pos in tqdm(positions, desc=f"Preparing {Path(output_path).name}"):
+        try:
+            board.set_sfen(pos['sfen'])
+            board.to_psfen(psv_buffer)
+            packed_sfens.append(psv_buffer.tobytes())
+
+            cshogi_result = int(pos['game_result'])
+            if cshogi_result == 1:
+                write_result = 1
+            elif cshogi_result == 2:
+                write_result = -1
+            else:
+                write_result = 0
+
+            scores.append(np.int16(pos['eval_score_cp']))
+            game_plies.append(np.uint16(pos['ply']))
+            game_results.append(np.int8(write_result))
+            ratings_b.append(np.int16(pos['rating_b']))
+            ratings_w.append(np.int16(pos['rating_w']))
+        except Exception as e:
+            print(f"\nデータ準備エラー: {pos} ({e})", file=sys.stderr)
+
+    # HDF5ファイルに書き出し
+    with h5py.File(output_path, 'w') as f:
+        # PackedSfenValueのdtypeを再現
+        dt = np.dtype([('sfen', np.uint8, 32), ('score', '<i2'), ('move', '<u2'), ('gamePly', '<u2'), ('game_result', 'i1)])
+        
+        psfen_dataset = f.create_dataset('packed_sfens', (len(packed_sfens),), dtype=dt, compression='gzip')
+        psfen_dataset[:] = np.frombuffer(b''.join(packed_sfens), dtype=dt)
+
+        f.create_dataset('scores', data=np.array(scores, dtype=np.int16), compression='gzip')
+        f.create_dataset('game_plies', data=np.array(game_plies, dtype=np.uint16), compression='gzip')
+        f.create_dataset('game_results', data=np.array(game_results, dtype=np.int8), compression='gzip')
+        f.create_dataset('ratings_b', data=np.array(ratings_b, dtype=np.int16), compression='gzip')
+        f.create_dataset('ratings_w', data=np.array(ratings_w, dtype=np.int16), compression='gzip')
+    
+    print(f"データセット '{output_path}' の生成が完了しました。")
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
-    メタデータCSVを読み込み、フィルタリング、分割、データセット生成を行う。
+    評価値・SFEN付きCSVを読み込み、訓練データと検証データを生成する。
     """
-    # --- メタデータCSVの存在確認 ---
-    if not Path(args.metadata_csv).exists():
-        print(f"エラー: メタデータファイル '{args.metadata_csv}' が見つかりません。", file=sys.stderr)
-        print("先に 'extract' コマンドでメタデータを生成してください。", file=sys.stderr)
+    # --- 入力CSVの存在確認 ---
+    if not Path(args.input_csv).exists():
+        print(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。", file=sys.stderr)
         sys.exit(1)
-    
-    print(f"フェーズ2: 既存のメタデータファイル '{args.metadata_csv}' を使用し、棋譜のフィルタリングと分割を開始します。")
 
-    # --- 評価値付きメタデータCSVの読み込み (オプション) ---
-    evaluated_scores = {}
-    if args.evaluated_metadata_csv and Path(args.evaluated_metadata_csv).exists():
-        print(f"評価値付きメタデータファイル '{args.evaluated_metadata_csv}' を読み込みます。")
-        with open(args.evaluated_metadata_csv, 'r', newline='', encoding='utf-8') as f_eval:
-            reader_eval = csv.DictReader(f_eval)
-            for row in reader_eval:
-                # ユニークなキーを作成 (file_path, kif_index, ply)
-                key = (row['file_path'], int(row['kif_index']), int(row['ply']))
-                evaluated_scores[key] = int(row['eval_score_cp'])
-        print(f"{len(evaluated_scores)}個の評価値が読み込まれました。")
-    elif args.evaluated_metadata_csv and not Path(args.evaluated_metadata_csv).exists():
-        print(f"警告: 評価値付きメタデータファイル '{args.evaluated_metadata_csv}' が見つかりません。ゲーム結果から評価値を生成します。", file=sys.stderr)
-    
-    # --- フィルタリング ---
-    print("棋譜のフィルタリングと分割を開始します。")
-    
-    with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f:
+    print(f"--- データセット生成を開始 ---")
+    print(f"入力ファイル: {args.input_csv}")
+    print(f"出力形式: {args.format}")
+
+    # --- 評価値付きCSVの読み込み ---
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        all_kifs = list(reader)
-
-    print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
-
-    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
-    result_map = {'win': 1, 'lose': 2, 'draw': 0}
-    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
-
-    filtered_kifs = []
-    for kif in tqdm(all_kifs, desc="フィルタリング中"):
-        try:
-            rating_b = int(kif['rating_b'])
-            rating_w = int(kif['rating_w'])
-            total_moves = int(kif['total_moves'])
-            game_result = int(kif['game_result'])
-
-            # レーティングフィルタ
-            if not (args.min_rating <= rating_b <= args.max_rating and
-                    args.min_rating <= rating_w <= args.max_rating):
-                continue
-            
-            # レーティング差フィルタ
-            if abs(rating_b - rating_w) > args.max_rating_diff:
-                continue
-
-            # 手数フィルタ
-            if not (args.min_moves <= total_moves <= args.max_moves):
-                continue
-
-            # 勝敗結果フィルタ
-            if game_result not in allowed_results_int:
-                continue
-
-            # レーティング通りの結果フィルタ
-            if args.filter_by_rating_outcome:
-                # レーティングが高い方が勝ったか
-                is_black_stronger = rating_b > rating_w
-                is_white_stronger = rating_w > rating_b
-                
-                # 期待される結果と実際の結果が一致しない場合はスキップ
-                if is_black_stronger and game_result != 1: # 先手勝ちを期待
-                    continue
-                if is_white_stronger and game_result != 2: # 後手勝ち(2)を期待
-                    continue
-                # レーティングが同じ場合はどちらが勝っても良いので何もしない
-
-            filtered_kifs.append(kif)
-        except (ValueError, KeyError):
-            continue # ヘッダや不正な行をスキップ
-
-    print(f"フィルタリング後 - 合計棋譜数: {len(filtered_kifs)}")
-
-    if not filtered_kifs:
-        print("エラー: フィルタリング条件を満たす棋譜がありません。", file=sys.stderr)
+        all_positions = list(reader)
+    
+    if not all_positions:
+        print("エラー: 入力ファイルにデータがありません。", file=sys.stderr)
         sys.exit(1)
+
+    print(f"読み込み完了。総局面数: {len(all_positions)}")
 
     # --- 分割 ---
-    random.shuffle(filtered_kifs)
+    random.shuffle(all_positions)
     
-    val_size = int(len(filtered_kifs) * args.val_split)
-    train_kifs = filtered_kifs[val_size:]
-    val_kifs = filtered_kifs[:val_size]
+    val_size = int(len(all_positions) * args.val_split)
+    train_positions = all_positions[val_size:]
+    val_positions = all_positions[:val_size]
 
-    print(f"分割結果 - 訓練データ: {len(train_kifs)}棋譜, 検証データ: {len(val_kifs)}棋譜")
+    print(f"分割結果 - 訓練データ: {len(train_positions)}局面, 検証データ: {len(val_positions)}局面")
 
     # --- データセット生成 ---
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 訓練データ
-    process_kifs(
-        train_kifs,
-        str(output_dir / "train.bin"),
-        args.win_value,
-        args.min_ply,
-        args.max_ply,
-        evaluated_scores # 評価値付きスコアを渡す
-    )
-    
-    # 検証データ
-    process_kifs(
-        val_kifs,
-        str(output_dir / "val.bin"),
-        args.win_value,
-        args.min_ply,
-        args.max_ply,
-        evaluated_scores # 評価値付きスコアを渡す
-    )
+    if args.format == 'bin':
+        write_bin_file(train_positions, str(output_dir / "train.bin"))
+        write_bin_file(val_positions, str(output_dir / "val.bin"))
+    elif args.format == 'hdf5':
+        # h5pyのインポートチェック
+        try:
+            import h5py
+        except ImportError:
+            print("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。", file=sys.stderr)
+            sys.exit(1)
+        write_hdf5_file(train_positions, str(output_dir / "train.h5"))
+        write_hdf5_file(val_positions, str(output_dir / "val.h5"))
 
     print("\nすべての処理が完了しました。")
 
 
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
-    メタデータCSVを読み込み、USIエンジンで局面を評価し、評価値付きのCSVを生成する。
+    メタデータCSVを読み込み、USIエンジンで局面を評価し、評価値とSFEN付きのCSVを生成する。
     """
     from usi import UsiEngine # UsiEngineをインポート
 
@@ -320,7 +338,8 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
         print(f"エラー: エンジン実行ファイルが見つかりません: {engine_path}", file=sys.stderr)
         sys.exit(1)
     
-    print(f"フェーズ2: メタデータファイル '{args.metadata_csv}' を使用し、USIエンジンで局面評価を開始します。")
+    print(f"--- 局面評価を開始 ---")
+    print(f"入力ファイル: {args.metadata_csv}")
 
     # --- UsiEngineの初期化 ---
     try:
@@ -334,12 +353,13 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         all_kifs_meta = list(reader)
+        header = reader.fieldnames
 
     # --- 出力CSVの準備 ---
     output_csv_path = Path(args.output_csv)
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
     
-    output_header = reader.fieldnames + ['eval_score_cp'] # 評価値カラムを追加
+    output_header = header + ['ply', 'eval_score_cp', 'sfen'] # ply, 評価値, SFENカラムを追加
 
     print(f"評価結果を '{output_csv_path}' に書き込みます。")
 
@@ -366,27 +386,26 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                         
                         # 棋譜を再生し、各局面を評価
                         for ply, move in enumerate(kif.moves, 1):
-                            if ply > args.max_ply: # max_plyは評価対象の局面を絞るため
+                            if ply > args.max_ply:
                                 break
                             
-                            if ply >= args.min_ply: # min_plyは評価対象の局面を絞るため
+                            if ply >= args.min_ply:
                                 try:
                                     sfen = board.sfen()
                                     score_type, score_value = engine.evaluate_sfen(sfen, args.depth)
                                     
-                                    # センチポーンに変換 (詰みの場合もCP_MAXで表現)
                                     eval_score_cp = score_value
                                     if score_type == "mate":
                                         eval_score_cp = 32000 if score_value > 0 else -32000
                                     
-                                    # メタデータに評価値を追加して書き出し
                                     meta_with_eval = meta.copy()
+                                    meta_with_eval['ply'] = ply
                                     meta_with_eval['eval_score_cp'] = eval_score_cp
+                                    meta_with_eval['sfen'] = sfen
                                     writer.writerow(meta_with_eval)
 
                                 except Exception as e:
                                     print(f"\n評価エラー: {csa_path} 棋譜{kif_index} 手数{ply} ({e})", file=sys.stderr)
-                                    # エラーが発生した局面はスキップし、次の局面へ
                             
                             board.push(move)
 
@@ -394,7 +413,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
     
     engine.quit()
-    print("フェーズ2: 局面評価が完了し、評価値付きメタデータCSVが生成されました。")
+    print("局面評価が完了し、評価値・SFEN付きメタデータCSVが生成されました。")
 
 
 def run_evaluate_metadata(args: argparse.Namespace) -> None:
@@ -508,26 +527,32 @@ def main() -> None:
 
     # --- 'generate' コマンドのパーサー ---
     generate_parser = subparsers.add_parser(
-        "generate", help="メタデータCSVから学習データと検証データ(.bin)を生成します。",
+        "generate", help="評価値付きCSVから学習データと検証データ(.bin)を生成します。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    generate_parser.add_argument("--output-dir", help="生成されたデータセット(.bin)とメタデータ(.csv)を保存するディレクトリ。")
-    generate_parser.add_argument("--metadata-csv", help="入力となるメタデータCSVのパス。")
-    generate_parser.add_argument("--evaluated-metadata-csv", help="評価値付きメタデータCSVのパス。指定した場合、このCSVの評価値を使用します。")
+    
+    # --- 'filter' コマンドのパーサー ---
+    filter_parser = subparsers.add_parser(
+        "filter", help="メタデータCSVをフィルタリングし、新しいCSVファイルを出力します。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    filter_parser.add_argument("--metadata-csv", required=True, help="入力となるメタデータCSVのパス。")
+    filter_parser.add_argument("--output-csv", required=True, help="フィルタリング結果を保存するCSVのパス。")
     
     # フィルタリング設定
-    generate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
-    generate_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
-    generate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
-    generate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
-    generate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
-    generate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw)。")
-    generate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
-    
-    # データ生成設定
-    generate_parser.add_argument("--win-value", type=int, default=600, help="勝敗から変換する評価値の絶対値。")
-    generate_parser.add_argument("--min-ply", type=int, default=20, help="この手数未満の局面は学習データにしない。")
-    generate_parser.add_argument("--max-ply", type=int, default=512, help="安全のための手数の上限。")
+    filter_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
+    filter_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
+    filter_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
+    filter_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
+    filter_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
+    filter_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw)。")
+    filter_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
+    filter_parser.set_defaults(func=run_filter_metadata)
+
+
+    generate_parser.add_argument("--input-csv", required=True, help="入力となる評価値付きメタデータCSVのパス。")
+    generate_parser.add_argument("--output-dir", required=True, help="生成されたデータセット(.bin or .h5)を保存するディレクトリ。")
+    generate_parser.add_argument("--format", choices=['bin', 'hdf5'], default='bin', help="出力フォーマットを選択します。")
 
     # 実行制御
     generate_parser.add_argument("--val-split", type=float, default=0.1, help="検証データとして分割する割合 (0.0-1.0)。")
@@ -577,6 +602,76 @@ def run_extract_metadata(args: argparse.Namespace) -> None:
 
 def run_generate_datasets(args: argparse.Namespace) -> None:
     generate_datasets_logic(args)
+
+def run_filter_metadata(args: argparse.Namespace) -> None:
+    """
+    メタデータCSVをフィルタリングし、結果を新しいCSVファイルに書き出す。
+    """
+    if not Path(args.metadata_csv).exists():
+        print(f"エラー: 入力メタデータファイル '{args.metadata_csv}' が見つかりません。", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"--- メタデータのフィルタリングを開始 ---")
+    print(f"入力ファイル: {args.metadata_csv}")
+    print(f"出力ファイル: {args.output_csv}")
+
+    with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        all_kifs = list(reader)
+        header = reader.fieldnames
+
+    print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
+
+    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
+    result_map = {'win': 1, 'lose': 2, 'draw': 0}
+    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
+
+    filtered_kifs = []
+    for kif in tqdm(all_kifs, desc="フィルタリング中"):
+        try:
+            rating_b = int(kif['rating_b'])
+            rating_w = int(kif['rating_w'])
+            total_moves = int(kif['total_moves'])
+            game_result = int(kif['game_result'])
+
+            if not (args.min_rating <= rating_b <= args.max_rating and
+                    args.min_rating <= rating_w <= args.max_rating):
+                continue
+            
+            if abs(rating_b - rating_w) > args.max_rating_diff:
+                continue
+
+            if not (args.min_moves <= total_moves <= args.max_moves):
+                continue
+
+            if game_result not in allowed_results_int:
+                continue
+
+            if args.filter_by_rating_outcome:
+                is_black_stronger = rating_b > rating_w
+                is_white_stronger = rating_w > rating_b
+                
+                if is_black_stronger and game_result != 1:
+                    continue
+                if is_white_stronger and game_result != 2:
+                    continue
+
+            filtered_kifs.append(kif)
+        except (ValueError, KeyError):
+            continue
+
+    print(f"フィルタリング後 - 合計棋譜数: {len(filtered_kifs)}")
+
+    # フィルタ結果をCSVに書き出し
+    try:
+        with open(args.output_csv, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=header)
+            writer.writeheader()
+            writer.writerows(filtered_kifs)
+        print("フィルタリング処理が完了しました。")
+    except IOError as e:
+        print(f"エラー: ファイルの書き込みに失敗しました: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

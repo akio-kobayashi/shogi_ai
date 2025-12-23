@@ -2,20 +2,21 @@
 
 ## 概要
 
-`create_dataset.py` は、CSA (Computer Shogi Association) 形式の棋譜ファイルから、[nodchip/nnue-pytorch](https://github.com/nodchip/nnue-pytorch) の学習データおよび検証データ (`.bin` 形式) を生成するためのスクリプトです。
+`create_dataset.py` は、CSA (Computer Shogi Association) 形式の棋譜ファイルから、[nodchip/nnue-pytorch](https://github.com/nodchip/nnue-pytorch) などで利用可能な学習データセットを生成するためのスクリプトです。
 
-このスクリプトは、以下の3つの独立したフェーズ（サブコマンド）で構成されており、それぞれを個別に実行することで、柔軟かつ堅牢なデータ生成パイプラインを構築できます。
+このスクリプトは、以下の4つの独立したフェーズ（サブコマンド）で構成されており、それぞれを個別に実行することで、柔軟かつ堅牢なデータ生成パイプラインを構築できます。
 
-1.  **`extract`**: CSAファイルから棋譜のメタデータ（ファイルパス、レーティング、勝敗など）を抽出し、CSVファイルに保存します。
-2.  **`evaluate`**: 抽出されたメタデータCSVの各局面をUSI (Universal Shogi Interface) エンジンで評価し、評価値付きのCSVファイルを生成します。
-3.  **`generate`**: メタデータCSV（または評価値付きメタデータCSV）を読み込み、フィルタリング、訓練/検証データへの分割を行い、最終的なバイナリ形式のデータセットを生成します。
+1.  **`extract`**: CSAファイルから棋譜のメタデータ（ファイルパス、レーティング、勝敗など）を抽出し、`metadata.csv`を生成します。
+2.  **`filter`**: `metadata.csv`をレーティングや手数などの条件でフィルタリングし、対象を絞った`filtered.csv`を生成します。
+3.  **`evaluate`**: `filtered.csv`に含まれる棋譜の各局面をUSIエンジンで評価し、評価値とSFEN文字列を含む`evaluated.csv`を生成します。
+4.  **`generate`**: `evaluated.csv`を元に、最終的な学習データセット（`.bin`または`.h5`形式）を生成します。
 
 ## 使用方法
 
 ### 前提条件
 
 *   Python 3.8+
-*   必要なライブラリ: `cshogi`, `numpy`, `tqdm` (インストールされていない場合は `pip install -r requirements.txt` でインストールしてください)
+*   必要なライブラリ: `cshogi`, `numpy`, `tqdm`, `h5py` など (`pip install -r requirements.txt` でインストールしてください)
 *   USIエンジン (オプション: `evaluate` コマンドを使用する場合)
 
 ### コマンド構造
@@ -24,14 +25,14 @@
 python src/create_dataset.py <command> [options]
 ```
 
-利用可能なコマンドは `extract`, `evaluate`, `generate` です。
+利用可能なコマンドは `extract`, `filter`, `evaluate`, `generate` です。
 
-### 設定ファイル (`config.yaml`) による一括設定
+### 設定ファイル (`wsl2/config.yaml`) による一括設定
 
-多くのオプションを毎回コマンドラインで指定する代わりに、`config.yaml` という設定ファイルにまとめて記述することができます。
+多くのオプションを毎回コマンドラインで指定する代わりに、`wsl2/config.yaml` という設定ファイルにまとめて記述することができます。
 
 ```bash
-python src/create_dataset.py -c config.yaml <command> [options]
+python src/create_dataset.py -c wsl2/config.yaml <command> [options]
 ```
 
 `--config` (または `-c`) オプションでYAMLファイルを指定すると、その内容がデフォルト設定として読み込まれます。
@@ -39,114 +40,119 @@ python src/create_dataset.py -c config.yaml <command> [options]
 
 #### `config.yaml` の例
 
-以下は `generate` コマンドの全オプションを設定する例です。ファイルのキーはサブコマンド名に対応しています。
-
 ```yaml
-generate:
-  output_dir: "filtered_data"
-  metadata_csv: "output_data/metadata.csv"
-  evaluated_metadata_csv: "output_data/evaluated_metadata.csv"
-  
-  # フィルタリング設定
-  min_rating: 2800
-  max_rating: 4000
-  max_rating_diff: 800
-  min_moves: 50
-  max_moves: 256
-  allowed_results: "win,lose" # 勝ち負けが決した棋譜のみ
-  filter_by_rating_outcome: true # レーティングが高い方が勝った棋譜のみ
+# create_dataset.py の設定ファイル
+#
+# 推奨ワークフロー:
+# 1. extract: CSAファイルからメタデータを抽出 -> metadata.csv
+# 2. filter: metadata.csv をフィルタリング -> filtered.csv
+# 3. evaluate: filtered.csv の局面を評価 -> evaluated.csv (評価値・SFEN付き)
+# 4. generate: evaluated.csv から学習データを生成 -> train.bin/h5, val.bin/h5
 
-  # データ生成設定
-  win_value: 600
-  min_ply: 40
-  max_ply: 256
-  
-  # 実行制御
-  val_split: 0.05
+# 'extract' コマンドの設定
+extract:
+  csa_dir: "/path/to/your/csa_files"
+  output_dir: "output_data"
+
+# 'filter' コマンドの設定
+filter:
+  metadata_csv: "output_data/metadata.csv"
+  output_csv: "output_data/filtered.csv"
+  min_rating: 3000
+  max_rating: 9999
+  max_rating_diff: 1000
+  min_moves: 40
+  max_moves: 512
+  allowed_results: "win,lose,draw"
+  filter_by_rating_outcome: false
+
+# 'evaluate' コマンドの設定
+evaluate:
+  metadata_csv: "output_data/filtered.csv"
+  engine_path: "/path/to/your/usi_engine"
+  output_csv: "output_data/evaluated.csv"
+  depth: 12
+  min_ply: 20
+  max_ply: 512
+
+# 'generate' コマンドの設定
+generate:
+  input_csv: "output_data/evaluated.csv"
+  output_dir: "output_data"
+  format: "bin"  # 出力形式: 'bin' または 'hdf5'
+  val_split: 0.1
 ```
 
+---
 
 ### 1. `extract` コマンド: メタデータの抽出
 
-CSAファイルが格納されているディレクトリをスキャンし、各棋譜の基本情報をCSVファイルに抽出します。この処理は時間がかかる場合があるため、一度実行すれば、`metadata.csv` が存在する場合はスキップされます。
+CSAファイル群をスキャンし、各棋譜の基本情報（レーティング、勝敗など）をCSVファイルに抽出します。
 
 ```bash
-python src/create_dataset.py extract --csa-dir <CSAファイルルートディレクトリのパス> [オプション]
+python src/create_dataset.py extract --csa-dir <CSAファイルルートディレクトリのパス>
 ```
+*   **入力:** CSAファイル群
+*   **出力:** `metadata.csv`
+
+### 2. `filter` コマンド: 棋譜のフィルタリング
+
+`metadata.csv`を読み込み、レーティングや手数などの条件に基づいて学習対象とする棋譜を絞り込みます。
+
+```bash
+python src/create_dataset.py filter --metadata-csv <入力CSV> --output-csv <出力CSV> [フィルタオプション]
+```
+*   **入力:** `metadata.csv`
+*   **出力:** `filtered.csv`
+
+### 3. `evaluate` コマンド: USIエンジンによる局面評価
+
+`filtered.csv`で指定された棋譜の各局面をUSIエンジンで評価し、評価値と局面のSFEN文字列を含む新しいCSVファイルを生成します。
+
+```bash
+python src/create_dataset.py evaluate --metadata-csv <フィルタ済みCSV> --output-csv <出力CSV> --engine-path <エンジンパス>
+```
+*   **入力:** `filtered.csv`
+*   **出力:** `evaluated.csv` (評価値とSFEN付き)
+
+### 4. `generate` コマンド: 学習データセットの生成
+
+`evaluated.csv`を元に、最終的なバイナリ形式のデータセットを生成します。出力形式として、従来の`.bin`形式と、メタデータを含むHDF5形式 (`.h5`) を選択できます。
+
+```bash
+python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ> [--format <bin|hdf5>]
+```
+*   **入力:** `evaluated.csv`
+*   **出力:** `train.bin`/`val.bin` または `train.h5`/`val.h5`
 
 **オプション:**
+*   `--format` (デフォルト: `bin`): 出力形式を`bin`または`hdf5`から選択します。
 
-*   `--csa-dir` (必須): CSAファイルが格納されているルートディレクトリのパス。
-*   `--output-dir` (デフォルト: `output_data`): 生成されたメタデータCSVを保存するディレクトリ。
-*   `--metadata-csv` (デフォルト: `<output-dir>/metadata.csv`): メタデータCSVの出力パス。
+---
 
-**例:**
+## ワークフローの例
 
-```bash
-# /path/to/your/csa_files からメタデータを抽出し、output_data/metadata.csv に保存
-python src/create_dataset.py extract --csa-dir /path/to/your/csa_files --output-dir output_data
-```
+1.  **メタデータ抽出**:
+    ```bash
+    python src/create_dataset.py -c wsl2/config.yaml extract
+    ```
 
-### 2. `evaluate` コマンド: USIエンジンによる局面評価
+2.  **フィルタリング**:
+    ```bash
+    python src/create_dataset.py -c wsl2/config.yaml filter
+    ```
 
-`extract` コマンドで生成されたメタデータCSVを読み込み、指定されたUSIエンジンで各局面の評価値を計算し、評価値付きの新しいCSVファイルとして出力します。
+3.  **局面評価**:
+    ```bash
+    python src/create_dataset.py -c wsl2/config.yaml evaluate
+    ```
 
-```bash
-python src/create_dataset.py evaluate --metadata-csv <入力メタデータCSVのパス> --engine-path <USIエンジンの実行ファイルのパス> [オプション]
-```
-
-**オプション:**
-
-*   `--metadata-csv` (必須): `extract` コマンドで生成された入力メタデータCSVのパス。
-*   `--engine-path` (必須): 使用するUSIエンジンの実行ファイルのパス。
-*   `--output-csv` (デフォルト: `<output-dir>/evaluated_metadata.csv`): 評価値付きメタデータCSVの出力パス。
-*   `--depth` (デフォルト: `10`): USIエンジンの探索の深さ。
-*   `--min-ply` (デフォルト: `20`): 評価を開始する最小手数。この手数未満の局面は評価されません。
-*   `--max-ply` (デフォルト: `512`): 評価する最大手数。この手数を超える局面は評価されません。
-
-**注意点 (Windows .exe エンジンと Linux 環境):**
-
-*   **WSL2環境の場合**: WSL2上では、Linux環境からWindowsの `.exe` 形式の実行ファイルを直接呼び出すことが可能です。したがって、USIエンジンがWindowsの `.exe` であっても、WSL2のLinux環境からそのまま実行できます。Wineは不要です。
-*   **純粋なLinux環境の場合**: 純粋なLinux環境でWindowsの `.exe` 形式の USI エンジンを使用する場合、[Wine](https://www.winehq.org/) がインストールされ、正しく設定されている必要があります。スクリプトは警告を表示しますが、Wine の自動起動は行いません。必要に応じて `sudo apt install wine` などで Wine をインストールしてください。
-
-**例:**
-
-```bash
-# output_data/metadata.csv を元に、指定エンジンで局面を評価し、output_data/evaluated_metadata.csv に保存
-python src/create_dataset.py evaluate --metadata-csv output_data/metadata.csv --engine-path /path/to/your/engine.exe --output-csv output_data/evaluated_metadata.csv --depth 12
-```
-
-### 3. `generate` コマンド: 学習データセットの生成
-
-フィルタリング、訓練/検証データへの分割を行い、最終的なバイナリ形式のデータセット (`train.bin`, `val.bin`) を生成します。評価値は、`--evaluated-metadata-csv` が指定されていればそれを使用し、なければ棋譜の勝敗結果から生成されます。
-
-```bash
-python src/create_dataset.py generate [オプション]
-```
-
-**オプション:**
-
-*   `--output-dir` (デフォルト: `output_data`): 生成されたデータセット (`.bin`) を保存するディレクトリ。
-*   `--metadata-csv` (デフォルト: `<output-dir>/metadata.csv`): 入力となるメタデータCSVのパス。
-*   `--evaluated-metadata-csv` (デフォルト: `<output-dir>/evaluated_metadata.csv`): 評価値付きメタデータCSVのパス。これを指定すると、棋譜の勝敗ではなく、このCSVに含まれる評価値が使用されます。
-*   `--min-rating` (デフォルト: `3000`): 学習対象とする対局者の最低レーティング。
-*   `--max-rating` (デフォルト: `9999`): 学習対象とする対局者の最大レーティング。
-*   `--max-rating-diff` (デフォルト: `1000`): 学習対象とする対局者間のレーティング差の上限。
-*   `--min-moves` (デフォルト: `0`): 学習対象とする棋譜の最小手数。
-*   `--max-moves` (デフォルト: `999`): 学習対象とする棋譜の最大手数。
-*   `--allowed-results` (デフォルト: `"win,lose,draw"`): 含める勝敗結果をカンマ区切りで指定 (`win`, `lose`, `draw`, `interrupt`)。
-*   `--filter-by-rating-outcome` (フラグ): これを指定すると、レーティングが高い方が勝った棋譜のみを対象とします。
-*   `--win-value` (デフォルト: `600`): 棋譜の勝敗から評価値を生成する場合の絶対値 (例: 先手勝ちなら `600`、後手勝ちなら `-600`)。
-*   `--min-ply` (デフォルト: `20`): この手数未満の局面は学習データに含めません。
-*   `--max-ply` (デフォルト: `512`): 安全のための手数の上限。この手数を超える局面は学習データに含めません。
-*   `--val-split` (デフォルト: `0.1`): 検証データとして分割する割合 (0.0-1.0)。
-
-**例:**
-
-```bash
-# 棋譜の勝敗結果を評価値として使用してデータセットを生成
-python src/create_dataset.py generate --output-dir output_data --metadata-csv output_data/metadata.csv --min-rating 2500 --max-rating-diff 500 --val-split 0.05
-
-# USIエンジンで評価した値を使用してデータセットを生成
-python src/create_dataset.py generate --output-dir output_data --metadata-csv output_data/metadata.csv --evaluated-metadata-csv output_data/evaluated_metadata.csv --min-rating 2500 --max-rating-diff 500 --val-split 0.05
-```
+4.  **データセット生成**:
+    *   (`.bin`形式で生成)
+        ```bash
+        python src/create_dataset.py -c wsl2/config.yaml generate --format bin
+        ```
+    *   (`.h5`形式で生成)
+        ```bash
+        python src/create_dataset.py -c wsl2/config.yaml generate --format hdf5
+        ```
