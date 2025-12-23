@@ -6,7 +6,7 @@
 機能:
 1. stats: データセットの基本統計量（棋譜数、レーティング分布など）を表示する。
 2. plot: データの分布を可視化し、画像ファイルとして保存する。
-3. simulate: `create_dataset.py`の`generate`コマンドと同じ条件でフィルタリングし、
+3. simulate: `create_dataset.py`の`filter`コマンドとほぼ同じ条件でフィルタリングし、
    適用後の棋譜数をシミュレーションする。
 """
 import argparse
@@ -37,6 +37,8 @@ def run_stats(args: argparse.Namespace) -> None:
     print("\n--- 勝敗結果の分布 ---")
     # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
     result_map = {1: '先手勝ち', 2: '後手勝ち', 0: '引き分け'}
+    # CSVのgame_resultは文字列として読み込まれることがあるため、数値に変換
+    df['game_result'] = pd.to_numeric(df['game_result'])
     result_counts = df['game_result'].value_counts().rename(index=result_map)
     print(result_counts)
     print("\n--- 勝敗結果の割合 ---")
@@ -53,7 +55,7 @@ def run_plot(args: argparse.Namespace) -> None:
     # レーティングのヒストグラム
     print("レーティングのヒストグラムを生成中...")
     plt.figure(figsize=(12, 6))
-    plt.hist([df['rating_b'], df['rating_w']], bins=50, label=['先手', '後手'], range=(1000, 4500))
+    plt.hist([df['rating_b'].dropna(), df['rating_w'].dropna()], bins=50, label=['先手', '後手'], range=(1000, 4500))
     plt.title('レーティング分布')
     plt.xlabel('レーティング')
     plt.ylabel('棋譜数')
@@ -67,7 +69,7 @@ def run_plot(args: argparse.Namespace) -> None:
     # 手数のヒストグラム
     print("手数のヒストグラムを生成中...")
     plt.figure(figsize=(12, 6))
-    plt.hist(df['total_moves'], bins=50, range=(0, 500))
+    plt.hist(df['total_moves'].dropna(), bins=50, range=(0, 500))
     plt.title('手数分布')
     plt.xlabel('手数')
     plt.ylabel('棋譜数')
@@ -99,7 +101,7 @@ def run_simulate(args: argparse.Namespace) -> None:
 
     if args.filter_by_rating_outcome:
         queries.append("((rating_b > rating_w) and (game_result == 1)) or "
-                       "((rating_w > rating_b) and (game_result == -1)) or "
+                       "((rating_w > rating_b) and (game_result == 2)) or "
                        "(rating_b == rating_w)")
 
     final_query = " & ".join(queries)
@@ -137,7 +139,7 @@ def main() -> None:
     simulate_parser = subparsers.add_parser("simulate", help="フィルタリング条件を適用した結果をシミュレーションします。")
     simulate_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
     
-    # フィルタリング設定 (create_dataset.pyからコピー)
+    # フィルタリング設定 (create_dataset.pyのfilterコマンドからコピー)
     simulate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
     simulate_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
     simulate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")

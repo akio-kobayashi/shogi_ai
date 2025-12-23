@@ -1,0 +1,49 @@
+# create_dataset.py の設定ファイル
+#
+# 推奨ワークフロー:
+# 1. extract: CSAファイルからメタデータを抽出 -> metadata.csv
+# 2. filter: metadata.csv をフィルタリング -> filtered.csv
+# 3. evaluate: filtered.csv の局面を評価 -> evaluated.csv (評価値・SFEN付き)
+# 4. generate: evaluated.csv から学習データを生成 -> train.bin/h5, val.bin/h5
+#
+# 実行例:
+# python wsl2/src/create_dataset.py -c wsl2/config.yaml extract
+# python wsl2/src/create_dataset.py -c wsl2/config.yaml filter
+# python wsl2/src/create_dataset.py -c wsl2/config.yaml evaluate
+# python wsl2/src/create_dataset.py -c wsl2/config.yaml generate
+
+# 'extract' コマンドの設定
+extract:
+  csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリ
+  output_dir: "output_data"
+  # metadata_csv: "output_data/metadata.csv" # output_dirから自動設定
+
+# 'filter' コマンドの設定
+filter:
+  metadata_csv: "output_data/metadata.csv"
+  output_csv: "output_data/filtered.csv"
+  # --- フィルタリング条件 ---
+  min_rating: 3000
+  max_rating: 9999
+  max_rating_diff: 1000
+  min_moves: 40
+  max_moves: 512
+  allowed_results: "win,lose,draw"
+  filter_by_rating_outcome: false
+
+# 'evaluate' コマンドの設定
+evaluate:
+  metadata_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
+  engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
+  output_csv: "output_data/evaluated.csv"
+  # --- 評価条件 ---
+  depth: 12
+  min_ply: 20
+  max_ply: 512
+
+# 'generate' コマンドの設定
+generate:
+  input_csv: "output_data/evaluated.csv" # evaluateコマンドの出力ファイルを指定
+  output_dir: "output_data"
+  format: "bin"  # 出力形式: 'bin' または 'hdf5'
+  val_split: 0.1 # 検証データの割合
