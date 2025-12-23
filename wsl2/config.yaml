@@ -1,22 +1,15 @@
 # create_dataset.py の設定ファイル
 #
 # 推奨ワークフロー:
-# 1. extract: CSAファイルからメタデータを抽出 -> metadata.csv
-# 2. filter: metadata.csv をフィルタリング -> filtered.csv
-# 3. evaluate: filtered.csv の局面を評価 -> evaluated.csv (評価値・SFEN付き)
-# 4. generate: evaluated.csv から学習データを生成 -> train.bin/h5, val.bin/h5
-#
-# 実行例:
-# python wsl2/src/create_dataset.py -c wsl2/config.yaml extract
-# python wsl2/src/create_dataset.py -c wsl2/config.yaml filter
-# python wsl2/src/create_dataset.py -c wsl2/config.yaml evaluate
-# python wsl2/src/create_dataset.py -c wsl2/config.yaml generate
+# [A] .bin 形式 (従来)
+#   1. extract -> 2. filter -> 3. evaluate -> 4. generate
+# [B] .h5 形式 (拡張)
+#   1. extract -> 2. filter -> 3. build-h5
 
 # 'extract' コマンドの設定
 extract:
   csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリ
   output_dir: "output_data"
-  # metadata_csv: "output_data/metadata.csv" # output_dirから自動設定
 
 # 'filter' コマンドの設定
 filter:
@@ -31,7 +24,7 @@ filter:
   allowed_results: "win,lose,draw"
   filter_by_rating_outcome: false
 
-# 'evaluate' コマンドの設定
+# 'evaluate' コマンドの設定 (.bin形式のワークフローで使用)
 evaluate:
   metadata_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
   engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
@@ -41,9 +34,17 @@ evaluate:
   min_ply: 20
   max_ply: 512
 
-# 'generate' コマンドの設定
+# 'generate' コマンドの設定 (.bin形式のワークフローで使用)
 generate:
   input_csv: "output_data/evaluated.csv" # evaluateコマンドの出力ファイルを指定
   output_dir: "output_data"
-  format: "bin"  # 出力形式: 'bin' または 'hdf5'
   val_split: 0.1 # 検証データの割合
+
+# 'build-h5' コマンドの設定 (.h5形式のワークフローで使用)
+build-h5:
+  input_csv: "output_data/filtered.csv"   # filterコマンドの出力ファイルを指定
+  output_h5: "output_data/dataset.h5"     # 出力HDF5ファイルのパス
+  engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
+  # --- 評価条件 ---
+  depth: 12
+  num_pv: 5 # 1局面あたりに取得する候補手の数

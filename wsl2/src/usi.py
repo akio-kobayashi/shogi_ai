@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
+import cshogi
+
 class UsiEngine:
     """USIプロトコルで将棋エンジンと通信するクラス。"""
     def __init__(self, engine_path: str) -> None:
@@ -99,6 +101,75 @@ class UsiEngine:
         except (ValueError, IndexError):
             pass
         return None, 0
+
+    def set_multipv(self, num_pv: int) -> None:
+        """MultiPVの値を設定する。"""
+        self._send(f"setoption name MultiPV value {num_pv}")
+
+    def get_multipv(self, sfen: str, depth: int, num_pv: int) -> list:
+        """
+        指定されたSFENの局面で、複数の指し手候補と評価値を取得する。
+        戻り値: 候補手の情報を含む辞書のリスト
+            [
+                {'multipv': 1, 'move': move_int, 'score': cp_val, 'is_mate': False},
+                {'multipv': 2, 'move': move_int, 'score': mate_ply, 'is_mate': True},
+                ...
+            ]
+        """
+        self._send("usinewgame")
+        self.set_multipv(num_pv)
+        self._send(f"position sfen {sfen.strip()}")
+        self._send(f"go depth {depth}")
+
+        results = {}
+        board = cshogi.Board(sfen) # USI文字列をパースするためにBoardオブジェクトが必要
+
+        while True:
+            line = self._readline(timeout=300.0)
+            if line is None:
+                raise TimeoutError("エンジンからの応答がタイムアウトしました。")
+
+            if line.startswith("info") and "multipv" in line:
+                info = self._parse_multipv_info(line, board)
+                if info:
+                    # 同じmultipvの結果が複数来ることがあるので、常に上書きする
+                    results[info['multipv']] = info
+
+            if line.startswith("bestmove"):
+                break
+        
+        # multipvの値でソートして返す
+        sorted_results = sorted(results.values(), key=lambda x: x['multipv'])
+        return sorted_results
+
+    def _parse_multipv_info(self, line: str, board: cshogi.Board) -> Optional[dict]:
+        """MultiPVのinfo行をパースする。"""
+        parts = line.split()
+        try:
+            if "multipv" in parts and "score" in parts and "pv" in parts:
+                pv_idx = parts.index("pv")
+                if len(parts) <= pv_idx + 1:
+                    return None # pvの後に指し手がない
+
+                move_usi = parts[pv_idx + 1]
+                move_int = board.move_from_usi(move_usi)
+
+                mpv_idx = parts.index("multipv")
+                multipv = int(parts[mpv_idx + 1])
+
+                score_idx = parts.index("score")
+                score_type = parts[score_idx + 1]
+                score_value = int(parts[score_idx + 2])
+
+                return {
+                    'multipv': multipv,
+                    'move': move_int,
+                    'score': score_value,
+                    'is_mate': score_type == 'mate'
+                }
+        except (ValueError, IndexError):
+            pass
+        return None
 
     def quit(self) -> None:
         """エンジンを終了させる。"""

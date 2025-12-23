@@ -204,7 +204,7 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
     if not Path(args.input_csv).exists():
         sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
 
-    print(f"--- データセット生成を開始 ---")
+    print(f"--- .bin データセット生成を開始 ---")
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         all_positions = list(csv.DictReader(f))
     
@@ -221,13 +221,95 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.format == 'bin':
-        write_bin_file(train_positions, str(output_dir / "train.bin"))
-        write_bin_file(val_positions, str(output_dir / "val.bin"))
-    elif args.format == 'hdf5':
-        print("HDF5の書き込み処理は現在実装されていません。")
+    write_bin_file(train_positions, str(output_dir / "train.bin"))
+    write_bin_file(val_positions, str(output_dir / "val.bin"))
 
     print("\nすべての処理が完了しました。")
+
+def run_build_h5(args: argparse.Namespace) -> None:
+    """
+    フィルタリング済みCSVを元に、階層的なHDF5データセットを生成する。
+    """
+    from usi import UsiEngine
+    try:
+        import h5py
+    except ImportError:
+        sys.exit("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。")
+
+    if not Path(args.input_csv).exists():
+        sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
+    if not Path(args.engine_path).exists():
+        sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
+
+    print("--- HDF5データセット構築開始 ---")
+    print(f"入力ファイル: {args.input_csv}")
+    print(f"出力ファイル: {args.output_h5}")
+
+    try:
+        engine = UsiEngine(str(args.engine_path))
+        print("USIエンジン準備完了。")
+    except Exception as e:
+        sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
+
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
+        games_to_process = list(csv.DictReader(f_in))
+
+    # HDF5で使用するデータ型を定義
+    candidate_dtype = np.dtype([
+        ('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)
+    ])
+    position_dtype = np.dtype([
+        ('ply', np.uint16),
+        ('psv', cshogi.PackedSfenValue),
+        ('is_check', np.bool_),
+        ('candidates', h5py.vlen_dtype(candidate_dtype))
+    ])
+
+    with h5py.File(args.output_h5, 'w') as f_out:
+        print(f"{len(games_to_process)}対局の処理を開始します。")
+        for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
+            game_group = f_out.create_group(f"game_{i}")
+            
+            # メタデータをHDF5グループの属性として保存
+            for key, value in game_meta.items():
+                game_group.attrs[key] = value
+
+            try:
+                csa_path = game_meta['file_path']
+                kif_index = int(game_meta['kif_index'])
+                
+                kif = list(cshogi.CSA.Parser.parse_file(csa_path))[kif_index]
+                
+                board = cshogi.Board(kif.sfen)
+                game_positions_data = []
+
+                for ply, move in enumerate(kif.moves, 1):
+                    sfen = board.sfen()
+                    
+                    candidates_info = engine.get_multipv(sfen, args.depth, args.num_pv)
+                    
+                    candidates_list = []
+                    for cand in candidates_info:
+                        candidates_list.append((cand['move'], cand['score'], cand['is_mate']))
+                    
+                    pos_struct = np.zeros(1, dtype=position_dtype)
+                    pos_struct[0]['ply'] = ply
+                    board.to_psfen(pos_struct[0]['psv'])
+                    pos_struct[0]['is_check'] = board.is_check()
+                    pos_struct[0]['candidates'] = np.array(candidates_list, dtype=candidate_dtype)
+                    
+                    game_positions_data.append(pos_struct[0])
+                    
+                    board.push(move)
+
+                if game_positions_data:
+                    game_group.create_dataset('positions', data=np.array(game_positions_data, dtype=position_dtype), compression='gzip')
+
+            except Exception as e:
+                print(f"\n対局処理エラー: {game_meta.get('file_path')} ({e})", file=sys.stderr)
+
+    engine.quit()
+    print("\nHDF5データセットの構築が完了しました。")
 
 # ================================
 # main
@@ -268,12 +350,20 @@ def main() -> None:
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
     # --- 'generate' コマンド ---
-    generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データを生成します。")
+    generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
-    generate_parser.add_argument("--format", choices=['bin', 'hdf5'], default='bin')
-    generate_parser.add_argument("--val-split", type=float, default=0.1)
+    generate_parser.add_argument("--val-split", type=float)
     generate_parser.set_defaults(func=generate_datasets_logic)
+
+    # --- 'build-h5' コマンド ---
+    build_h5_parser = subparsers.add_parser("build-h5", help="フィルタリング済みCSVから階層的なHDF5データセットを生成します。")
+    build_h5_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
+    build_h5_parser.add_argument("--output-h5", help="出力するHDF5ファイルのパス。")
+    build_h5_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
+    build_h5_parser.add_argument("--depth", type=int, default=10)
+    build_h5_parser.add_argument("--num-pv", type=int, default=5, help="1局面あたりに取得する候補手の数 (MultiPV)。")
+    build_h5_parser.set_defaults(func=run_build_h5)
 
     # --- 引数のパースと設定の上書き ---
     temp_args, _ = parser.parse_known_args()
