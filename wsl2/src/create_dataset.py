@@ -59,9 +59,30 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    for i, kif in enumerate(parser.parse_file(str(csa_path))):
-                        if kif.ratings and len(kif.ratings) >= 2:
-                            writer.writerow([str(csa_path), i, kif.black_player, kif.white_player, kif.ratings[0], kif.ratings[1], kif.win, len(kif.moves)])
+                    try:
+                    # parse_fileはジェネレータを返す
+                    kifs = parser.parse_file(str(csa_path))
+                    for i, kif in enumerate(kifs):
+                        # kifがパースされた後、parserオブジェクトからプレイヤー名を取得
+                        black_player = parser.players[0]
+                        white_player = parser.players[1]
+
+                        # レーティング情報がない場合はスキップ
+                        if not kif.ratings or len(kif.ratings) < 2:
+                            continue
+                        
+                        rating_b, rating_w = kif.ratings
+                        
+                        # kif.win -> 1:先手勝ち, 2:後手勝ち, 0:引き分け
+                        game_result = kif.win
+                        total_moves = len(kif.moves)
+
+                        writer.writerow([
+                            str(csa_path), i, black_player, white_player,
+                            rating_b, rating_w, game_result, total_moves
+                        ])
+
+                except Exception as e:
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
     print("フェーズ1: メタデータ抽出が完了しました。")
@@ -301,70 +322,97 @@ def main() -> None:
     parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
+    # --- 各サブコマンドのパーサーを定義 ---
     extract_parser = subparsers.add_parser("extract", help="CSAファイルから棋譜のメタデータを抽出します。")
     extract_parser.add_argument("--csa-dir", help="CSAファイルが格納されているルートディレクトリ。")
     extract_parser.add_argument("--output-dir", help="生成されたメタデータ(.csv)を保存するディレクトリ。")
+    extract_parser.add_argument("--metadata-csv", help="メタデータCSVの出力パス（デフォルト: <output-dir>/metadata.csv）。")
     extract_parser.set_defaults(func=extract_metadata)
 
     filter_parser = subparsers.add_parser("filter", help="メタデータCSVをフィルタリングします。")
     filter_parser.add_argument("--metadata-csv", help="入力となるメタデータCSVのパス。")
     filter_parser.add_argument("--output-csv", help="フィルタリング結果を保存するCSVのパス。")
-    filter_parser.add_argument("--min-rating", type=int)
-    filter_parser.add_argument("--max-rating", type=int)
-    filter_parser.add_argument("--max-rating-diff", type=int)
-    filter_parser.add_argument("--min-moves", type=int)
-    filter_parser.add_argument("--max-moves", type=int)
-    filter_parser.add_argument("--allowed-results", type=str)
+    filter_parser.add_argument("--min-rating", type=int, default=0)
+    filter_parser.add_argument("--max-rating", type=int, default=9999)
+    filter_parser.add_argument("--max-rating-diff", type=int, default=9999)
+    filter_parser.add_argument("--min-moves", type=int, default=0)
+    filter_parser.add_argument("--max-moves", type=int, default=999)
+    filter_parser.add_argument("--allowed-results", type=str, default="win,lose,draw")
     filter_parser.add_argument("--filter-by-rating-outcome", action='store_true')
     filter_parser.set_defaults(func=run_filter_metadata)
 
     label_parser = subparsers.add_parser("label", help="対局結果から評価値をラベリングします（エンジン不要）。")
     label_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     label_parser.add_argument("--output-csv", help="ラベリング結果を保存するCSVのパス。")
-    label_parser.add_argument("--score-scale", type=int)
+    label_parser.add_argument("--score-scale", type=int, default=600)
     label_parser.set_defaults(func=run_label)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="フィルタリング済みCSVの局面を評価します。")
     evaluate_parser.add_argument("--metadata-csv", help="入力となるフィルタリング済みCSVのパス。")
     evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
-    evaluate_parser.add_argument("--depth", type=int)
-    evaluate_parser.add_argument("--min-ply", type=int)
-    evaluate_parser.add_argument("--max-ply", type=int)
+    evaluate_parser.add_argument("--depth", type=int, default=10)
+    evaluate_parser.add_argument("--min-ply", type=int, default=0)
+    evaluate_parser.add_argument("--max-ply", type=int, default=999)
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
     generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
-    generate_parser.add_argument("--val-split", type=float)
+    generate_parser.add_argument("--val-split", type=float, default=0.1)
     generate_parser.set_defaults(func=generate_datasets_logic)
 
     build_h5_parser = subparsers.add_parser("build-h5", help="フィルタリング済みCSVから階層的なHDF5データセットを生成します。")
     build_h5_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     build_h5_parser.add_argument("--output-h5", help="出力するHDF5ファイルのパス。")
     build_h5_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
-    build_h5_parser.add_argument("--depth", type=int)
-    build_h5_parser.add_argument("--num-pv", type=int)
+    build_h5_parser.add_argument("--depth", type=int, default=10)
+    build_h5_parser.add_argument("--num-pv", type=int, default=5)
     build_h5_parser.set_defaults(func=run_build_h5)
 
+    # --- 引数のパースと設定の上書き ---
     temp_args, _ = parser.parse_known_args()
     config = {}
     if temp_args.config and Path(temp_args.config).exists():
+        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
         with open(temp_args.config, 'r') as f:
             config = yaml.safe_load(f)
+    
     if temp_args.command and temp_args.command in config:
         subparsers.choices[temp_args.command].set_defaults(**config.get(temp_args.command, {}))
 
     args = parser.parse_args()
     
+    # --- パスの自動設定と必須引数のチェック ---
+    if hasattr(args, 'output_dir') and args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
     if args.command == "extract":
         args.output_dir = args.output_dir or "output_data"
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        args.metadata_csv = str(Path(args.output_dir) / "metadata.csv")
+        args.metadata_csv = args.metadata_csv or str(Path(args.output_dir) / "metadata.csv")
+        if not args.csa_dir: sys.exit("エラー: extractコマンドには --csa-dir の指定が必須です。")
     
-    if hasattr(args, 'metadata_csv') and not hasattr(args, 'input_csv'):
-        args.input_csv = args.metadata_csv
+    elif args.command == "filter":
+        if not (args.metadata_csv and args.output_csv):
+             sys.exit("エラー: filterコマンドには --metadata-csv と --output-csv の指定が必須です。")
 
+    elif args.command == "label":
+        if not (args.input_csv and args.output_csv):
+             sys.exit("エラー: labelコマンドには --input-csv と --output-csv の指定が必須です。")
+
+    elif args.command == "evaluate":
+        if not (args.metadata_csv and args.engine_path and args.output_csv):
+             sys.exit("エラー: evaluateコマンドには --metadata-csv, --engine-path, --output-csv の指定が必須です。")
+        args.input_csv = args.metadata_csv # エイリアス
+
+    elif args.command == "generate":
+        if not (args.input_csv and args.output_dir):
+             sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")
+
+    elif args.command == "build-h5":
+        if not (args.input_csv and args.output_h5 and args.engine_path):
+             sys.exit("エラー: build-h5コマンドには --input-csv, --output-h5, --engine-path の指定が必須です。")
+        
     args.func(args)
 
 if __name__ == "__main__":
