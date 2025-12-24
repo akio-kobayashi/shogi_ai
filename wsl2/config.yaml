@@ -1,9 +1,11 @@
 # create_dataset.py の設定ファイル
 #
 # 推奨ワークフロー:
-# [A] .bin 形式 (従来)
+# [A] .bin 形式 (エンジン評価あり)
 #   1. extract -> 2. filter -> 3. evaluate -> 4. generate
-# [B] .h5 形式 (拡張)
+# [B] .bin 形式 (エンジン評価なし)
+#   1. extract -> 2. filter -> 3. label -> 4. generate
+# [C] .h5 形式 (拡張)
 #   1. extract -> 2. filter -> 3. build-h5
 
 # 'extract' コマンドの設定
@@ -24,7 +26,13 @@ filter:
   allowed_results: "win,lose,draw"
   filter_by_rating_outcome: false
 
-# 'evaluate' コマンドの設定 (.bin形式のワークフローで使用)
+# 'label' コマンドの設定 (エンジン不要ワークフローで使用)
+label:
+  input_csv: "output_data/filtered.csv"   # filterコマンドの出力
+  output_csv: "output_data/labeled.csv" # generateコマンドへの入力となる
+  score_scale: 600                        # 勝敗結果から評価値を生成する際のスケール値
+
+# 'evaluate' コマンドの設定 (エンジン有りワークフローで使用)
 evaluate:
   metadata_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
   engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
@@ -34,13 +42,13 @@ evaluate:
   min_ply: 20
   max_ply: 512
 
-# 'generate' コマンドの設定 (.bin形式のワークフローで使用)
+# 'generate' コマンドの設定 (.bin生成ワークフローで使用)
 generate:
-  input_csv: "output_data/evaluated.csv" # evaluateコマンドの出力ファイルを指定
+  input_csv: "output_data/evaluated.csv" # evaluateまたはlabelの出力を指定
   output_dir: "output_data"
   val_split: 0.1 # 検証データの割合
 
-# 'build-h5' コマンドの設定 (.h5形式のワークフローで使用)
+# 'build-h5' コマンドの設定 (h5形式ワークフローで使用)
 build-h5:
   input_csv: "output_data/filtered.csv"   # filterコマンドの出力ファイルを指定
   output_h5: "output_data/dataset.h5"     # 出力HDF5ファイルのパス
