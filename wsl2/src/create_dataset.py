@@ -51,7 +51,10 @@ def extract_metadata(args: argparse.Namespace) -> None:
     if not csa_files: sys.exit(f"エラー: '{csa_root}' 内にCSAファイルが見つかりません。")
     print(f"{len(csa_files)}個のCSAファイルをスキャンします...")
     header = ['file_path', 'kif_index', 'black_player', 'white_player', 'rating_b', 'rating_w', 'game_result', 'total_moves']
-    parser = cshogi.Parser()
+    
+    # パーサーのインスタンスを生成
+    parser = cshogi.CSA.Parser()
+
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(header)
@@ -59,24 +62,22 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    # parse_csa_fileはParserインスタンスのリストを返す
-                    list_of_games = cshogi.CSA.Parser.parse_file(str(csa_path))
-
-                    for i, game in enumerate(list_of_games):
-                        # プレイヤー名、レーティングがなければスキップ
-                        if not (game.names and len(game.names) >= 2 and game.ratings and len(game.ratings) >= 2):
+                    # インスタンスメソッドとして parse_file を呼び出す
+                    for i, kif in enumerate(parser.parse_file(str(csa_path))):
+                        # プレイヤー名とレーティングをパーサーインスタンスから取得
+                        if not (parser.names and len(parser.names) >= 2 and parser.ratings and len(parser.ratings) >= 2):
                             continue
 
-                        black_player = game.names[0]
-                        white_player = game.names[1]
-                        rating_b = game.ratings[0]
-                        rating_w = game.ratings[1]
-                        total_moves = len(game.moves)
-                        
-                        # 勝敗結果を数値(1,2,0)に変換
-                        if game.win == cshogi.BLACK_WIN:
+                        black_player = parser.names[0]
+                        white_player = parser.names[1]
+                        rating_b = parser.ratings[0]
+                        rating_w = parser.ratings[1]
+
+                        # その他の情報はkifオブジェクトから取得
+                        total_moves = len(kif.moves)
+                        if kif.win == cshogi.BLACK_WIN:
                             game_result = 1
-                        elif game.win == cshogi.WHITE_WIN:
+                        elif kif.win == cshogi.WHITE_WIN:
                             game_result = 2
                         else: # cshogi.DRAW
                             game_result = 0
@@ -96,9 +97,9 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
     `extract`で生成されたメタデータCSVを読み込み、レーティング、手数、対局結果などの
     指定された条件に基づいて、学習対象とする棋譜を絞り込みます。
     """
-    if not Path(args.metadata_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.metadata_csv}' が見つかりません。")
+    if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     print(f"--- メタデータのフィルタリングを開始 ---")
-    with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f:
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         all_kifs, header = list(reader), reader.fieldnames
     print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
@@ -179,7 +180,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     指定されたUSIエンジンで評価値を計算します。結果は、局面のSFEN文字列と
     評価値が追加された新しいCSVとして出力されます。
     """
-    if not Path(args.metadata_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.metadata_csv}' が見つかりません。")
+    if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
     print(f"--- 局面評価を開始 ---")
     try:
@@ -187,7 +188,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
         print("USIエンジン準備完了。")
     except Exception as e:
         sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
-    with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f_in:
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         all_kifs_meta, header = list(reader), reader.fieldnames
     output_csv_path = Path(args.output_csv)
