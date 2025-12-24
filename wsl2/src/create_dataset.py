@@ -48,6 +48,8 @@ def extract_metadata(args: argparse.Namespace) -> None:
     print(f"{len(csa_files)}個のCSAファイルをスキャンします...")
     header = ['file_path', 'kif_index', 'black_player', 'white_player', 'rating_b', 'rating_w', 'game_result', 'total_moves']
     
+    parser = cshogi.Parser()
+
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(header)
@@ -55,22 +57,20 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    # cshogi.Parser.parse_csa_file は Parser インスタンスのリストを返す
-                    list_of_games = cshogi.Parser.parse_csa_file(str(csa_path))
-                    for i, game in enumerate(list_of_games):
-                        if not (game.names and len(game.names) >= 2 and game.ratings and len(game.ratings) >= 2):
+                    for i, kif in enumerate(parser.parse_csa_file(str(csa_path))):
+                        if not (parser.names and len(parser.names) >= 2 and parser.ratings and len(parser.ratings) >= 2):
                             continue
 
-                        if game.win == cshogi.BLACK_WIN:
+                        if kif.win == cshogi.BLACK_WIN:
                             game_result = 1
-                        elif game.win == cshogi.WHITE_WIN:
+                        elif kif.win == cshogi.WHITE_WIN:
                             game_result = 2
                         else:
                             game_result = 0
 
                         writer.writerow([
-                            str(csa_path), i, game.names[0], game.names[1],
-                            game.ratings[0], game.ratings[1], game_result, len(game.moves)
+                            str(csa_path), i, parser.names[0], parser.names[1],
+                            parser.ratings[0], parser.ratings[1], game_result, len(kif.moves)
                         ])
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
@@ -121,6 +121,7 @@ def run_label(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"ラベル付きデータを '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -130,8 +131,12 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_csa_file(csa_path)
+                    # 1ファイルに複数棋譜が含まれる場合があるため、一度すべてパースする
+                    all_kifs_in_file = list(parser.parse_csa_file(csa_path))
                     for meta in metas:
+                        # `meta`の`kif_index`に対応する棋譜オブジェクトを取得
+                        # `all_kifs_in_file`は0から始まるリストだが、`kif_index`はファイル内の通し番号
+                        # ここでは簡易的にインデックスとして扱うが、厳密な対応が必要な場合は注意
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         game_result = int(meta['game_result'])
                         board = cshogi.Board(kif.sfen)
@@ -169,6 +174,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"評価結果を '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -178,7 +184,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_csa_file(csa_path)
+                    all_kifs_in_file = list(parser.parse_csa_file(csa_path))
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         board = cshogi.Board(kif.sfen)
@@ -260,13 +266,14 @@ def run_build_h5(args: argparse.Namespace) -> None:
         games_to_process = list(csv.DictReader(f_in))
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
     position_dtype = np.dtype([('ply', np.uint16), ('psv', cshogi.PackedSfenValue), ('is_check', np.bool_), ('candidates', h5py.vlen_dtype(candidate_dtype))])
+    parser = cshogi.Parser()
     with h5py.File(args.output_h5, 'w') as f_out:
         print(f"{len(games_to_process)}対局の処理を開始します。")
         for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                game = cshogi.Parser.parse_csa_file(game_meta['file_path'])[int(game_meta['kif_index'])]
+                game = parser.parse_csa_file(game_meta['file_path'])[int(game_meta['kif_index'])]
                 board = cshogi.Board(game.sfen)
                 game_positions_data = []
                 for ply, move in enumerate(game.moves, 1):
