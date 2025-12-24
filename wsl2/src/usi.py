@@ -111,8 +111,8 @@ class UsiEngine:
         指定されたSFENの局面で、複数の指し手候補と評価値を取得する。
         戻り値: 候補手の情報を含む辞書のリスト
             [
-                {'multipv': 1, 'move': move_int, 'score': cp_val, 'is_mate': False},
-                {'multipv': 2, 'move': move_int, 'score': mate_ply, 'is_mate': True},
+                {'multipv': 1, 'move': (指し手), 'score': (評価値), 'is_mate': (詰みフラグ)},
+                {'multipv': 2, 'move': (指し手), 'score': (評価値), 'is_mate': (詰みフラグ)},
                 ...
             ]
         """

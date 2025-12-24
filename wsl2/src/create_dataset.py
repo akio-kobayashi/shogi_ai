@@ -1,4 +1,19 @@
 # -*- coding: utf-8 -*-
+"""
+CSA棋譜ファイルから、AIの学習データセットを生成する多機能スクリプト。
+
+本スクリプトは、複数のサブコマンドを通じて、段階的にデータセットを構築します。
+各コマンドは特定の役割を持っており、これらをパイプラインとして組み合わせることで、
+要件に応じた多様なデータセット（.bin形式、.h5形式）を生成できます。
+
+主なワークフロー:
+- .bin形式 (エンジン評価あり): extract -> filter -> evaluate -> generate
+- .bin形式 (エンジン評価なし): extract -> filter -> label -> generate
+- .h5形式 (高機能版):         extract -> filter -> build-h5
+
+各コマンドの詳細は、-hオプションで確認してください。
+設定は `wsl2/config.yaml` で一元管理することが推奨されます。
+"""
 import os
 import csv
 import random
@@ -23,6 +38,13 @@ from usi import UsiEngine
 # ================================
 
 def extract_metadata(args: argparse.Namespace) -> None:
+    """
+    [extractコマンド] CSAファイル群をスキャンし、棋譜のメタデータをCSVに書き出す。
+
+    指定されたディレクトリ内の全CSAファイルを再帰的に検索し、各棋譜のヘッダ情報
+    （プレイヤー名、レーティング、勝敗結果など）を抽出して、一行のCSVレコードとして
+    出力します。この処理はデータセット構築の最初のステップとなります。
+    """
     csa_root, csv_path = args.csa_dir, args.metadata_csv
     print(f"フェーズ1: メタデータ抽出を開始します。出力先: {csv_path}")
     csa_files = list(Path(csa_root).rglob('*.csa')) + list(Path(csa_root).rglob('*.CSA'))
@@ -45,6 +67,12 @@ def extract_metadata(args: argparse.Namespace) -> None:
     print("フェーズ1: メタデータ抽出が完了しました。")
 
 def run_filter_metadata(args: argparse.Namespace) -> None:
+    """
+    [filterコマンド] メタデータCSVをフィルタリングし、新しいCSVファイルを出力する。
+
+    `extract`で生成されたメタデータCSVを読み込み、レーティング、手数、対局結果などの
+    指定された条件に基づいて、学習対象とする棋譜を絞り込みます。
+    """
     if not Path(args.metadata_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.metadata_csv}' が見つかりません。")
     print(f"--- メタデータのフィルタリングを開始 ---")
     with open(args.metadata_csv, 'r', newline='', encoding='utf-8') as f:
@@ -76,11 +104,14 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
 
 def run_label(args: argparse.Namespace) -> None:
     """
-    フィルタリング済みCSVを元に、対局結果から評価値を付与し、SFEN付きCSVを生成する。
-    評価値は手番から見たもの。
+    [labelコマンド] エンジンを使わず、対局結果から評価値を付与（ラベリング）する。
+
+    フィルタリング済みのCSVを入力とし、各棋譜の最終的な勝敗結果に基づいて、
+    すべての局面に一律の評価値を割り当てます。評価値は手番を考慮して、
+    手番側から見た勝ち（+）負け（-）として付与されます。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
-    print(f"--- ラベリング処理を開始 ---")
+    print("--- ラベリング処理を開始 ---")
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         all_kifs_meta, header = list(reader), reader.fieldnames
@@ -100,17 +131,14 @@ def run_label(args: argparse.Namespace) -> None:
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         game_result = int(meta['game_result'])
-                        
                         board = cshogi.Board(kif.sfen)
                         for ply, move in enumerate(kif.moves, 1):
-                            # 現在の手番から見たスコアを計算
-                            current_turn = board.turn # cshogi.BLACK (0) or cshogi.WHITE (1)
+                            current_turn = board.turn
                             score = 0
-                            if game_result == 1: # 先手勝ち
+                            if game_result == 1: # 先手勝ちの場合
                                 score = args.score_scale if current_turn == cshogi.BLACK else -args.score_scale
-                            elif game_result == 2: # 後手勝ち
+                            elif game_result == 2: # 後手勝ちの場合
                                 score = -args.score_scale if current_turn == cshogi.BLACK else args.score_scale
-                            
                             sfen = board.sfen()
                             meta_with_eval = meta.copy()
                             meta_with_eval.update({'ply': ply, 'eval_score_cp': score, 'sfen': sfen})
@@ -118,10 +146,16 @@ def run_label(args: argparse.Namespace) -> None:
                             board.push(move)
                 except Exception as e:
                     print(f"\nラベリング処理エラー: {csa_path} ({e})", file=sys.stderr)
-    
     print("ラベリング処理が完了しました。")
 
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
+    """
+    [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
+
+    フィルタリング済みのCSVを入力とし、記載されている棋譜の各局面について、
+    指定されたUSIエンジンで評価値を計算します。結果は、局面のSFEN文字列と
+    評価値が追加された新しいCSVとして出力されます。
+    """
     if not Path(args.metadata_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.metadata_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
     print(f"--- 局面評価を開始 ---")
@@ -168,6 +202,9 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     print("局面評価が完了しました。")
 
 def write_bin_file(positions: list, output_path: str):
+    """
+    局面情報のリストから、PackedSfenValue形式の.binファイルを生成する。
+    """
     print(f"データセット '{output_path}' の生成を開始 (対象局面数: {len(positions)})")
     board = cshogi.Board()
     psv = np.zeros(1, dtype=cshogi.PackedSfenValue)
@@ -187,6 +224,13 @@ def write_bin_file(positions: list, output_path: str):
                 print(f"\nデータ書き込みエラー: {pos} ({e})", file=sys.stderr)
 
 def generate_datasets_logic(args: argparse.Namespace) -> None:
+    """
+    [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
+
+    `evaluate`または`label`コマンドで生成されたCSVを入力とし、データをシャッフルして
+    訓練データと検証データに分割した後、PackedSfenValue形式のバイナリファイル
+    (`train.bin`, `val.bin`)として出力する。
+    """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     print(f"--- .bin データセット生成を開始 ---")
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
@@ -204,6 +248,12 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
     print("\nすべての処理が完了しました。")
 
 def run_build_h5(args: argparse.Namespace) -> None:
+    """
+    [build-h5コマンド] フィルタリング済みCSVから、階層的なHDF5データセットを生成する。
+
+    このコマンドはエンジン評価とファイル生成を同時に行い、MultiPVによる複数の指し手候補や
+    王手情報など、リッチなメタデータを含むHDF5ファイルを生成する。
+    """
     try: import h5py
     except ImportError: sys.exit("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。")
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
@@ -246,6 +296,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
     print("\nHDF5データセットの構築が完了しました。")
 
 def main() -> None:
+    """スクリプトのエントリポイント。引数をパースして各処理を実行する。"""
     parser = argparse.ArgumentParser(description="CSA棋譜から学習データを生成するスクリプト。", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")

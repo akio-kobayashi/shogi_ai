@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-概要:
-`create_dataset.py`で生成されたメタデータCSVファイルを分析するスクリプト。
+棋譜のメタデータCSVファイルを分析するためのユーティリティスクリプト。
 
-機能:
-1. stats: データセットの基本統計量（棋譜数、レーティング分布など）を表示する。
-2. plot: データの分布を可視化し、画像ファイルとして保存する。
-3. simulate: `create_dataset.py`の`filter`コマンドとほぼ同じ条件でフィルタリングし、
-   適用後の棋譜数をシミュレーションする。
+`create_dataset.py`の`extract`や`filter`コマンドで生成されたCSVファイルを対象に、
+統計情報の表示、データの可視化、フィルタリング条件のシミュレーションなどを行います。
+データセットの特性を把握し、フィルタリング条件を調整するのに役立ちます。
+
+サブコマンド:
+- stats: 基本統計量を表示します。
+- plot: 分布をグラフで可視化します。
+- simulate: フィルタリング条件を試行し、結果の棋譜数を表示します。
 """
 import argparse
 import sys
@@ -26,7 +28,7 @@ except ImportError:
 
 
 def run_stats(args: argparse.Namespace) -> None:
-    """基本統計量を計算して表示する。"""
+    """[statsコマンド] データセットの基本統計量を計算して表示する。"""
     print("--- 基本統計量の計算 ---")
     df = pd.read_csv(args.metadata_csv)
 
@@ -35,9 +37,7 @@ def run_stats(args: argparse.Namespace) -> None:
     print(df[['rating_b', 'rating_w', 'total_moves']].describe())
 
     print("\n--- 勝敗結果の分布 ---")
-    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
     result_map = {1: '先手勝ち', 2: '後手勝ち', 0: '引き分け'}
-    # CSVのgame_resultは文字列として読み込まれることがあるため、数値に変換
     df['game_result'] = pd.to_numeric(df['game_result'])
     result_counts = df['game_result'].value_counts().rename(index=result_map)
     print(result_counts)
@@ -46,7 +46,7 @@ def run_stats(args: argparse.Namespace) -> None:
 
 
 def run_plot(args: argparse.Namespace) -> None:
-    """データの分布をプロットし、画像として保存する。"""
+    """[plotコマンド] データの分布をプロットし、画像として保存する。"""
     print("--- 分布の可視化 ---")
     df = pd.read_csv(args.metadata_csv)
     output_dir = Path(args.output_dir)
@@ -81,17 +81,15 @@ def run_plot(args: argparse.Namespace) -> None:
 
 
 def run_simulate(args: argparse.Namespace) -> None:
-    """フィルタリング条件をシミュレーションする。"""
+    """[simulateコマンド] フィルタリング条件を適用した結果をシミュレーションする。"""
     print("--- フィルタリングシミュレーション ---")
     df = pd.read_csv(args.metadata_csv)
     
     print(f"フィルタリング前の総棋譜数: {len(df)}")
 
-    # cshogi基準(1:先手勝ち, 2:後手勝ち, 0:引き分け)に合わせる
     result_map = {'win': 1, 'lose': 2, 'draw': 0}
     allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
 
-    # pandasのクエリでフィルタリング
     queries = []
     queries.append(f"({args.min_rating} <= rating_b <= {args.max_rating})")
     queries.append(f"({args.min_rating} <= rating_w <= {args.max_rating})")
@@ -117,6 +115,7 @@ def run_simulate(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """スクリプトのエントリポイント。引数をパースして各処理を実行する。"""
     parser = argparse.ArgumentParser(
         description="メタデータCSVを分析するスクリプト。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
