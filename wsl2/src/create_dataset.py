@@ -59,20 +59,31 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    for i, kif in enumerate(parser.parse_file(str(csa_path))):
-                        # kifがパースされた後、parserオブジェクトからプレイヤー名を取得
-                        black_player = parser.players[0]
-                        white_player = parser.players[1]
+                    # parse_csa_fileはParserインスタンスのリストを返す
+                    list_of_games = cshogi.Parser.parse_csa_file(str(csa_path))
 
-                        # レーティング情報がない場合はスキップ
-                        if not kif.ratings or len(kif.ratings) < 2:
+                    for i, game in enumerate(list_of_games):
+                        # プレイヤー名、レーティングがなければスキップ
+                        if not (game.names and len(game.names) >= 2 and game.ratings and len(game.ratings) >= 2):
                             continue
+
+                        black_player = game.names[0]
+                        white_player = game.names[1]
+                        rating_b = game.ratings[0]
+                        rating_w = game.ratings[1]
+                        total_moves = len(game.moves)
                         
-                        rating_b, rating_w = kif.ratings
-                        
+                        # 勝敗結果を数値(1,2,0)に変換
+                        if game.win == cshogi.BLACK_WIN:
+                            game_result = 1
+                        elif game.win == cshogi.WHITE_WIN:
+                            game_result = 2
+                        else: # cshogi.DRAW
+                            game_result = 0
+
                         writer.writerow([
                             str(csa_path), i, black_player, white_player,
-                            rating_b, rating_w, kif.win, len(kif.moves)
+                            rating_b, rating_w, game_result, total_moves
                         ])
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
@@ -139,7 +150,7 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = list(cshogi.CSA.Parser.parse_file(csa_path))
+                    all_kifs_in_file = list(cshogi.Parser.parse_csa_file(csa_path))
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         game_result = int(meta['game_result'])
@@ -191,7 +202,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = list(cshogi.CSA.Parser.parse_file(csa_path))
+                    all_kifs_in_file = list(cshogi.Parser.parse_csa_file(csa_path))
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         board = cshogi.Board(kif.sfen)
@@ -286,7 +297,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                kif = list(cshogi.CSA.Parser.parse_file(game_meta['file_path']))[int(game_meta['kif_index'])]
+                kif = list(cshogi.Parser.parse_csa_file(game_meta['file_path']))[int(game_meta['kif_index'])]
                 board = cshogi.Board(kif.sfen)
                 game_positions_data = []
                 for ply, move in enumerate(kif.moves, 1):
