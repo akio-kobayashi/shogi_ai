@@ -40,10 +40,6 @@ from usi import UsiEngine
 def extract_metadata(args: argparse.Namespace) -> None:
     """
     [extractコマンド] CSAファイル群をスキャンし、棋譜のメタデータをCSVに書き出す。
-
-    指定されたディレクトリ内の全CSAファイルを再帰的に検索し、各棋譜のヘッダ情報
-    （プレイヤー名、レーティング、勝敗結果など）を抽出して、一行のCSVレコードとして
-    出力します。この処理はデータセット構築の最初のステップとなります。
     """
     csa_root, csv_path = args.csa_dir, args.metadata_csv
     print(f"フェーズ1: メタデータ抽出を開始します。出力先: {csv_path}")
@@ -52,9 +48,6 @@ def extract_metadata(args: argparse.Namespace) -> None:
     print(f"{len(csa_files)}個のCSAファイルをスキャンします...")
     header = ['file_path', 'kif_index', 'black_player', 'white_player', 'rating_b', 'rating_w', 'game_result', 'total_moves']
     
-    # パーサーのインスタンスを生成
-    parser = cshogi.CSA.Parser()
-
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(header)
@@ -62,29 +55,22 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    # インスタンスメソッドとして parse_file を呼び出す
-                    for i, kif in enumerate(parser.parse_file(str(csa_path))):
-                        # プレイヤー名とレーティングをパーサーインスタンスから取得
-                        if not (parser.names and len(parser.names) >= 2 and parser.ratings and len(parser.ratings) >= 2):
+                    # cshogi.Parser.parse_csa_file は Parser インスタンスのリストを返す
+                    list_of_games = cshogi.Parser.parse_csa_file(str(csa_path))
+                    for i, game in enumerate(list_of_games):
+                        if not (game.names and len(game.names) >= 2 and game.ratings and len(game.ratings) >= 2):
                             continue
 
-                        black_player = parser.names[0]
-                        white_player = parser.names[1]
-                        rating_b = parser.ratings[0]
-                        rating_w = parser.ratings[1]
-
-                        # その他の情報はkifオブジェクトから取得
-                        total_moves = len(kif.moves)
-                        if kif.win == cshogi.BLACK_WIN:
+                        if game.win == cshogi.BLACK_WIN:
                             game_result = 1
-                        elif kif.win == cshogi.WHITE_WIN:
+                        elif game.win == cshogi.WHITE_WIN:
                             game_result = 2
-                        else: # cshogi.DRAW
+                        else:
                             game_result = 0
 
                         writer.writerow([
-                            str(csa_path), i, black_player, white_player,
-                            rating_b, rating_w, game_result, total_moves
+                            str(csa_path), i, game.names[0], game.names[1],
+                            game.ratings[0], game.ratings[1], game_result, len(game.moves)
                         ])
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
@@ -93,9 +79,6 @@ def extract_metadata(args: argparse.Namespace) -> None:
 def run_filter_metadata(args: argparse.Namespace) -> None:
     """
     [filterコマンド] メタデータCSVをフィルタリングし、新しいCSVファイルを出力する。
-
-    `extract`で生成されたメタデータCSVを読み込み、レーティング、手数、対局結果などの
-    指定された条件に基づいて、学習対象とする棋譜を絞り込みます。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     print(f"--- メタデータのフィルタリングを開始 ---")
@@ -129,10 +112,6 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
 def run_label(args: argparse.Namespace) -> None:
     """
     [labelコマンド] エンジンを使わず、対局結果から評価値を付与（ラベリング）する。
-
-    フィルタリング済みのCSVを入力とし、各棋譜の最終的な勝敗結果に基づいて、
-    すべての局面に一律の評価値を割り当てます。評価値は手番を考慮して、
-    手番側から見た勝ち（+）負け（-）として付与されます。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     print("--- ラベリング処理を開始 ---")
@@ -151,7 +130,7 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = list(cshogi.CSA.Parser.parse_file(csa_path))
+                    all_kifs_in_file = cshogi.Parser.parse_csa_file(csa_path)
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         game_result = int(meta['game_result'])
@@ -159,9 +138,9 @@ def run_label(args: argparse.Namespace) -> None:
                         for ply, move in enumerate(kif.moves, 1):
                             current_turn = board.turn
                             score = 0
-                            if game_result == 1: # 先手勝ちの場合
+                            if game_result == 1:
                                 score = args.score_scale if current_turn == cshogi.BLACK else -args.score_scale
-                            elif game_result == 2: # 後手勝ちの場合
+                            elif game_result == 2:
                                 score = -args.score_scale if current_turn == cshogi.BLACK else args.score_scale
                             sfen = board.sfen()
                             meta_with_eval = meta.copy()
@@ -175,10 +154,6 @@ def run_label(args: argparse.Namespace) -> None:
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
     [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
-
-    フィルタリング済みのCSVを入力とし、記載されている棋譜の各局面について、
-    指定されたUSIエンジンで評価値を計算します。結果は、局面のSFEN文字列と
-    評価値が追加された新しいCSVとして出力されます。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
@@ -203,7 +178,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = list(cshogi.CSA.Parser.parse_file(csa_path))
+                    all_kifs_in_file = cshogi.Parser.parse_csa_file(csa_path)
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         board = cshogi.Board(kif.sfen)
@@ -250,10 +225,6 @@ def write_bin_file(positions: list, output_path: str):
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
-
-    `evaluate`または`label`コマンドで生成されたCSVを入力とし、データをシャッフルして
-    訓練データと検証データに分割した後、PackedSfenValue形式のバイナリファイル
-    (`train.bin`, `val.bin`)として出力する。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     print(f"--- .bin データセット生成を開始 ---")
@@ -274,9 +245,6 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
 def run_build_h5(args: argparse.Namespace) -> None:
     """
     [build-h5コマンド] フィルタリング済みCSVから、階層的なHDF5データセットを生成する。
-
-    このコマンドはエンジン評価とファイル生成を同時に行い、MultiPVによる複数の指し手候補や
-    王手情報など、リッチなメタデータを含むHDF5ファイルを生成する。
     """
     try: import h5py
     except ImportError: sys.exit("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。")
@@ -298,10 +266,10 @@ def run_build_h5(args: argparse.Namespace) -> None:
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                kif = list(cshogi.CSA.Parser.parse_file(game_meta['file_path']))[int(game_meta['kif_index'])]
-                board = cshogi.Board(kif.sfen)
+                game = cshogi.Parser.parse_csa_file(game_meta['file_path'])[int(game_meta['kif_index'])]
+                board = cshogi.Board(game.sfen)
                 game_positions_data = []
-                for ply, move in enumerate(kif.moves, 1):
+                for ply, move in enumerate(game.moves, 1):
                     sfen = board.sfen()
                     candidates_info = engine.get_multipv(sfen, args.depth, args.num_pv)
                     candidates_list = [(cand['move'], cand['score'], cand['is_mate']) for cand in candidates_info]
@@ -325,7 +293,6 @@ def main() -> None:
     parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
-    # --- 各サブコマンドのパーサーを定義 ---
     extract_parser = subparsers.add_parser("extract", help="CSAファイルから棋譜のメタデータを抽出します。")
     extract_parser.add_argument("--csa-dir", help="CSAファイルが格納されているルートディレクトリ。")
     extract_parser.add_argument("--output-dir", help="生成されたメタデータ(.csv)を保存するディレクトリ。")
@@ -373,44 +340,34 @@ def main() -> None:
     build_h5_parser.add_argument("--num-pv", type=int, default=5)
     build_h5_parser.set_defaults(func=run_build_h5)
 
-    # --- 引数のパースと設定の上書き ---
     temp_args, _ = parser.parse_known_args()
     config = {}
     if temp_args.config and Path(temp_args.config).exists():
-        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
         with open(temp_args.config, 'r') as f:
             config = yaml.safe_load(f)
-    
     if temp_args.command and temp_args.command in config:
         subparsers.choices[temp_args.command].set_defaults(**config.get(temp_args.command, {}))
 
     args = parser.parse_args()
     
-    # --- パスの自動設定と必須引数のチェック ---
-    if hasattr(args, 'output_dir') and args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
     if args.command == "extract":
         args.output_dir = args.output_dir or "output_data"
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         args.metadata_csv = args.metadata_csv or str(Path(args.output_dir) / "metadata.csv")
         if not args.csa_dir: sys.exit("エラー: extractコマンドには --csa-dir の指定が必須です。")
     
     elif args.command == "filter":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: filterコマンドには --input-csv と --output-csv の指定が必須です。")
-
     elif args.command == "label":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: labelコマンドには --input-csv と --output-csv の指定が必須です。")
-
     elif args.command == "evaluate":
         if not (args.input_csv and args.engine_path and args.output_csv):
              sys.exit("エラー: evaluateコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
-
     elif args.command == "generate":
         if not (args.input_csv and args.output_dir):
              sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")
-
     elif args.command == "build-h5":
         if not (args.input_csv and args.output_h5 and args.engine_path):
              sys.exit("エラー: build-h5コマンドには --input-csv, --output-h5, --engine-path の指定が必須です。")
