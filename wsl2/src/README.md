@@ -2,82 +2,65 @@
 
 ## 概要
 
-`create_dataset.py` は、CSA (Computer Shogi Association) 形式の棋譜ファイルから、[nodchip/nnue-pytorch](https://github.com/nodchip/nnue-pytorch) などで利用可能な学習データセットを生成するためのスクリプトです。
+`create_dataset.py` は、CSA (Computer Shogi Association) 形式の棋譜ファイルから、AIの学習データセットを生成するための多機能スクリプトです。
+スクリプトは複数のサブコマンドで構成され、これらをパイプラインとして組み合わせることで、要件に応じた多様なデータセットを生成できます。
 
-生成するデータセットの形式に応じて、2つのワークフローが用意されています。
+## ワークフロー
 
-*   **`.bin`形式 (従来形式):** `extract` → `filter` → `evaluate` → `generate`
-*   **`.h5`形式 (拡張形式):** `extract` → `filter` → `build-h5`
+本スクリプトは、生成したいデータセットの種類に応じて、主に3つのワークフローをサポートします。
 
-拡張形式であるHDF5 (`.h5`) ファイルには、MultiPVによる複数の指し手候補や王手情報など、よりリッチなメタデータが階層的に格納されます。
+### A) `.bin`形式 (エンジン評価あり)
+`extract` → `filter` → `evaluate` → `generate`
 
-## コマンドとワークフロー
+### B) `.bin`形式 (エンジン評価なし)
+`extract` → `filter` → `label` → `generate`
 
-### 設定ファイル (`wsl2/config.yaml`)
+### C) `.h5`形式 (高機能版)
+`extract` → `filter` → `build-h5`
 
-各コマンドの多くのオプションは、`wsl2/config.yaml`にまとめて記述することができます。
-`-c` (または `--config`) オプションでこのファイルを指定することで、コマンド実行が容易になります。
+---
 
+## コマンド詳細
+
+### `extract`
+CSAファイル群から全棋譜のメタデータを抽出し、`metadata.csv`を生成します。
+```bash
+python src/create_dataset.py extract --csa-dir <棋譜ディレクトリ>
+```
+
+### `filter`
+`metadata.csv`をレーティングや手数などの条件でフィルタリングし、`filtered.csv`を生成します。
+```bash
+python src/create_dataset.py filter --input-csv <入力CSV> --output-csv <出力CSV> [フィルタオプション]
+```
+
+### `label`
+エンジンを使わず、対局結果のみから評価値を付与（ラベリング）します。出力は`evaluate`と同じ形式のCSVです。
+```bash
+python src/create_dataset.py label --input-csv <フィルタ済みCSV> --output-csv <ラベル付きCSV>
+```
+
+### `evaluate`
+`filter`または`label`で生成されたCSVを元に、USIエンジンで各局面を評価し、評価値とSFENを含む`evaluated.csv`を生成します。
+```bash
+python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス>
+```
+
+### `generate`
+`evaluate`または`label`で生成された評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
+```bash
+python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
+```
+
+### `build-h5`
+`filter`で生成されたCSVを元に、USIエンジンでMultiPVを含む詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
+```bash
+python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --output-h5 <出力H5ファイル> --engine-path <エンジンパス>
+```
+
+---
+## 設定ファイル (`wsl2/config.yaml`)
+各コマンドのオプションは`wsl2/config.yaml`にまとめて記述することで、コマンドライン入力を簡略化できます。
 ```bash
 python src/create_dataset.py -c wsl2/config.yaml <command>
 ```
-
----
-
-### ワークフローA: `.bin`形式データセットの生成
-
-#### ステップ1: `extract`
-CSAファイル群から全棋譜のメタデータを抽出し、`metadata.csv`を生成します。
-```bash
-python src/create_dataset.py -c wsl2/config.yaml extract
-```
-
-#### ステップ2: `filter`
-`metadata.csv`をレーティングや手数などの条件でフィルタリングし、`filtered.csv`を生成します。
-```bash
-python src/create_dataset.py -c wsl2/config.yaml filter
-```
-
-#### ステップ3: `evaluate`
-`filtered.csv`に含まれる棋譜の各局面をUSIエンジンで評価し、評価値とSFEN文字列を含む`evaluated.csv`を生成します。
-```bash
-python src/create_dataset.py -c wsl2/config.yaml evaluate
-```
-
-#### ステップ4: `generate`
-`evaluated.csv`を元に、最終的な学習データセット `train.bin` と `val.bin` を生成します。
-```bash
-python src/create_dataset.py -c wsl2/config.yaml generate
-```
-
----
-
-### ワークフローB: `.h5`形式データセットの生成
-
-#### ステップ1: `extract`
-(ワークフローAと共通)
-```bash
-python src/create_dataset.py -c wsl2/config.yaml extract
-```
-
-#### ステップ2: `filter`
-(ワークフローAと共通)
-```bash
-python src/create_dataset.py -c wsl2/config.yaml filter
-```
-
-#### ステップ3: `build-h5`
-`filtered.csv`を元に、USIエンジンでMultiPVを含む詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
-```bash
-python src/create_dataset.py -c wsl2/config.yaml build-h5
-```
-このコマンドは、内部でエンジン評価とファイル生成を同時に行います。
-
-### HDF5ファイルの構造
-
-`build-h5`コマンドによって生成されるHDF5ファイルは、以下のような階層構造を持ちます。
-
-*   各「対局」が1つの**グループ** (`/game_0`, `/game_1`, ...) として格納されます。
-*   各対局グループの**属性 (Attributes)**に、プレイヤー名やレーティングなどの対局メタデータが保存されます。
-*   各対局グループ内に、その対局の全局面の情報を格納した`positions`**データセット**が作成されます。
-*   `positions`データセットの各行が1局面に対応し、その中には`PackedSfenValue`、王手フラグ、そして**可変長の指し手候補リスト**などが構造体として格納されます。

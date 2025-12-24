@@ -59,10 +59,7 @@ def extract_metadata(args: argparse.Namespace) -> None:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    try:
-                    # parse_fileはジェネレータを返す
-                    kifs = parser.parse_file(str(csa_path))
-                    for i, kif in enumerate(kifs):
+                    for i, kif in enumerate(parser.parse_file(str(csa_path))):
                         # kifがパースされた後、parserオブジェクトからプレイヤー名を取得
                         black_player = parser.players[0]
                         white_player = parser.players[1]
@@ -73,16 +70,10 @@ def extract_metadata(args: argparse.Namespace) -> None:
                         
                         rating_b, rating_w = kif.ratings
                         
-                        # kif.win -> 1:先手勝ち, 2:後手勝ち, 0:引き分け
-                        game_result = kif.win
-                        total_moves = len(kif.moves)
-
                         writer.writerow([
                             str(csa_path), i, black_player, white_player,
-                            rating_b, rating_w, game_result, total_moves
+                            rating_b, rating_w, kif.win, len(kif.moves)
                         ])
-
-                except Exception as e:
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
     print("フェーズ1: メタデータ抽出が完了しました。")
@@ -330,7 +321,7 @@ def main() -> None:
     extract_parser.set_defaults(func=extract_metadata)
 
     filter_parser = subparsers.add_parser("filter", help="メタデータCSVをフィルタリングします。")
-    filter_parser.add_argument("--metadata-csv", help="入力となるメタデータCSVのパス。")
+    filter_parser.add_argument("--input-csv", help="入力となるメタデータCSVのパス。")
     filter_parser.add_argument("--output-csv", help="フィルタリング結果を保存するCSVのパス。")
     filter_parser.add_argument("--min-rating", type=int, default=0)
     filter_parser.add_argument("--max-rating", type=int, default=9999)
@@ -348,7 +339,7 @@ def main() -> None:
     label_parser.set_defaults(func=run_label)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="フィルタリング済みCSVの局面を評価します。")
-    evaluate_parser.add_argument("--metadata-csv", help="入力となるフィルタリング済みCSVのパス。")
+    evaluate_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
     evaluate_parser.add_argument("--depth", type=int, default=10)
@@ -393,17 +384,16 @@ def main() -> None:
         if not args.csa_dir: sys.exit("エラー: extractコマンドには --csa-dir の指定が必須です。")
     
     elif args.command == "filter":
-        if not (args.metadata_csv and args.output_csv):
-             sys.exit("エラー: filterコマンドには --metadata-csv と --output-csv の指定が必須です。")
+        if not (args.input_csv and args.output_csv):
+             sys.exit("エラー: filterコマンドには --input-csv と --output-csv の指定が必須です。")
 
     elif args.command == "label":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: labelコマンドには --input-csv と --output-csv の指定が必須です。")
 
     elif args.command == "evaluate":
-        if not (args.metadata_csv and args.engine_path and args.output_csv):
-             sys.exit("エラー: evaluateコマンドには --metadata-csv, --engine-path, --output-csv の指定が必須です。")
-        args.input_csv = args.metadata_csv # エイリアス
+        if not (args.input_csv and args.engine_path and args.output_csv):
+             sys.exit("エラー: evaluateコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
 
     elif args.command == "generate":
         if not (args.input_csv and args.output_dir):

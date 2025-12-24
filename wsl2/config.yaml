@@ -12,10 +12,11 @@
 extract:
   csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリ
   output_dir: "output_data"
+  metadata_csv: "output_data/metadata.csv"
 
 # 'filter' コマンドの設定
 filter:
-  metadata_csv: "output_data/metadata.csv"
+  input_csv: "output_data/metadata.csv"
   output_csv: "output_data/filtered.csv"
   # --- フィルタリング条件 ---
   min_rating: 3000
@@ -34,7 +35,7 @@ label:
 
 # 'evaluate' コマンドの設定 (エンジン有りワークフローで使用)
 evaluate:
-  metadata_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
+  input_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
   engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
   output_csv: "output_data/evaluated.csv"
   # --- 評価条件 ---
