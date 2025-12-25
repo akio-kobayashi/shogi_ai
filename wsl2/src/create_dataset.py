@@ -37,25 +37,26 @@ from usi import UsiEngine
 # データ生成ロジック
 # ================================
 
-def extract_metadata(args: argparse.Namespace) -> None:
+def extract_metadata(csa_dir: str, output_csv: str) -> None:
     """
     [extractコマンド] CSAファイル群をスキャンし、棋譜のメタデータをCSVに書き出す。
     """
-    csa_root, csv_path = args.csa_dir, args.metadata_csv
-    print(f"フェーズ1: メタデータ抽出を開始します。出力先: {csv_path}")
-    csa_files = list(Path(csa_root).rglob('*.csa')) + list(Path(csa_root).rglob('*.CSA'))
-    if not csa_files: sys.exit(f"エラー: '{csa_root}' 内にCSAファイルが見つかりません。")
+    print(f"フェーズ1: メタデータ抽出を開始します。出力先: {output_csv}")
+    csa_files = list(Path(csa_dir).rglob('*.csa')) + list(Path(csa_dir).rglob('*.CSA'))
+    if not csa_files: sys.exit(f"エラー: '{csa_dir}' 内にCSAファイルが見つかりません。")
     print(f"{len(csa_files)}個のCSAファイルをスキャンします...")
     header = ['file_path', 'kif_index', 'black_player', 'white_player', 'rating_b', 'rating_w', 'game_result', 'total_moves']
     
-    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+    parser = cshogi.Parser()
+
+    with open(output_csv, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(header)
         with tqdm(csa_files, unit="file") as pbar:
             for csa_path in pbar:
                 pbar.set_description(f"Processing {csa_path.name}")
                 try:
-                    list_of_games = cshogi.Parser.parse_file(str(csa_path))
+                    list_of_games = parser.parse_csa_file(str(csa_path))
                     if list_of_games is None: continue
 
                     for i, game in enumerate(list_of_games):
@@ -133,6 +134,7 @@ def run_label(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"ラベル付きデータを '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -142,7 +144,7 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                    all_kifs_in_file = parser.parse_csa_file(csa_path)
                     if all_kifs_in_file is None: continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
@@ -182,6 +184,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"評価結果を '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -191,7 +194,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                    all_kifs_in_file = parser.parse_csa_file(csa_path)
                     if all_kifs_in_file is None: continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
@@ -274,13 +277,14 @@ def run_build_h5(args: argparse.Namespace) -> None:
         games_to_process = list(csv.DictReader(f_in))
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
     position_dtype = np.dtype([('ply', np.uint16), ('psv', cshogi.PackedSfenValue), ('is_check', np.bool_), ('candidates', h5py.vlen_dtype(candidate_dtype))])
+    parser = cshogi.Parser()
     with h5py.File(args.output_h5, 'w') as f_out:
         print(f"{len(games_to_process)}対局の処理を開始します。")
         for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                list_of_games = cshogi.Parser.parse_file(game_meta['file_path'])
+                list_of_games = parser.parse_csa_file(game_meta['file_path'])
                 if list_of_games is None: continue
                 game = list_of_games[int(game_meta['kif_index'])]
                 board = cshogi.Board(game.sfen)
@@ -296,8 +300,6 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     pos_struct[0]['candidates'] = np.array(candidates_list, dtype=candidate_dtype)
                     game_positions_data.append(pos_struct[0])
                     board.push(move)
-                if game_positions_data:
-                    game_group.create_dataset('positions', data=np.array(game_positions_data, dtype=position_dtype), compression='gzip')
             except Exception as e:
                 print(f"\n対局処理エラー: {game_meta.get('file_path')} ({e})", file=sys.stderr)
     engine.quit()
@@ -309,11 +311,10 @@ def main() -> None:
     parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
-    # --- 各サブコマンドのパーサーを定義 ---
     extract_parser = subparsers.add_parser("extract", help="CSAファイルから棋譜のメタデータを抽出します。")
     extract_parser.add_argument("--csa-dir", help="CSAファイルが格納されているルートディレクトリ。")
     extract_parser.add_argument("--output-csv", help="メタデータCSVの出力パス。")
-    extract_parser.set_defaults(func=extract_metadata)
+    extract_parser.set_defaults(func=lambda args: extract_metadata(args.csa_dir, args.output_csv))
 
     filter_parser = subparsers.add_parser("filter", help="メタデータCSVをフィルタリングします。")
     filter_parser.add_argument("--input-csv", help="入力となるメタデータCSVのパス。")
@@ -356,25 +357,20 @@ def main() -> None:
     build_h5_parser.add_argument("--num-pv", type=int, default=5)
     build_h5_parser.set_defaults(func=run_build_h5)
 
-    # --- 引数のパースと設定の上書き ---
     temp_args, _ = parser.parse_known_args()
     config = {}
     if temp_args.config and Path(temp_args.config).exists():
-        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
         with open(temp_args.config, 'r') as f:
             config = yaml.safe_load(f)
-    
     if temp_args.command and temp_args.command in config:
         subparsers.choices[temp_args.command].set_defaults(**config.get(temp_args.command, {}))
 
     args = parser.parse_args()
     
-    # --- パスの自動設定と必須引数のチェック ---
     if args.command == "extract":
         if not (args.csa_dir and args.output_csv):
             sys.exit("エラー: extractコマンドには --csa-dir と --output-csv の指定が必須です。")
         Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
-        args.metadata_csv = args.output_csv  # extract_metadata関数へのエイリアス
     
     elif args.command == "filter":
         if not (args.input_csv and args.output_csv):
