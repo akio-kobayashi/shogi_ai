@@ -21,46 +21,13 @@ class UsiEngine:
         if not Path(engine_path).exists():
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
-        engine_dir = Path(engine_path).parent
-
-        # WSL環境下でWindowsの実行ファイルを扱う場合の特別処理
-        if sys.platform == 'linux' and '.exe' in engine_path.lower():
-            try:
-                # wslpathでそれぞれのパスをWindows形式に変換
-                win_engine_path = subprocess.run(['wslpath', '-w', engine_path], capture_output=True, text=True, check=True).stdout.strip()
-                win_engine_dir = subprocess.run(['wslpath', '-w', str(engine_dir)], capture_output=True, text=True, check=True).stdout.strip()
-
-                # 実行するコマンドをリストとして構築
-                command_list = [
-                    'cmd.exe',
-                    '/c',
-                    f'cd /d "{win_engine_dir}" && "{win_engine_path}"'
-                ]
-                print(f"Info: WSLでWindowsコマンドを実行します: {command_list}")
-
-                self.proc = subprocess.Popen(
-                    command_list,
-                    cwd='C:',  # cmd.exe自体の起動場所をCドライブに指定
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                )
-            except Exception as e:
-                print(f"警告: cmd.exe経由でのエンジン起動に失敗しました。: {e}")
-                # 失敗した場合は、元の方法で試行（ただし失敗する可能性が高い）
-                self.proc = subprocess.Popen([engine_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
-        else:
-            # WSL以外、またはLinux実行ファイルの場合は従来のロジック
-            self.proc = subprocess.Popen(
-                [engine_path],
-                cwd=engine_dir,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
-
+        self.proc = subprocess.Popen(
+            [engine_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("エンジンの標準入出力の確保に失敗しました。")
 
