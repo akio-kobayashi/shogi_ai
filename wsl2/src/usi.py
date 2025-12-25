@@ -21,8 +21,18 @@ class UsiEngine:
         if not Path(engine_path).exists():
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
+        engine_dir = Path(engine_path).parent
         command_to_run = [engine_path]
         is_windows_target = '.exe' in engine_path.lower() or '.bat' in engine_path.lower()
+
+        # Popenに渡す共通の引数
+        popen_args = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "text": True,
+            "encoding": "cp932",
+            "bufsize": 1
+        }
 
         # WSL環境でWindowsの実行ファイル(.exe or .bat)を扱う場合の特別処理
         if sys.platform == 'linux' and is_windows_target:
@@ -33,19 +43,15 @@ class UsiEngine:
                 # cmd.exe /c "C:\path\to\run.bat" のようにコマンドを構築
                 command_to_run = ['cmd.exe', '/c', win_engine_path]
                 print(f"Info: WSLでWindowsコマンドを実行します: {command_to_run}")
+                self.proc = subprocess.Popen(command_to_run, **popen_args)
 
             except Exception as e:
-                print(f"警告: wslpathでのパス変換、またはコマンドの構築に失敗しました。: {e}")
-                # Fallback to direct execution
-                pass
-
-        self.proc = subprocess.Popen(
-            command_to_run,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+                print(f"警告: cmd.exe経由でのエンジン起動に失敗しました。: {e}")
+                # 失敗した場合は、元の方法で試行
+                self.proc = subprocess.Popen([engine_path], **popen_args)
+        else:
+            # WSL以外、またはLinux実行ファイルの場合は従来のロジック
+            self.proc = subprocess.Popen(command_to_run, cwd=engine_dir, **popen_args)
 
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("エンジンの標準入出力の確保に失敗しました。")
