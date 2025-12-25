@@ -14,6 +14,7 @@
 import argparse
 import sys
 from pathlib import Path
+import yaml
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,7 +31,7 @@ except ImportError:
 def run_stats(args: argparse.Namespace) -> None:
     """[statsコマンド] データセットの基本統計量を計算して表示する。"""
     print("--- 基本統計量の計算 ---")
-    df = pd.read_csv(args.metadata_csv)
+    df = pd.read_csv(args.input_csv)
 
     print(f"総棋譜数: {len(df)}")
     print("\n--- レーティングと手数の統計 ---")
@@ -48,7 +49,7 @@ def run_stats(args: argparse.Namespace) -> None:
 def run_plot(args: argparse.Namespace) -> None:
     """[plotコマンド] データの分布をプロットし、画像として保存する。"""
     print("--- 分布の可視化 ---")
-    df = pd.read_csv(args.metadata_csv)
+    df = pd.read_csv(args.input_csv)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
 
@@ -83,7 +84,7 @@ def run_plot(args: argparse.Namespace) -> None:
 def run_simulate(args: argparse.Namespace) -> None:
     """[simulateコマンド] フィルタリング条件を適用した結果をシミュレーションする。"""
     print("--- フィルタリングシミュレーション ---")
-    df = pd.read_csv(args.metadata_csv)
+    df = pd.read_csv(args.input_csv)
     
     print(f"フィルタリング前の総棋譜数: {len(df)}")
 
@@ -120,23 +121,24 @@ def main() -> None:
         description="メタデータCSVを分析するスクリプト。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
     # --- 'stats' コマンド ---
     stats_parser = subparsers.add_parser("stats", help="データセットの基本統計量を表示します。")
-    stats_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    stats_parser.add_argument("--input-csv", help="分析対象のメタデータCSVファイル。")
     stats_parser.set_defaults(func=run_stats)
 
     # --- 'plot' コマンド ---
     plot_parser = subparsers.add_parser("plot", help="データの分布を可視化し、画像ファイルとして保存します。")
-    plot_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    plot_parser.add_argument("--input-csv", help="分析対象のメタデータCSVファイル。")
     plot_parser.add_argument("--output-dir", default="analysis_output", help="生成された画像を保存するディレクトリ。")
     plot_parser.set_defaults(func=run_plot)
 
     # --- 'simulate' コマンド ---
     simulate_parser = subparsers.add_parser("simulate", help="フィルタリング条件を適用した結果をシミュレーションします。")
-    simulate_parser.add_argument("metadata_csv", help="分析対象のメタデータCSVファイル。")
+    simulate_parser.add_argument("--input-csv", help="分析対象のメタデータCSVファイル。")
     
     # フィルタリング設定 (create_dataset.pyのfilterコマンドからコピー)
     simulate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
@@ -148,11 +150,22 @@ def main() -> None:
     simulate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
     simulate_parser.set_defaults(func=run_simulate)
 
+    # --- 引数のパースと設定の上書き ---
+    temp_args, _ = parser.parse_known_args()
+    config = {}
+    if temp_args.config and Path(temp_args.config).exists():
+        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
+        with open(temp_args.config, 'r') as f:
+            config = yaml.safe_load(f)
+    
+    if temp_args.command and temp_args.command in config:
+        subparsers.choices[temp_args.command].set_defaults(**config.get(temp_args.command, {}))
+
     args = parser.parse_args()
     
-    if not Path(args.metadata_csv).exists():
-        print(f"エラー: メタデータファイルが見つかりません: {args.metadata_csv}", file=sys.stderr)
-        sys.exit(1)
+    # --- 必須引数のチェック ---
+    if not args.input_csv:
+        sys.exit("エラー: --input-csv の指定が必須です。")
         
     args.func(args)
 

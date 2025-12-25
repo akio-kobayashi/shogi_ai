@@ -11,8 +11,7 @@
 # 'extract' コマンドの設定
 extract:
   csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリ
-  output_dir: "output_data"
-  metadata_csv: "output_data/metadata.csv"
+  output_csv: "output_data/metadata.csv" # 出力されるCSVファイルのパス
 
 # 'filter' コマンドの設定
 filter:
@@ -57,3 +56,25 @@ build-h5:
   # --- 評価条件 ---
   depth: 12
   num_pv: 5 # 1局面あたりに取得する候補手の数
+
+# ================================================
+# analyze_metadata.py の設定
+# ================================================
+
+stats:
+  input_csv: "output_data/filtered.csv"
+
+plot:
+  input_csv: "output_data/filtered.csv"
+  output_dir: "analysis_output"
+
+simulate:
+  input_csv: "output_data/metadata.csv"
+  # --- フィルタリング条件 ---
+  min_rating: 3000
+  max_rating: 9999
+  max_rating_diff: 1000
+  min_moves: 40
+  max_moves: 512
+  allowed_results: "win,lose,draw"
+  filter_by_rating_outcome: false

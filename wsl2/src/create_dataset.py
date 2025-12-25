@@ -298,10 +298,10 @@ def main() -> None:
     parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
+    # --- 各サブコマンドのパーサーを定義 ---
     extract_parser = subparsers.add_parser("extract", help="CSAファイルから棋譜のメタデータを抽出します。")
     extract_parser.add_argument("--csa-dir", help="CSAファイルが格納されているルートディレクトリ。")
-    extract_parser.add_argument("--output-dir", help="生成されたメタデータ(.csv)を保存するディレクトリ。")
-    extract_parser.add_argument("--metadata-csv", help="メタデータCSVの出力パス（デフォルト: <output-dir>/metadata.csv）。")
+    extract_parser.add_argument("--output-csv", help="メタデータCSVの出力パス。")
     extract_parser.set_defaults(func=extract_metadata)
 
     filter_parser = subparsers.add_parser("filter", help="メタデータCSVをフィルタリングします。")
@@ -345,21 +345,25 @@ def main() -> None:
     build_h5_parser.add_argument("--num-pv", type=int, default=5)
     build_h5_parser.set_defaults(func=run_build_h5)
 
+    # --- 引数のパースと設定の上書き ---
     temp_args, _ = parser.parse_known_args()
     config = {}
     if temp_args.config and Path(temp_args.config).exists():
+        print(f"設定ファイル '{temp_args.config}' を読み込みます。")
         with open(temp_args.config, 'r') as f:
             config = yaml.safe_load(f)
+    
     if temp_args.command and temp_args.command in config:
         subparsers.choices[temp_args.command].set_defaults(**config.get(temp_args.command, {}))
 
     args = parser.parse_args()
     
+    # --- パスの自動設定と必須引数のチェック ---
     if args.command == "extract":
-        args.output_dir = args.output_dir or "output_data"
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-        args.metadata_csv = args.metadata_csv or str(Path(args.output_dir) / "metadata.csv")
-        if not args.csa_dir: sys.exit("エラー: extractコマンドには --csa-dir の指定が必須です。")
+        if not (args.csa_dir and args.output_csv):
+            sys.exit("エラー: extractコマンドには --csa-dir と --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+        args.metadata_csv = args.output_csv  # extract_metadata関数へのエイリアス
     
     elif args.command == "filter":
         if not (args.input_csv and args.output_csv):
@@ -373,9 +377,11 @@ def main() -> None:
     elif args.command == "generate":
         if not (args.input_csv and args.output_dir):
              sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     elif args.command == "build-h5":
         if not (args.input_csv and args.output_h5 and args.engine_path):
              sys.exit("エラー: build-h5コマンドには --input-csv, --output-h5, --engine-path の指定が必須です。")
+        Path(args.output_h5).parent.mkdir(parents=True, exist_ok=True)
         
     args.func(args)
 
