@@ -22,29 +22,41 @@ class UsiEngine:
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
         engine_dir = Path(engine_path).parent
-        effective_cwd = engine_dir
 
-        # WSL環境下でWindowsの実行ファイルを扱う場合のパス変換
+        # WSL環境下でWindowsの実行ファイルを扱う場合の特別処理
         if sys.platform == 'linux' and '.exe' in engine_path.lower():
             try:
-                # wslpathコマンドでWindows形式のパスに変換
-                result = subprocess.run(['wslpath', '-w', str(engine_dir)], capture_output=True, text=True, check=True)
-                effective_cwd = result.stdout.strip()
-                print(f"Info: WSLパスをWindowsパスに変換しました: {effective_cwd}")
-            except FileNotFoundError:
-                print("警告: 'wslpath'コマンドが見つかりません。パス変換をスキップします。")
-            except Exception as e:
-                print(f"警告: wslpathの実行に失敗しました: {e}")
+                # wslpathでそれぞれのパスをWindows形式に変換
+                win_engine_path = subprocess.run(['wslpath', '-w', engine_path], capture_output=True, text=True, check=True).stdout.strip()
+                win_engine_dir = subprocess.run(['wslpath', '-w', str(engine_dir)], capture_output=True, text=True, check=True).stdout.strip()
 
-        self.proc = subprocess.Popen(
-            [engine_path],
-            cwd=effective_cwd, # 変換後のパスをワーキングディレクトリに指定
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            # stderr=subprocess.DEVNULL, # デバッグのため、エンジンからのエラー出力を表示する
-            text=True,
-            bufsize=1,
-        )
+                # cmd.exe を使い、"cd"でワーキングディレクトリを移動してからエンジンを起動するコマンド文字列を生成
+                command_str = f'cmd.exe /c "cd /d \"{win_engine_dir}\" && \"{win_engine_path}\""'
+                print(f"Info: WSLでWindowsコマンドを実行します: {command_str}")
+
+                self.proc = subprocess.Popen(
+                    command_str,
+                    shell=True,  # cmd.exeの&&機能を使うためshell=Trueが必須
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+            except Exception as e:
+                print(f"警告: cmd.exe経由でのエンジン起動に失敗しました。: {e}")
+                # 失敗した場合は、元の方法で試行（ただし失敗する可能性が高い）
+                self.proc = subprocess.Popen([engine_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+        else:
+            # WSL以外、またはLinux実行ファイルの場合は従来のロジック
+            self.proc = subprocess.Popen(
+                [engine_path],
+                cwd=engine_dir,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("エンジンの標準入出力の確保に失敗しました。")
 
