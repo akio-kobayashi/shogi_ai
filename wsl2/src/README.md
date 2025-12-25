@@ -25,7 +25,7 @@
 ### `extract`
 CSAファイル群から全棋譜のメタデータを抽出し、`metadata.csv`を生成します。
 ```bash
-python src/create_dataset.py extract --csa-dir <棋譜ディレクトリ>
+python src/create_dataset.py extract --csa-dir <棋譜ディレクトリ> --output-csv <出力CSVパス>
 ```
 
 ### `filter`

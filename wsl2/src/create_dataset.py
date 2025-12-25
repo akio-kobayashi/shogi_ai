@@ -82,6 +82,17 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
     [filterコマンド] メタデータCSVをフィルタリングし、新しいCSVファイルを出力する。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
+    
+    print("--- フィルタリング条件の確認 ---")
+    print(f"入力ファイル: {args.input_csv}")
+    print(f"出力ファイル: {args.output_csv}")
+    print(f"レーティング範囲: {args.min_rating} ～ {args.max_rating}")
+    print(f"最大レーティング差: {args.max_rating_diff}")
+    print(f"手数範囲: {args.min_moves} ～ {args.max_moves}")
+    print(f"許可する対局結果: {args.allowed_results}")
+    print(f"レーティング通りか: {args.filter_by_rating_outcome}")
+    print("--------------------------")
+
     print(f"--- メタデータのフィルタリングを開始 ---")
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
