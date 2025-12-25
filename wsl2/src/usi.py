@@ -20,13 +20,16 @@ class UsiEngine:
         if not Path(engine_path).exists():
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
+        engine_dir = Path(engine_path).parent
+
         self.proc = subprocess.Popen(
             [engine_path],
+            cwd=engine_dir,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            # stderr=subprocess.DEVNULL, # デバッグのため、エンジンからのエラー出力を表示する
             text=True,
-            bufsize=1,  # 行バッファ
+            bufsize=1,
         )
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("エンジンの標準入出力の確保に失敗しました。")
