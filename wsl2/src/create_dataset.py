@@ -11,6 +11,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 import yaml
+import traceback
 
 try:
     from tqdm import tqdm
@@ -203,7 +204,8 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                                     meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
                                     writer.writerow(meta_with_eval)
                                 except Exception as e:
-                                    print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} ({e})", file=sys.stderr)
+                                    print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} で予期せぬエラーが発生しました。", file=sys.stderr)
+                                    traceback.print_exc()
                             board.push(move)
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
