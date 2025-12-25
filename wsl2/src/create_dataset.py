@@ -90,7 +90,8 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
     filtered_kifs = []
     for kif in tqdm(all_kifs, desc="フィルタリング中"):
         try:
-            rating_b, rating_w, total_moves, game_result = int(kif['rating_b']), int(kif['rating_w']), int(kif['total_moves']), int(kif['game_result'])
+            rating_b, rating_w = float(kif['rating_b']), float(kif['rating_w'])
+            total_moves, game_result = int(kif['total_moves']), int(kif['game_result'])
             
             if not (args.min_rating <= rating_b <= args.max_rating and args.min_rating <= rating_w <= args.max_rating): continue
             if abs(rating_b - rating_w) > args.max_rating_diff: continue

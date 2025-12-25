@@ -86,6 +86,14 @@ def run_simulate(args: argparse.Namespace) -> None:
     print("--- フィルタリングシミュレーション ---")
     df = pd.read_csv(args.input_csv)
     
+    # データ型を修正
+    df['rating_b'] = pd.to_numeric(df['rating_b'], errors='coerce')
+    df['rating_w'] = pd.to_numeric(df['rating_w'], errors='coerce')
+    df['total_moves'] = pd.to_numeric(df['total_moves'], errors='coerce')
+    df['game_result'] = pd.to_numeric(df['game_result'], errors='coerce')
+    df.dropna(inplace=True)
+
+
     print(f"フィルタリング前の総棋譜数: {len(df)}")
 
     queries = []
