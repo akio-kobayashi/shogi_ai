@@ -30,13 +30,17 @@ class UsiEngine:
                 win_engine_path = subprocess.run(['wslpath', '-w', engine_path], capture_output=True, text=True, check=True).stdout.strip()
                 win_engine_dir = subprocess.run(['wslpath', '-w', str(engine_dir)], capture_output=True, text=True, check=True).stdout.strip()
 
-                # cmd.exe を使い、"cd"でワーキングディレクトリを移動してからエンジンを起動するコマンド文字列を生成
-                command_str = f'cmd.exe /c "cd /d \"{win_engine_dir}\" && \"{win_engine_path}\""'
-                print(f"Info: WSLでWindowsコマンドを実行します: {command_str}")
+                # 実行するコマンドをリストとして構築
+                command_list = [
+                    'cmd.exe',
+                    '/c',
+                    f'cd /d "{win_engine_dir}" && "{win_engine_path}"'
+                ]
+                print(f"Info: WSLでWindowsコマンドを実行します: {command_list}")
 
                 self.proc = subprocess.Popen(
-                    command_str,
-                    shell=True,  # cmd.exeの&&機能を使うためshell=Trueが必須
+                    command_list,
+                    cwd='C:',  # cmd.exe自体の起動場所をCドライブに指定
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     text=True,
