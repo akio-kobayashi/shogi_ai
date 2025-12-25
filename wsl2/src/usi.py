@@ -21,13 +21,32 @@ class UsiEngine:
         if not Path(engine_path).exists():
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
+        command_to_run = [engine_path]
+        is_windows_target = '.exe' in engine_path.lower() or '.bat' in engine_path.lower()
+
+        # WSL環境でWindowsの実行ファイル(.exe or .bat)を扱う場合の特別処理
+        if sys.platform == 'linux' and is_windows_target:
+            try:
+                # wslpathコマンドでWindows形式のパスに変換
+                win_engine_path = subprocess.run(['wslpath', '-w', engine_path], capture_output=True, text=True, check=True).stdout.strip()
+                
+                # cmd.exe /c "C:\path\to\run.bat" のようにコマンドを構築
+                command_to_run = ['cmd.exe', '/c', win_engine_path]
+                print(f"Info: WSLでWindowsコマンドを実行します: {command_to_run}")
+
+            except Exception as e:
+                print(f"警告: wslpathでのパス変換、またはコマンドの構築に失敗しました。: {e}")
+                # Fallback to direct execution
+                pass
+
         self.proc = subprocess.Popen(
-            [engine_path],
+            command_to_run,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
         )
+
         if self.proc.stdin is None or self.proc.stdout is None:
             raise RuntimeError("エンジンの標準入出力の確保に失敗しました。")
 
