@@ -128,7 +128,6 @@ def run_label(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"ラベル付きデータを '{output_csv_path}' に書き込みます。")
-    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -138,7 +137,7 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = parser.parse_csa_file(csa_path)
+                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
                     if all_kifs_in_file is None: continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
@@ -162,55 +161,68 @@ def run_label(args: argparse.Namespace) -> None:
 
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
-    [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
+    [evaluateコマンド] デバッグモード。エンジンとの通信を詳細に表示する。
     """
-    if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
-    if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
-    print(f"--- 局面評価を開始 ---")
+    print("--- 詳細デバッグモード開始 ---")
+    
+    # 1. 最初の棋譜情報だけ取得
     try:
-        engine = UsiEngine(str(args.engine_path))
-        print("USIエンジン準備完了。")
+        with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
+            meta = next(csv.DictReader(f), None)
+    except FileNotFoundError:
+        sys.exit(f"エラー: 入力ファイルが見つかりません: {args.input_csv}")
+
+    if not meta:
+        sys.exit("エラー: 入力CSVが空か、読み込めません。")
+    
+    csa_path = meta['file_path']
+    kif_index = int(meta['kif_index'])
+    print(f"対象棋譜: {csa_path} (インデックス: {kif_index})")
+
+    # 2. 最初の局面(20手目)のSFENを取得
+    try:
+        game = cshogi.Parser.parse_file(csa_path)[kif_index]
+        board = cshogi.Board(game.sfen)
+        target_ply = 20
+        if len(game.moves) < target_ply:
+            sys.exit(f"エラー: 棋譜の手数が{target_ply}手未満です。")
+        for i in range(target_ply - 1):
+            board.push(game.moves[i])
+        target_sfen = board.sfen()
+        print(f"{target_ply}手目の局面SFEN: {target_sfen}")
     except Exception as e:
-        sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
-    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
-        reader = csv.DictReader(f_in)
-        all_kifs_meta, header = list(reader), reader.fieldnames
-    output_csv_path = Path(args.output_csv)
-    output_header = header + ['ply', 'eval_score_cp', 'sfen']
-    print(f"評価結果を '{output_csv_path}' に書き込みます。")
-    parser = cshogi.Parser()
-    with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
-        writer = csv.DictWriter(f_out, fieldnames=output_header)
-        writer.writeheader()
-        kifs_by_file = defaultdict(list)
-        for meta in all_kifs_meta: kifs_by_file[meta['file_path']].append(meta)
-        with tqdm(kifs_by_file.items(), unit="file") as pbar:
-            for csa_path, metas in pbar:
-                pbar.set_description(f"Evaluating {Path(csa_path).name}")
-                try:
-                    all_kifs_in_file = parser.parse_csa_file(csa_path)
-                    if all_kifs_in_file is None: continue
-                    for meta in metas:
-                        kif = all_kifs_in_file[int(meta['kif_index'])]
-                        board = cshogi.Board(kif.sfen)
-                        for ply, move in enumerate(kif.moves, 1):
-                            if ply > args.max_ply: break
-                            if ply >= args.min_ply:
-                                try:
-                                    sfen = board.sfen()
-                                    score_type, score_value = engine.evaluate_sfen(sfen, args.depth)
-                                    eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
-                                    meta_with_eval = meta.copy()
-                                    meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
-                                    writer.writerow(meta_with_eval)
-                                except Exception as e:
-                                    print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} で予期せぬエラーが発生しました。", file=sys.stderr)
-                                    traceback.print_exc()
-                            board.push(move)
-                except Exception as e:
-                    print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
-    engine.quit()
-    print("局面評価が完了しました。")
+        sys.exit(f"エラー: 棋譜の読み込みまたは局面の再現に失敗しました。: {e}")
+
+    # 3. エンジンを起動し、1回だけ評価を試みる
+    try:
+        print("\n--- エンジンとの通信ログ ---")
+        engine = UsiEngine(args.engine_path)
+        
+        print("\n[Python -> Engine] usinewgame")
+        engine._send("usinewgame")
+        
+        print(f"[Python -> Engine] position sfen {target_sfen}")
+        engine._send(f"position sfen {target_sfen}")
+        
+        print(f"[Python -> Engine] go depth {args.depth}")
+        engine._send(f"go depth {args.depth}")
+
+        while True:
+            line = engine._readline(timeout=30)
+            if line is None:
+                print("[Engine -> Python] (応答なし - タイムアウト)")
+                break
+            print(f"[Engine -> Python] {line}")
+            if line.startswith("bestmove"):
+                break
+        
+        engine.quit()
+    except Exception as e:
+        print("\n--- エラー発生 ---")
+        traceback.print_exc()
+
+    print("\n--- デバッグモード終了 ---")
+    sys.exit() # 必ず終了する
 
 def write_bin_file(positions: list, output_path: str):
     """
@@ -272,14 +284,13 @@ def run_build_h5(args: argparse.Namespace) -> None:
         games_to_process = list(csv.DictReader(f_in))
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
     position_dtype = np.dtype([('ply', np.uint16), ('psv', cshogi.PackedSfenValue), ('is_check', np.bool_), ('candidates', h5py.vlen_dtype(candidate_dtype))])
-    parser = cshogi.Parser()
     with h5py.File(args.output_h5, 'w') as f_out:
         print(f"{len(games_to_process)}対局の処理を開始します。")
         for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                list_of_games = parser.parse_csa_file(game_meta['file_path'])
+                list_of_games = cshogi.Parser.parse_file(game_meta['file_path'])
                 if list_of_games is None: continue
                 game = list_of_games[int(game_meta['kif_index'])]
                 board = cshogi.Board(game.sfen)
