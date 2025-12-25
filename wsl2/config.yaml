@@ -10,52 +10,49 @@
 
 # 'extract' コマンドの設定
 extract:
-  csa_dir: "/path/to/your/csa_files"  # CSAファイルが格納されているディレクトリ
-  output_csv: "output_data/metadata.csv" # 出力されるCSVファイルのパス
+  csa_dir: "/path/to/your/csa_files"
+  output_csv: "output_data/metadata.csv"
 
 # 'filter' コマンドの設定
 filter:
   input_csv: "output_data/metadata.csv"
   output_csv: "output_data/filtered.csv"
-  # --- フィルタリング条件 ---
   min_rating: 3000
   max_rating: 9999
   max_rating_diff: 1000
   min_moves: 40
   max_moves: 512
-  allowed_results: "win,lose,draw"
+  no_draws: true
   filter_by_rating_outcome: false
 
-# 'label' コマンドの設定 (エンジン不要ワークフローで使用)
+# 'label' コマンドの設定
 label:
-  input_csv: "output_data/filtered.csv"   # filterコマンドの出力
-  output_csv: "output_data/labeled.csv" # generateコマンドへの入力となる
-  score_scale: 600                        # 勝敗結果から評価値を生成する際のスケール値
+  input_csv: "output_data/filtered.csv"
+  output_csv: "output_data/labeled.csv"
+  score_scale: 600
 
-# 'evaluate' コマンドの設定 (エンジン有りワークフローで使用)
+# 'evaluate' コマンドの設定
 evaluate:
-  input_csv: "output_data/filtered.csv" # filterコマンドの出力ファイルを指定
-  engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
+  input_csv: "output_data/filtered.csv"
+  engine_path: "/path/to/your/usi_engine"
   output_csv: "output_data/evaluated.csv"
-  # --- 評価条件 ---
   depth: 12
   min_ply: 20
   max_ply: 512
 
-# 'generate' コマンドの設定 (.bin生成ワークフローで使用)
+# 'generate' コマンドの設定
 generate:
-  input_csv: "output_data/evaluated.csv" # evaluateまたはlabelの出力を指定
+  input_csv: "output_data/evaluated.csv"
   output_dir: "output_data"
-  val_split: 0.1 # 検証データの割合
+  val_split: 0.1
 
-# 'build-h5' コマンドの設定 (h5形式ワークフローで使用)
+# 'build-h5' コマンドの設定
 build-h5:
-  input_csv: "output_data/filtered.csv"   # filterコマンドの出力ファイルを指定
-  output_h5: "output_data/dataset.h5"     # 出力HDF5ファイルのパス
-  engine_path: "/path/to/your/usi_engine" # USIエンジンの実行ファイルパス
-  # --- 評価条件 ---
+  input_csv: "output_data/filtered.csv"
+  output_h5: "output_data/dataset.h5"
+  engine_path: "/path/to/your/usi_engine"
   depth: 12
-  num_pv: 5 # 1局面あたりに取得する候補手の数
+  num_pv: 5
 
 # ================================================
 # analyze_metadata.py の設定
@@ -70,11 +67,10 @@ plot:
 
 simulate:
   input_csv: "output_data/metadata.csv"
-  # --- フィルタリング条件 ---
   min_rating: 3000
   max_rating: 9999
   max_rating_diff: 1000
   min_moves: 40
   max_moves: 512
-  allowed_results: "win,lose,draw"
+  no_draws: true
   filter_by_rating_outcome: false

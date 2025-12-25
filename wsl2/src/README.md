@@ -2,7 +2,7 @@
 
 ## 概要
 
-`create_dataset.py` は、CSA (Computer Shogi Association) 形式の棋譜ファイルから、AIの学習データセットを生成するための多機能スクリプトです。
+`create_dataset.py` は、CSA形式の棋譜ファイルから、AIの学習データセットを生成するための多機能スクリプトです。
 スクリプトは複数のサブコマンドで構成され、これらをパイプラインとして組み合わせることで、要件に応じた多様なデータセットを生成できます。
 
 ## ワークフロー
@@ -23,37 +23,42 @@
 ## コマンド詳細
 
 ### `extract`
-CSAファイル群から全棋譜のメタデータを抽出し、`metadata.csv`を生成します。
+CSAファイル群から全棋譜のメタデータを抽出し、CSVファイルを生成します。
 ```bash
 python src/create_dataset.py extract --csa-dir <棋譜ディレクトリ> --output-csv <出力CSVパス>
 ```
 
 ### `filter`
-`metadata.csv`をレーティングや手数などの条件でフィルタリングし、`filtered.csv`を生成します。
+メタデータCSVをレーティングや手数などの条件でフィルタリングします。
 ```bash
 python src/create_dataset.py filter --input-csv <入力CSV> --output-csv <出力CSV> [フィルタオプション]
 ```
+**主なフィルタオプション:**
+*   `--min-rating`: 最低レーティング
+*   `--max-moves`: 最大手数
+*   `--no-draws`: 引き分けの対局を除外します。
+*   `--filter-by-rating-outcome`: レーティングが高い方が勝利した対局のみに絞り込みます（番狂わせを除外）。
 
 ### `label`
-エンジンを使わず、対局結果のみから評価値を付与（ラベリング）します。出力は`evaluate`と同じ形式のCSVです。
+エンジンを使わず、対局結果のみから評価値を付与（ラベリング）します。
 ```bash
 python src/create_dataset.py label --input-csv <フィルタ済みCSV> --output-csv <ラベル付きCSV>
 ```
 
 ### `evaluate`
-`filter`または`label`で生成されたCSVを元に、USIエンジンで各局面を評価し、評価値とSFENを含む`evaluated.csv`を生成します。
+フィルタリング済みCSVを元に、USIエンジンで各局面を評価し、評価値とSFENを含むCSVを生成します。
 ```bash
 python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス>
 ```
 
 ### `generate`
-`evaluate`または`label`で生成された評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
+評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
 ```bash
 python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
 ```
 
 ### `build-h5`
-`filter`で生成されたCSVを元に、USIエンジンでMultiPVを含む詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
+フィルタリング済みCSVを元に、USIエンジンで詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
 ```bash
 python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --output-h5 <出力H5ファイル> --engine-path <エンジンパス>
 ```

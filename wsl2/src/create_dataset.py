@@ -1,18 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CSA棋譜ファイルから、AIの学習データセットを生成する多機能スクリプト。
-
-本スクリプトは、複数のサブコマンドを通じて、段階的にデータセットを構築します。
-各コマンドは特定の役割を持っており、これらをパイプラインとして組み合わせることで、
-要件に応じた多様なデータセット（.bin形式、.h5形式）を生成できます。
-
-主なワークフロー:
-- .bin形式 (エンジン評価あり): extract -> filter -> evaluate -> generate
-- .bin形式 (エンジン評価なし): extract -> filter -> label -> generate
-- .h5形式 (高機能版):         extract -> filter -> build-h5
-
-各コマンドの詳細は、-hオプションで確認してください。
-設定は `wsl2/config.yaml` で一元管理することが推奨されます。
+(以下略)
 """
 import os
 import csv
@@ -88,7 +77,7 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
     print(f"レーティング範囲: {args.min_rating} ～ {args.max_rating}")
     print(f"最大レーティング差: {args.max_rating_diff}")
     print(f"手数範囲: {args.min_moves} ～ {args.max_moves}")
-    print(f"許可する対局結果: {args.allowed_results}")
+    print(f"引き分けを除外するか: {args.no_draws}")
     print(f"レーティング通りか: {args.filter_by_rating_outcome}")
     print("--------------------------")
 
@@ -97,19 +86,24 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
         reader = csv.DictReader(f)
         all_kifs, header = list(reader), reader.fieldnames
     print(f"フィルタリング前 - 合計棋譜数: {len(all_kifs)}")
-    result_map = {'win': 1, 'lose': 2, 'draw': 0}
-    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
+    
     filtered_kifs = []
     for kif in tqdm(all_kifs, desc="フィルタリング中"):
         try:
             rating_b, rating_w, total_moves, game_result = int(kif['rating_b']), int(kif['rating_w']), int(kif['total_moves']), int(kif['game_result'])
+            
             if not (args.min_rating <= rating_b <= args.max_rating and args.min_rating <= rating_w <= args.max_rating): continue
             if abs(rating_b - rating_w) > args.max_rating_diff: continue
             if not (args.min_moves <= total_moves <= args.max_moves): continue
-            if game_result not in allowed_results_int: continue
+            
+            if args.no_draws and game_result == 0: continue
+            
             if args.filter_by_rating_outcome and ((rating_b > rating_w and game_result != 1) or (rating_w > rating_b and game_result != 2)): continue
+            
             filtered_kifs.append(kif)
-        except (ValueError, KeyError): continue
+        except (ValueError, KeyError):
+            continue
+            
     print(f"フィルタリング後 - 合計棋譜数: {len(filtered_kifs)}")
     try:
         with open(args.output_csv, 'w', newline='', encoding='utf-8') as f:
@@ -132,6 +126,7 @@ def run_label(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"ラベル付きデータを '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -141,7 +136,7 @@ def run_label(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                    all_kifs_in_file = parser.parse_csa_file(csa_path)
                     if all_kifs_in_file is None: continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
@@ -181,6 +176,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"評価結果を '{output_csv_path}' に書き込みます。")
+    parser = cshogi.Parser()
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
@@ -190,7 +186,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
-                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                    all_kifs_in_file = parser.parse_csa_file(csa_path)
                     if all_kifs_in_file is None: continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
@@ -237,7 +233,7 @@ def write_bin_file(positions: list, output_path: str):
 
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
-    [generateコマンド] 評価値付きCSVから学習データ(.bin)を生成します。
+    [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     print(f"--- .bin データセット生成を開始 ---")
@@ -273,13 +269,14 @@ def run_build_h5(args: argparse.Namespace) -> None:
         games_to_process = list(csv.DictReader(f_in))
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
     position_dtype = np.dtype([('ply', np.uint16), ('psv', cshogi.PackedSfenValue), ('is_check', np.bool_), ('candidates', h5py.vlen_dtype(candidate_dtype))])
+    parser = cshogi.Parser()
     with h5py.File(args.output_h5, 'w') as f_out:
         print(f"{len(games_to_process)}対局の処理を開始します。")
         for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
             game_group = f_out.create_group(f"game_{i}")
             for key, value in game_meta.items(): game_group.attrs[key] = value
             try:
-                list_of_games = cshogi.Parser.parse_file(game_meta['file_path'])
+                list_of_games = parser.parse_csa_file(game_meta['file_path'])
                 if list_of_games is None: continue
                 game = list_of_games[int(game_meta['kif_index'])]
                 board = cshogi.Board(game.sfen)
@@ -321,8 +318,8 @@ def main() -> None:
     filter_parser.add_argument("--max-rating-diff", type=int, default=9999)
     filter_parser.add_argument("--min-moves", type=int, default=0)
     filter_parser.add_argument("--max-moves", type=int, default=999)
-    filter_parser.add_argument("--allowed-results", type=str, default="win,lose,draw")
-    filter_parser.add_argument("--filter-by-rating-outcome", action='store_true')
+    filter_parser.add_argument("--no-draws", action='store_true', help="これを指定すると、引き分けの対局を除外します。")
+    filter_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方のプレイヤーが勝った対局のみを抽出します（番狂わせを除外）。")
     filter_parser.set_defaults(func=run_filter_metadata)
 
     label_parser = subparsers.add_parser("label", help="対局結果から評価値をラベリングします（エンジン不要）。")

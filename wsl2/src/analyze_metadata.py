@@ -88,15 +88,14 @@ def run_simulate(args: argparse.Namespace) -> None:
     
     print(f"フィルタリング前の総棋譜数: {len(df)}")
 
-    result_map = {'win': 1, 'lose': 2, 'draw': 0}
-    allowed_results_int = {result_map[res.strip()] for res in args.allowed_results.split(',')}
-
     queries = []
     queries.append(f"({args.min_rating} <= rating_b <= {args.max_rating})")
     queries.append(f"({args.min_rating} <= rating_w <= {args.max_rating})")
     queries.append(f"abs(rating_b - rating_w) <= {args.max_rating_diff}")
     queries.append(f"({args.min_moves} <= total_moves <= {args.max_moves})")
-    queries.append(f"game_result in {list(allowed_results_int)}")
+    
+    if args.no_draws:
+        queries.append("game_result != 0")
 
     if args.filter_by_rating_outcome:
         queries.append("((rating_b > rating_w) and (game_result == 1)) or "
@@ -140,14 +139,14 @@ def main() -> None:
     simulate_parser = subparsers.add_parser("simulate", help="フィルタリング条件を適用した結果をシミュレーションします。")
     simulate_parser.add_argument("--input-csv", help="分析対象のメタデータCSVファイル。")
     
-    # フィルタリング設定 (create_dataset.pyのfilterコマンドからコピー)
-    simulate_parser.add_argument("--min-rating", type=int, default=3000, help="学習対象とする対局者の最低レーティング。")
-    simulate_parser.add_argument("--max-rating", type=int, default=9999, help="学習対象とする対局者の最大レーティング。")
-    simulate_parser.add_argument("--max-rating-diff", type=int, default=1000, help="学習対象とする対局者間のレーティング差の上限。")
-    simulate_parser.add_argument("--min-moves", type=int, default=0, help="学習対象とする棋譜の最小手数。")
-    simulate_parser.add_argument("--max-moves", type=int, default=999, help="学習対象とする棋譜の最大手数。")
-    simulate_parser.add_argument("--allowed-results", type=str, default="win,lose,draw", help="含める勝敗結果をカンマ区切りで指定 (win,lose,draw)。")
-    simulate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方が勝った棋譜のみを対象とする。")
+    # フィルタリング設定
+    simulate_parser.add_argument("--min-rating", type=int, default=0)
+    simulate_parser.add_argument("--max-rating", type=int, default=9999)
+    simulate_parser.add_argument("--max-rating-diff", type=int, default=9999)
+    simulate_parser.add_argument("--min-moves", type=int, default=0)
+    simulate_parser.add_argument("--max-moves", type=int, default=999)
+    simulate_parser.add_argument("--no-draws", action='store_true', help="これを指定すると、引き分けの対局を除外します。")
+    simulate_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方のプレイヤーが勝った対局のみを抽出します（番狂わせを除外）。")
     simulate_parser.set_defaults(func=run_simulate)
 
     # --- 引数のパースと設定の上書き ---
