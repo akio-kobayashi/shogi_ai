@@ -8,6 +8,7 @@
 """
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -21,10 +22,23 @@ class UsiEngine:
             raise FileNotFoundError(f"エンジン実行ファイルが見つかりません: {engine_path}")
 
         engine_dir = Path(engine_path).parent
+        effective_cwd = engine_dir
+
+        # WSL環境下でWindowsの実行ファイルを扱う場合のパス変換
+        if sys.platform == 'linux' and '.exe' in engine_path.lower():
+            try:
+                # wslpathコマンドでWindows形式のパスに変換
+                result = subprocess.run(['wslpath', '-w', str(engine_dir)], capture_output=True, text=True, check=True)
+                effective_cwd = result.stdout.strip()
+                print(f"Info: WSLパスをWindowsパスに変換しました: {effective_cwd}")
+            except FileNotFoundError:
+                print("警告: 'wslpath'コマンドが見つかりません。パス変換をスキップします。")
+            except Exception as e:
+                print(f"警告: wslpathの実行に失敗しました: {e}")
 
         self.proc = subprocess.Popen(
             [engine_path],
-            cwd=engine_dir,
+            cwd=effective_cwd, # 変換後のパスをワーキングディレクトリに指定
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             # stderr=subprocess.DEVNULL, # デバッグのため、エンジンからのエラー出力を表示する
