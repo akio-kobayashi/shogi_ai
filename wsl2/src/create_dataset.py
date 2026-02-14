@@ -22,6 +22,7 @@ except ImportError:
 import cshogi
 import numpy as np
 from usi import UsiEngine
+from extract_features import make_feature_dict
 
 # ================================
 # データ生成ロジック
@@ -286,7 +287,25 @@ def run_build_h5(args: argparse.Namespace) -> None:
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         games_to_process = list(csv.DictReader(f_in))
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
-    position_dtype = np.dtype([('ply', np.uint16), ('psv', cshogi.PackedSfenValue), ('is_check', np.bool_), ('candidates', h5py.vlen_dtype(candidate_dtype))])
+    # 特徴量用のデータ型定義 (extract_features.py の出力に合わせる)
+    hand_dtype = np.dtype([(f'hand_{p}', np.int8) for p in ['P', 'L', 'N', 'S', 'G', 'B', 'R']])
+    feature_dtype = np.dtype([
+        ('in_check', np.int8),
+        ('is_mate', np.int8),
+        ('capture_available', np.int8),
+        ('give_check_available', np.int8),
+        ('sente_hand', hand_dtype),
+        ('gote_hand', hand_dtype)
+    ])
+    
+    position_dtype = np.dtype([
+        ('ply', np.uint16),
+        ('psv', cshogi.PackedSfenValue),
+        ('is_check', np.bool_),
+        ('features', feature_dtype),
+        ('candidates', h5py.vlen_dtype(candidate_dtype))
+    ])
+    
     with h5py.File(args.output_h5, 'w') as f_out:
         print(f"{len(games_to_process)}対局の処理を開始します。")
         for i, game_meta in enumerate(tqdm(games_to_process, desc="Processing games")):
@@ -300,13 +319,28 @@ def run_build_h5(args: argparse.Namespace) -> None:
                 game_positions_data = []
                 for ply, move in enumerate(game.moves, 1):
                     sfen = board.sfen()
+                    # 特徴量の抽出
+                    feat_dict = make_feature_dict(board)
+                    
                     d, n, m = get_search_params(args, ply)
                     candidates_info = engine.get_multipv(sfen, depth=d, nodes=n, movetime=m, num_pv=args.num_pv)
                     candidates_list = [(cand['move'], cand['score'], cand['is_mate']) for cand in candidates_info]
+                    
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
                     board.to_psfen(pos_struct[0]['psv'])
                     pos_struct[0]['is_check'] = board.is_check()
+                    
+                    # 特徴量を構造体にコピー
+                    f = pos_struct[0]['features']
+                    f['in_check'] = feat_dict['in_check']
+                    f['is_mate'] = feat_dict['is_mate']
+                    f['capture_available'] = feat_dict['capture_available']
+                    f['give_check_available'] = feat_dict['give_check_available']
+                    for p in ['P', 'L', 'N', 'S', 'G', 'B', 'R']:
+                        f['sente_hand'][f'hand_{p}'] = feat_dict[f'S_hand_{p}']
+                        f['gote_hand'][f'hand_{p}'] = feat_dict[f'G_hand_{p}']
+                        
                     pos_struct[0]['candidates'] = np.array(candidates_list, dtype=candidate_dtype)
                     game_positions_data.append(pos_struct[0])
                     board.push(move)
