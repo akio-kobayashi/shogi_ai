@@ -48,8 +48,15 @@ python src/create_dataset.py label --input-csv <フィルタ済みCSV> --output-
 ### `evaluate`
 フィルタリング済みCSVを元に、USIエンジンで各局面を評価し、評価値とSFENを含むCSVを生成します。
 ```bash
-python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス>
+python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス> [探索オプション]
 ```
+**探索オプション:**
+*   `--depth`: 探索深さ（デフォルト: 10）
+*   `--nodes`: 探索ノード数
+*   `--movetime`: 1局面あたりの思考時間（ミリ秒）
+*   `--early-depth`, `--early-nodes`, `--early-movetime`: 序盤用の探索パラメータ
+*   `--early-ply-threshold`: 序盤用のパラメータを適用する最大手数（デフォルト: 0）
+*   `--min-ply`, `--max-ply`: 評価対象とする手数の範囲
 
 ### `generate`
 評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
@@ -60,8 +67,11 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 ### `build-h5`
 フィルタリング済みCSVを元に、USIエンジンで詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
 ```bash
-python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --output-h5 <出力H5ファイル> --engine-path <エンジンパス>
+python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --output-h5 <出力H5ファイル> --engine-path <エンジンパス> [探索オプション]
 ```
+**探索オプション:**
+*   `evaluate`コマンドと同様のオプション（`--depth`, `--nodes`, `--movetime`, `--early-xxx`等）が使用可能です。
+*   `--num-pv`: MultiPVで取得する候補手の数（デフォルト: 5）
 
 ---
 ## 設定ファイル (`wsl2/config.yaml`)

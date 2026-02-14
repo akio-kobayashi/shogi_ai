@@ -159,6 +159,21 @@ def run_label(args: argparse.Namespace) -> None:
                     print(f"\nラベリング処理エラー: {csa_path} ({e})", file=sys.stderr)
     print("ラベリング処理が完了しました。")
 
+def get_search_params(args: argparse.Namespace, ply: int):
+    """
+    手数(ply)に応じて探索パラメータ(depth, nodes, movetime)を決定する。
+    序盤(early_ply_threshold以下)の場合はearly_xxxの値を優先し、指定がなければ通常時(中終盤)の値を使用する。
+    """
+    if ply <= args.early_ply_threshold:
+        d = args.early_depth if args.early_depth is not None else args.depth
+        n = args.early_nodes if args.early_nodes is not None else args.nodes
+        m = args.early_movetime if args.early_movetime is not None else args.movetime
+    else:
+        d = args.depth
+        n = args.nodes
+        m = args.movetime
+    return d, n, m
+
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
     [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
@@ -196,7 +211,8 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                             if ply >= args.min_ply:
                                 try:
                                     sfen = board.sfen()
-                                    score_type, score_value = engine.evaluate_sfen(sfen, args.depth)
+                                    d, n, m = get_search_params(args, ply)
+                                    score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
                                     eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
                                     meta_with_eval = meta.copy()
                                     meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
@@ -284,7 +300,8 @@ def run_build_h5(args: argparse.Namespace) -> None:
                 game_positions_data = []
                 for ply, move in enumerate(game.moves, 1):
                     sfen = board.sfen()
-                    candidates_info = engine.get_multipv(sfen, args.depth, args.num_pv)
+                    d, n, m = get_search_params(args, ply)
+                    candidates_info = engine.get_multipv(sfen, depth=d, nodes=n, movetime=m, num_pv=args.num_pv)
                     candidates_list = [(cand['move'], cand['score'], cand['is_mate']) for cand in candidates_info]
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
@@ -334,6 +351,12 @@ def main() -> None:
     evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
     evaluate_parser.add_argument("--depth", type=int, default=10)
+    evaluate_parser.add_argument("--nodes", type=int, default=None)
+    evaluate_parser.add_argument("--movetime", type=int, default=None)
+    evaluate_parser.add_argument("--early-depth", type=int, default=None)
+    evaluate_parser.add_argument("--early-nodes", type=int, default=None)
+    evaluate_parser.add_argument("--early-movetime", type=int, default=None)
+    evaluate_parser.add_argument("--early-ply-threshold", type=int, default=0, help="序盤とみなす最大手数（この手数以下でearlyパラメータを適用）。")
     evaluate_parser.add_argument("--min-ply", type=int, default=0)
     evaluate_parser.add_argument("--max-ply", type=int, default=999)
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
@@ -349,6 +372,12 @@ def main() -> None:
     build_h5_parser.add_argument("--output-h5", help="出力するHDF5ファイルのパス。")
     build_h5_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     build_h5_parser.add_argument("--depth", type=int, default=10)
+    build_h5_parser.add_argument("--nodes", type=int, default=None)
+    build_h5_parser.add_argument("--movetime", type=int, default=None)
+    build_h5_parser.add_argument("--early-depth", type=int, default=None)
+    build_h5_parser.add_argument("--early-nodes", type=int, default=None)
+    build_h5_parser.add_argument("--early-movetime", type=int, default=None)
+    build_h5_parser.add_argument("--early-ply-threshold", type=int, default=0)
     build_h5_parser.add_argument("--num-pv", type=int, default=5)
     build_h5_parser.set_defaults(func=run_build_h5)
 

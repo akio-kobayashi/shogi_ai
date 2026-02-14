@@ -84,7 +84,7 @@ class UsiEngine:
             if keyword in line:
                 return
 
-    def evaluate_sfen(self, sfen: str, depth: int) -> Tuple[str, int]:
+    def evaluate_sfen(self, sfen: str, depth: Optional[int] = None, nodes: Optional[int] = None, movetime: Optional[int] = None) -> Tuple[str, int]:
         """
         指定されたSFENの局面を評価する。
         戻り値: (score_type, score_value)
@@ -93,7 +93,16 @@ class UsiEngine:
         """
         self._send("usinewgame")
         self._send(f"position sfen {sfen.strip()}")
-        self._send(f"go depth {depth}")
+
+        go_commands = []
+        if depth is not None: go_commands.append(f"depth {depth}")
+        if nodes is not None: go_commands.append(f"nodes {nodes}")
+        if movetime is not None: go_commands.append(f"movetime {movetime}")
+
+        # 何も指定がない場合はデフォルトでdepth 10
+        if not go_commands: go_commands.append("depth 10")
+
+        self._send(f"go {' '.join(go_commands)}")
 
         last_score_type = "cp"
         last_score_value = 0
@@ -131,7 +140,7 @@ class UsiEngine:
         """MultiPVの値を設定する。"""
         self._send(f"setoption name MultiPV value {num_pv}")
 
-    def get_multipv(self, sfen: str, depth: int, num_pv: int) -> list:
+    def get_multipv(self, sfen: str, depth: Optional[int] = None, nodes: Optional[int] = None, movetime: Optional[int] = None, num_pv: int = 1) -> list:
         """
         指定されたSFENの局面で、複数の指し手候補と評価値を取得する。
         戻り値: 候補手の情報を含む辞書のリスト
@@ -144,7 +153,14 @@ class UsiEngine:
         self._send("usinewgame")
         self.set_multipv(num_pv)
         self._send(f"position sfen {sfen.strip()}")
-        self._send(f"go depth {depth}")
+
+        go_commands = []
+        if depth is not None: go_commands.append(f"depth {depth}")
+        if nodes is not None: go_commands.append(f"nodes {nodes}")
+        if movetime is not None: go_commands.append(f"movetime {movetime}")
+        if not go_commands: go_commands.append("depth 10")
+
+        self._send(f"go {' '.join(go_commands)}")
 
         results = {}
         board = cshogi.Board(sfen) # USI文字列をパースするためにBoardオブジェクトが必要
