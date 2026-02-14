@@ -10,65 +10,72 @@
 本スクリプトは、生成したいデータセットの種類に応じて、主に3つのワークフローをサポートします。
 
 ### A) `.bin`形式 (エンジン評価あり)
-`extract` → `filter` → `evaluate` → `generate`
+`extract` → `filter` → `count-sfen` (任意) → `evaluate` → `generate`
 
 ### B) `.bin`形式 (エンジン評価なし)
-`extract` → `filter` → `label` → `generate`
+`extract` → `filter` → `count-sfen` (任意) → `label` → `generate`
 
 ### C) `.h5`形式 (高機能版)
 `extract` → `filter` → `build-h5`
+
+※ `count-sfen` を実行し、その後のコマンドで `--db-path` と `--max-sfen-count` を指定することで、局面の重複を抑えた高品質なデータセットを高速に作成できます。
 
 ---
 
 ## コマンド詳細
 
 ### `extract`
-CSAファイル群から全棋譜のメタデータを抽出し、CSVファイルを生成します。
-```bash
-python src/create_dataset.py extract --csa-dir <棋譜ディレクトリ> --output-csv <出力CSVパス>
-```
+(中略)
 
 ### `filter`
-メタデータCSVをレーティングや手数などの条件でフィルタリングします。
+(中略)
+
+### `count-sfen`
+全棋譜をスキャンしてSFENの出現頻度をカウントし、SQLite DBに保存します。重複局面の制限を行う場合に事前に実行します。
 ```bash
-python src/create_dataset.py filter --input-csv <入力CSV> --output-csv <出力CSV> [フィルタオプション]
+python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --db-path <DBパス>
 ```
-**主なフィルタオプション:**
-*   `--min-rating`: 最低レーティング
-*   `--max-moves`: 最大手数
-*   `--no-draws`: 引き分けの対局を除外します。
-*   `--filter-by-rating-outcome`: レーティングが高い方が勝利した対局のみに絞り込みます（番狂わせを除外）。
 
 ### `label`
 エンジンを使わず、対局結果のみから評価値を付与（ラベリング）します。
 ```bash
-python src/create_dataset.py label --input-csv <フィルタ済みCSV> --output-csv <ラベル付きCSV>
+python src/create_dataset.py label --input-csv <フィルタ済みCSV> --output-csv <ラベル付きCSV> [DBオプション]
 ```
+**DBオプション:**
+*   `--db-path`: `count-sfen`で作成したDBを指定します。
+*   `--max-sfen-count`: 同一局面の最大出力回数（デフォルト: 0=無制限）。指定すると特定の定跡への偏りを防げます。
 
 ### `evaluate`
 フィルタリング済みCSVを元に、USIエンジンで各局面を評価し、評価値とSFENを含むCSVを生成します。
 ```bash
-python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス> [探索オプション]
+python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --output-csv <評価値付きCSV> --engine-path <エンジンパス> [探索オプション] [DBオプション]
 ```
-**探索オプション:**
-*   `--depth`: 探索深さ（デフォルト: 10）
-*   `--nodes`: 探索ノード数
-*   `--movetime`: 1局面あたりの思考時間（ミリ秒）
-*   `--early-depth`, `--early-nodes`, `--early-movetime`: 序盤用の探索パラメータ
-*   `--early-ply-threshold`: 序盤用のパラメータを適用する最大手数（デフォルト: 0）
-*   `--min-ply`, `--max-ply`: 評価対象とする手数の範囲
+**DBオプション:**
+*   `--db-path`: SFEN頻度と評価値キャッシュを管理するDBパス。
+*   `--max-sfen-count`: 同一局面の最大出力回数。
+*   **キャッシュ機能**: DBに同一の探索条件（SFEN, depth等）の評価値がある場合、エンジンの再探索をスキップして高速化します。
 
 ### `generate`
-評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
-```bash
-python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
-```
+(中略)
 
 ### `build-h5`
 フィルタリング済みCSVを元に、USIエンジンで詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。
+局面ごとの統計的な特徴量（王手、駒取り等）も自動的に付与されます。
 ```bash
 python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --output-h5 <出力H5ファイル> --engine-path <エンジンパス> [探索オプション]
 ```
+**オプション:**
+*   `--db-path`: 評価値のキャッシュ（再利用）にDBを使用します。
+
+### `analyze_sfen_dist`
+`count-sfen` で作成したDBを分析し、局面出現頻度の分布をヒストグラムとして出力します。
+```bash
+python src/analyze_sfen_dist.py --db-path <DBパス> --output-img <画像出力パス>
+```
+**出力内容:**
+*   総ユニーク局面数、最大出現頻度などの統計情報。
+*   出現頻度上位の局面（SFEN）リスト。
+*   出現頻度および出力頻度のヒストグラム（PNG画像）。
 **探索オプション:**
 *   `evaluate`コマンドと同様のオプション（`--depth`, `--nodes`, `--movetime`, `--early-xxx`等）が使用可能です。
 *   `--num-pv`: MultiPVで取得する候補手の数（デフォルト: 5）
