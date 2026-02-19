@@ -29,6 +29,10 @@ from extract_features import make_feature_dict
 # データベース管理
 # ================================
 
+from collections import defaultdict, Counter
+
+# (中略)
+
 class SfenDB:
     """SFENの出現頻度と評価値を管理するSQLiteクラス。"""
     def __init__(self, db_path: str):
@@ -64,11 +68,12 @@ class SfenDB:
         ''')
         self.conn.commit()
 
-    def increment_total_count_batch(self, sfens: list):
+    def update_total_counts_batch(self, sfen_counts: dict):
+        """メモリで集計した頻度(dict)を一括でDBにマージする。"""
         self.cursor.executemany('''
-            INSERT INTO sfen_counts (sfen, total_count) VALUES (?, 1)
-            ON CONFLICT(sfen) DO UPDATE SET total_count = total_count + 1
-        ''', [(s,) for s in sfens])
+            INSERT INTO sfen_counts (sfen, total_count) VALUES (?, ?)
+            ON CONFLICT(sfen) DO UPDATE SET total_count = total_count + excluded.total_count
+        ''', list(sfen_counts.items()))
 
     def check_output_limit(self, sfen: str, max_count: int) -> bool:
         """出力回数が上限に達しているか確認。max_count=0は無制限。"""
@@ -83,6 +88,8 @@ class SfenDB:
             INSERT INTO sfen_counts (sfen, output_count) VALUES (?, 1)
             ON CONFLICT(sfen) DO UPDATE SET output_count = output_count + 1
         ''', (sfen,))
+
+    # (中略: get_eval, save_eval, commit, close はそのまま)
 
     def get_eval(self, sfen: str, depth: int, nodes: int, movetime: int):
         self.cursor.execute('''
@@ -112,19 +119,97 @@ class SfenDB:
 # データ生成ロジック
 # ================================
 
+import zlib
+from collections import defaultdict
+
+# (中略)
+
+class SfenDB:
+    """SFENの出現頻度と評価値を管理するSQLiteクラス。"""
+    def __init__(self, db_path: str):
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self._create_tables()
+
+    def _create_tables(self):
+        self.cursor.execute('PRAGMA journal_mode = WAL')
+        self.cursor.execute('PRAGMA synchronous = NORMAL')
+        self.cursor.execute('PRAGMA cache_size = -1000000') # 1GBのキャッシュ
+        
+        # 出現頻度管理
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_counts (
+                sfen TEXT PRIMARY KEY,
+                total_count INTEGER DEFAULT 0,
+                output_count INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # 評価値キャッシュ
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_cache (
+                sfen TEXT,
+                depth INTEGER,
+                nodes INTEGER,
+                movetime INTEGER,
+                score_type TEXT,
+                score_value INTEGER,
+                PRIMARY KEY (sfen, depth, nodes, movetime)
+            )
+        ''')
+        self.conn.commit()
+
+    def increment_total_count_if_duplicate(self, sfen: str):
+        """
+        重複が検知された局面のカウントを更新。
+        初めてDBに登録される場合は、ビットセットで1回見ているはずなので2から開始する。
+        """
+        self.cursor.execute('''
+            INSERT INTO sfen_counts (sfen, total_count) VALUES (?, 2)
+            ON CONFLICT(sfen) DO UPDATE SET total_count = total_count + 1
+        ''', (sfen,))
+
+    def check_output_limit(self, sfen: str, max_count: int) -> bool:
+        """出力回数が上限に達しているか確認。"""
+        if max_count <= 0: return True
+        self.cursor.execute('SELECT output_count FROM sfen_counts WHERE sfen = ?', (sfen,))
+        res = self.cursor.fetchone()
+        count = res['output_count'] if res else 0
+        return count < max_count
+
+    def increment_output_count(self, sfen: str):
+        self.cursor.execute('''
+            INSERT INTO sfen_counts (sfen, output_count) VALUES (?, 1)
+            ON CONFLICT(sfen) DO UPDATE SET output_count = output_count + 1
+        ''', (sfen,))
+
+# (中略)
+
 def count_sfen_logic(args: argparse.Namespace) -> None:
     """
     [count-sfenコマンド] 全棋譜をスキャンしてSFENの出現頻度をカウントする。
+    巨大なビットセットを使用して出現1回の局面をフィルタリングし、
+    重複局面のみをSQLiteに保存することで、メモリとディスクI/Oを劇的に節約する。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     db = SfenDB(args.db_path)
     
+    # ビットセットの初期化 (512MB = 4,294,967,296 ビット)
+    # これにより約40億局面までの重複判定を低衝突で行える
+    BITSET_SIZE = 512 * 1024 * 1024 * 8 
+    print(f"ビットセットを初期化中 ({BITSET_SIZE // (8*1024*1024)} MB)...")
+    bitset = bytearray(BITSET_SIZE // 8)
+    
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         metas = list(csv.DictReader(f))
     
-    print(f"--- SFEN頻度集計を開始 (対象対局数: {len(metas)}) ---")
+    print(f"--- SFEN頻度集計(1億局面対応版)を開始 (対象対局数: {len(metas)}) ---")
     kifs_by_file = defaultdict(list)
     for m in metas: kifs_by_file[m['file_path']].append(m)
+    
+    total_positions = 0
+    duplicate_hits = 0
     
     with tqdm(kifs_by_file.items(), unit="file") as pbar:
         for csa_path, metas_in_file in pbar:
@@ -132,25 +217,37 @@ def count_sfen_logic(args: argparse.Namespace) -> None:
             try:
                 all_kifs = cshogi.Parser.parse_file(csa_path)
                 if not all_kifs: continue
-                sfens_to_update = []
                 for meta in metas_in_file:
                     kif = all_kifs[int(meta['kif_index'])]
                     board = cshogi.Board(kif.sfen)
                     for ply, move in enumerate(kif.moves, 1):
                         if ply > args.max_ply: break
                         if ply >= args.min_ply:
-                            sfens_to_update.append(board.sfen())
+                            sfen = board.sfen()
+                            total_positions += 1
+                            
+                            # SFENのハッシュ値を計算 (CRC32は高速)
+                            h = zlib.crc32(sfen.encode()) % BITSET_SIZE
+                            
+                            # ビットチェック
+                            if bitset[h // 8] & (1 << (h % 8)):
+                                # 重複の可能性あり -> DBを更新
+                                db.increment_total_count_if_duplicate(sfen)
+                                duplicate_hits += 1
+                                # 1000ヒットごとにコミット
+                                if duplicate_hits % 1000 == 0: db.commit()
+                            else:
+                                # 初出 -> ビットを立てる
+                                bitset[h // 8] |= (1 << (h % 8))
                         board.push(move)
-                
-                if sfens_to_update:
-                    db.increment_total_count_batch(sfens_to_update)
-                    # 適宜コミットしてメモリを節約
-                    if len(sfens_to_update) > 1000: db.commit()
             except Exception as e:
                 print(f"\nエラー: {csa_path} ({e})", file=sys.stderr)
     
     db.close()
-    print("SFEN頻度集計が完了しました。")
+    print(f"\n集計完了。")
+    print(f"総局面数: {total_positions:,}")
+    print(f"重複検知回数 (DB書き込み): {duplicate_hits:,}")
+    print(f"※出現1回の局面はDBに保存されていません。")
 
 def extract_metadata(csa_dir: str, output_csv: str) -> None:
     """
