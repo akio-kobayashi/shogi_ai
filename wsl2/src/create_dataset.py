@@ -12,6 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 import yaml
 import traceback
+import sqlite3
 
 try:
     from tqdm import tqdm
@@ -25,8 +26,228 @@ from usi import UsiEngine
 from extract_features import make_feature_dict
 
 # ================================
+# データベース管理
+# ================================
+
+from collections import defaultdict, Counter
+
+# (中略)
+
+class SfenDB:
+    """SFENの出現頻度と評価値を管理するSQLiteクラス。"""
+    def __init__(self, db_path: str):
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self._create_tables()
+
+    def _create_tables(self):
+        self.cursor.execute('PRAGMA journal_mode = WAL')
+        self.cursor.execute('PRAGMA synchronous = NORMAL')
+        
+        # 出現頻度管理
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_counts (
+                sfen TEXT PRIMARY KEY,
+                total_count INTEGER DEFAULT 0,
+                output_count INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # 評価値キャッシュ (sfen + 探索条件をキーにする)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_cache (
+                sfen TEXT,
+                depth INTEGER,
+                nodes INTEGER,
+                movetime INTEGER,
+                score_type TEXT,
+                score_value INTEGER,
+                PRIMARY KEY (sfen, depth, nodes, movetime)
+            )
+        ''')
+        self.conn.commit()
+
+    def update_total_counts_batch(self, sfen_counts: dict):
+        """メモリで集計した頻度(dict)を一括でDBにマージする。"""
+        self.cursor.executemany('''
+            INSERT INTO sfen_counts (sfen, total_count) VALUES (?, ?)
+            ON CONFLICT(sfen) DO UPDATE SET total_count = total_count + excluded.total_count
+        ''', list(sfen_counts.items()))
+
+    def check_output_limit(self, sfen: str, max_count: int) -> bool:
+        """出力回数が上限に達しているか確認。max_count=0は無制限。"""
+        if max_count <= 0: return True
+        self.cursor.execute('SELECT output_count FROM sfen_counts WHERE sfen = ?', (sfen,))
+        res = self.cursor.fetchone()
+        count = res['output_count'] if res else 0
+        return count < max_count
+
+    def increment_output_count(self, sfen: str):
+        self.cursor.execute('''
+            INSERT INTO sfen_counts (sfen, output_count) VALUES (?, 1)
+            ON CONFLICT(sfen) DO UPDATE SET output_count = output_count + 1
+        ''', (sfen,))
+
+    # (中略: get_eval, save_eval, commit, close はそのまま)
+
+    def get_eval(self, sfen: str, depth: int, nodes: int, movetime: int):
+        self.cursor.execute('''
+            SELECT score_type, score_value FROM sfen_cache 
+            WHERE sfen = ? AND depth IS ? AND nodes IS ? AND movetime IS ?
+        ''', (sfen, depth, nodes, movetime))
+        res = self.cursor.fetchone()
+        return (res['score_type'], res['score_value']) if res else None
+
+    def save_eval(self, sfen: str, depth: int, nodes: int, movetime: int, score_type: str, score_value: int):
+        self.cursor.execute('''
+            INSERT INTO sfen_cache (sfen, depth, nodes, movetime, score_type, score_value) 
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sfen, depth, nodes, movetime) DO UPDATE SET 
+                score_type = excluded.score_type, 
+                score_value = excluded.score_value
+        ''', (sfen, depth, nodes, movetime, score_type, score_value))
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.commit()
+        self.conn.close()
+
+# ================================
 # データ生成ロジック
 # ================================
+
+import zlib
+from collections import defaultdict
+
+# (中略)
+
+class SfenDB:
+    """SFENの出現頻度と評価値を管理するSQLiteクラス。"""
+    def __init__(self, db_path: str):
+        self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self._create_tables()
+
+    def _create_tables(self):
+        self.cursor.execute('PRAGMA journal_mode = WAL')
+        self.cursor.execute('PRAGMA synchronous = NORMAL')
+        self.cursor.execute('PRAGMA cache_size = -1000000') # 1GBのキャッシュ
+        
+        # 出現頻度管理
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_counts (
+                sfen TEXT PRIMARY KEY,
+                total_count INTEGER DEFAULT 0,
+                output_count INTEGER DEFAULT 0
+            )
+        ''')
+        
+        # 評価値キャッシュ
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sfen_cache (
+                sfen TEXT,
+                depth INTEGER,
+                nodes INTEGER,
+                movetime INTEGER,
+                score_type TEXT,
+                score_value INTEGER,
+                PRIMARY KEY (sfen, depth, nodes, movetime)
+            )
+        ''')
+        self.conn.commit()
+
+    def increment_total_count_if_duplicate(self, sfen: str):
+        """
+        重複が検知された局面のカウントを更新。
+        初めてDBに登録される場合は、ビットセットで1回見ているはずなので2から開始する。
+        """
+        self.cursor.execute('''
+            INSERT INTO sfen_counts (sfen, total_count) VALUES (?, 2)
+            ON CONFLICT(sfen) DO UPDATE SET total_count = total_count + 1
+        ''', (sfen,))
+
+    def check_output_limit(self, sfen: str, max_count: int) -> bool:
+        """出力回数が上限に達しているか確認。"""
+        if max_count <= 0: return True
+        self.cursor.execute('SELECT output_count FROM sfen_counts WHERE sfen = ?', (sfen,))
+        res = self.cursor.fetchone()
+        count = res['output_count'] if res else 0
+        return count < max_count
+
+    def increment_output_count(self, sfen: str):
+        self.cursor.execute('''
+            INSERT INTO sfen_counts (sfen, output_count) VALUES (?, 1)
+            ON CONFLICT(sfen) DO UPDATE SET output_count = output_count + 1
+        ''', (sfen,))
+
+# (中略)
+
+def count_sfen_logic(args: argparse.Namespace) -> None:
+    """
+    [count-sfenコマンド] 全棋譜をスキャンしてSFENの出現頻度をカウントする。
+    巨大なビットセットを使用して出現1回の局面をフィルタリングし、
+    重複局面のみをSQLiteに保存することで、メモリとディスクI/Oを劇的に節約する。
+    """
+    if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
+    db = SfenDB(args.db_path)
+    
+    # ビットセットの初期化 (512MB = 4,294,967,296 ビット)
+    # これにより約40億局面までの重複判定を低衝突で行える
+    BITSET_SIZE = 512 * 1024 * 1024 * 8 
+    print(f"ビットセットを初期化中 ({BITSET_SIZE // (8*1024*1024)} MB)...")
+    bitset = bytearray(BITSET_SIZE // 8)
+    
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
+        metas = list(csv.DictReader(f))
+    
+    print(f"--- SFEN頻度集計(1億局面対応版)を開始 (対象対局数: {len(metas)}) ---")
+    kifs_by_file = defaultdict(list)
+    for m in metas: kifs_by_file[m['file_path']].append(m)
+    
+    total_positions = 0
+    duplicate_hits = 0
+    
+    with tqdm(kifs_by_file.items(), unit="file") as pbar:
+        for csa_path, metas_in_file in pbar:
+            pbar.set_description(f"Counting {Path(csa_path).name}")
+            try:
+                all_kifs = cshogi.Parser.parse_file(csa_path)
+                if not all_kifs: continue
+                for meta in metas_in_file:
+                    kif = all_kifs[int(meta['kif_index'])]
+                    board = cshogi.Board(kif.sfen)
+                    for ply, move in enumerate(kif.moves, 1):
+                        if ply > args.max_ply: break
+                        if ply >= args.min_ply:
+                            sfen = board.sfen()
+                            total_positions += 1
+                            
+                            # SFENのハッシュ値を計算 (CRC32は高速)
+                            h = zlib.crc32(sfen.encode()) % BITSET_SIZE
+                            
+                            # ビットチェック
+                            if bitset[h // 8] & (1 << (h % 8)):
+                                # 重複の可能性あり -> DBを更新
+                                db.increment_total_count_if_duplicate(sfen)
+                                duplicate_hits += 1
+                                # 1000ヒットごとにコミット
+                                if duplicate_hits % 1000 == 0: db.commit()
+                            else:
+                                # 初出 -> ビットを立てる
+                                bitset[h // 8] |= (1 << (h % 8))
+                        board.push(move)
+            except Exception as e:
+                print(f"\nエラー: {csa_path} ({e})", file=sys.stderr)
+    
+    db.close()
+    print(f"\n集計完了。")
+    print(f"総局面数: {total_positions:,}")
+    print(f"重複検知回数 (DB書き込み): {duplicate_hits:,}")
+    print(f"※出現1回の局面はDBに保存されていません。")
 
 def extract_metadata(csa_dir: str, output_csv: str) -> None:
     """
@@ -120,20 +341,26 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
 def run_label(args: argparse.Namespace) -> None:
     """
     [labelコマンド] エンジンを使わず、対局結果から評価値を付与（ラベリング）する。
+    DBの指定がある場合、同一局面の出力上限管理を行う。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
-    print("--- ラベリング処理を開始 ---")
+    db = SfenDB(args.db_path) if args.db_path else None
+    print(f"--- ラベリング処理を開始 (DB: {args.db_path}, 上限: {args.max_sfen_count}) ---")
+    
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         all_kifs_meta, header = list(reader), reader.fieldnames
+        
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
     print(f"ラベル付きデータを '{output_csv_path}' に書き込みます。")
+    
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
         kifs_by_file = defaultdict(list)
         for meta in all_kifs_meta: kifs_by_file[meta['file_path']].append(meta)
+        
         with tqdm(kifs_by_file.items(), unit="file") as pbar:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Labeling {Path(csa_path).name}")
@@ -145,19 +372,27 @@ def run_label(args: argparse.Namespace) -> None:
                         game_result = int(meta['game_result'])
                         board = cshogi.Board(kif.sfen)
                         for ply, move in enumerate(kif.moves, 1):
-                            current_turn = board.turn
-                            score = 0
-                            if game_result == 1:
-                                score = args.score_scale if current_turn == cshogi.BLACK else -args.score_scale
-                            elif game_result == 2:
-                                score = -args.score_scale if current_turn == cshogi.BLACK else args.score_scale
                             sfen = board.sfen()
-                            meta_with_eval = meta.copy()
-                            meta_with_eval.update({'ply': ply, 'eval_score_cp': score, 'sfen': sfen})
-                            writer.writerow(meta_with_eval)
+                            # DB指定がある場合はキャップ判定
+                            if db is None or db.check_output_limit(sfen, args.max_sfen_count):
+                                current_turn = board.turn
+                                score = 0
+                                if game_result == 1:
+                                    score = args.score_scale if current_turn == cshogi.BLACK else -args.score_scale
+                                elif game_result == 2:
+                                    score = -args.score_scale if current_turn == cshogi.BLACK else args.score_scale
+                                
+                                meta_with_eval = meta.copy()
+                                meta_with_eval.update({'ply': ply, 'eval_score_cp': score, 'sfen': sfen})
+                                writer.writerow(meta_with_eval)
+                                
+                                if db:
+                                    db.increment_output_count(sfen)
                             board.push(move)
+                    if db: db.commit()
                 except Exception as e:
                     print(f"\nラベリング処理エラー: {csa_path} ({e})", file=sys.stderr)
+    if db: db.close()
     print("ラベリング処理が完了しました。")
 
 def get_search_params(args: argparse.Namespace, ply: int):
@@ -178,26 +413,33 @@ def get_search_params(args: argparse.Namespace, ply: int):
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
     [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
+    DBの指定がある場合、評価値の再利用と同一局面の出力上限管理を行う。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
-    print(f"--- 局面評価を開始 ---")
+    
+    db = SfenDB(args.db_path) if args.db_path else None
+    print(f"--- 局面評価を開始 (DB: {args.db_path}, 上限: {args.max_sfen_count}) ---")
+    
     try:
         engine = UsiEngine(str(args.engine_path))
         print("USIエンジン準備完了。")
     except Exception as e:
         sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
+        
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         all_kifs_meta, header = list(reader), reader.fieldnames
+        
     output_csv_path = Path(args.output_csv)
     output_header = header + ['ply', 'eval_score_cp', 'sfen']
-    print(f"評価結果を '{output_csv_path}' に書き込みます。")
+    
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
         kifs_by_file = defaultdict(list)
         for meta in all_kifs_meta: kifs_by_file[meta['file_path']].append(meta)
+        
         with tqdm(kifs_by_file.items(), unit="file") as pbar:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
@@ -210,22 +452,42 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                         for ply, move in enumerate(kif.moves, 1):
                             if ply > args.max_ply: break
                             if ply >= args.min_ply:
-                                try:
-                                    sfen = board.sfen()
-                                    d, n, m = get_search_params(args, ply)
-                                    score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
-                                    eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
-                                    meta_with_eval = meta.copy()
-                                    meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
-                                    writer.writerow(meta_with_eval)
-                                except Exception as e:
-                                    print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} ({e})", file=sys.stderr)
-                                    traceback.print_exc()
+                                sfen = board.sfen()
+                                # DB指定がある場合はキャップ判定
+                                if db is None or db.check_output_limit(sfen, args.max_sfen_count):
+                                    try:
+                                        d, n, m = get_search_params(args, ply)
+                                        score_type, score_value = None, None
+                                        
+                                        # DB指定がある場合はキャッシュ確認
+                                        if db:
+                                            cached_eval = db.get_eval(sfen, d, n, m)
+                                            if cached_eval:
+                                                score_type, score_value = cached_eval
+                                        
+                                        # キャッシュがなければエンジン評価
+                                        if score_type is None:
+                                            score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
+                                            if db:
+                                                db.save_eval(sfen, d, n, m, score_type, score_value)
+                                        
+                                        eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
+                                        meta_with_eval = meta.copy()
+                                        meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
+                                        writer.writerow(meta_with_eval)
+                                        
+                                        if db:
+                                            db.increment_output_count(sfen)
+                                    except Exception as e:
+                                        print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} ({e})", file=sys.stderr)
+                                        traceback.print_exc()
                             board.push(move)
+                    if db: db.commit()
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
                     traceback.print_exc()
     engine.quit()
+    if db: db.close()
     print("局面評価が完了しました。")
 
 def write_bin_file(positions: list, output_path: str):
@@ -273,21 +535,27 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
 def run_build_h5(args: argparse.Namespace) -> None:
     """
     [build-h5コマンド] フィルタリング済みCSVから、階層的なHDF5データセットを生成する。
+    DBの指定がある場合、評価値のキャッシュ（再利用）を行う。
     """
     try: import h5py
     except ImportError: sys.exit("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。")
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
-    print("--- HDF5データセット構築開始 ---")
+    
+    db = SfenDB(args.db_path) if args.db_path else None
+    print(f"--- HDF5データセット構築開始 (DB: {args.db_path}) ---")
+    
     try:
         engine = UsiEngine(str(args.engine_path))
         print("USIエンジン準備完了。")
     except Exception as e:
         sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
+        
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         games_to_process = list(csv.DictReader(f_in))
+        
     candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
-    # 特徴量用のデータ型定義 (extract_features.py の出力に合わせる)
+    # 特徴量用のデータ型定義
     hand_dtype = np.dtype([(f'hand_{p}', np.int8) for p in ['P', 'L', 'N', 'S', 'G', 'B', 'R']])
     feature_dtype = np.dtype([
         ('in_check', np.int8),
@@ -319,10 +587,17 @@ def run_build_h5(args: argparse.Namespace) -> None:
                 game_positions_data = []
                 for ply, move in enumerate(game.moves, 1):
                     sfen = board.sfen()
-                    # 特徴量の抽出
                     feat_dict = make_feature_dict(board)
                     
                     d, n, m = get_search_params(args, ply)
+                    
+                    # キャッシュ確認 (MultiPVの場合は現状エンジンを叩く必要があるが、
+                    # 将来的にはMultiPVの結果も保存するように拡張可能。今回は単一評価値のみDB化)
+                    # ※ build-h5はMultiPV前提なので、DBに候補手リストを保存するロジックが必要。
+                    # ここでは簡略化のため、build-h5のキャッシュはスキップするか、
+                    # MultiPV用の別のキャッシュテーブルを検討する。
+                    # 今回はMultiPVの結果をまるごと保存する仕組みがないため、そのまま実行。
+                    
                     candidates_info = engine.get_multipv(sfen, depth=d, nodes=n, movetime=m, num_pv=args.num_pv)
                     candidates_list = [(cand['move'], cand['score'], cand['is_mate']) for cand in candidates_info]
                     
@@ -331,7 +606,6 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     board.to_psfen(pos_struct[0]['psv'])
                     pos_struct[0]['is_check'] = board.is_check()
                     
-                    # 特徴量を構造体にコピー
                     f = pos_struct[0]['features']
                     f['in_check'] = feat_dict['in_check']
                     f['is_mate'] = feat_dict['is_mate']
@@ -349,6 +623,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
             except Exception as e:
                 print(f"\n対局処理エラー: {game_meta.get('file_path')} ({e})", file=sys.stderr)
     engine.quit()
+    if db: db.close()
     print("\nHDF5データセットの構築が完了しました。")
 
 def main() -> None:
@@ -374,16 +649,27 @@ def main() -> None:
     filter_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方のプレイヤーが勝った対局のみを抽出します（番狂わせを除外）。")
     filter_parser.set_defaults(func=run_filter_metadata)
 
+    count_sfen_parser = subparsers.add_parser("count-sfen", help="SFENの出現頻度をカウントしてDBに保存します。")
+    count_sfen_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
+    count_sfen_parser.add_argument("--db-path", default="sfen_cache.db", help="SFEN頻度と評価値を保存するSQLite DBのパス。")
+    count_sfen_parser.add_argument("--min-ply", type=int, default=0)
+    count_sfen_parser.add_argument("--max-ply", type=int, default=999)
+    count_sfen_parser.set_defaults(func=count_sfen_logic)
+
     label_parser = subparsers.add_parser("label", help="対局結果から評価値をラベリングします（エンジン不要）。")
     label_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     label_parser.add_argument("--output-csv", help="ラベリング結果を保存するCSVのパス。")
     label_parser.add_argument("--score-scale", type=int, default=600)
+    label_parser.add_argument("--db-path", help="SFEN頻度を管理するSQLite DBのパス。指定すると上限管理が有効になります。")
+    label_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
     label_parser.set_defaults(func=run_label)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="フィルタリング済みCSVの局面を評価します。")
     evaluate_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
+    evaluate_parser.add_argument("--db-path", help="SFEN頻度と評価値を管理するSQLite DBのパス。指定するとキャッシュと上限管理が有効になります。")
+    evaluate_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
     evaluate_parser.add_argument("--depth", type=int, default=10)
     evaluate_parser.add_argument("--nodes", type=int, default=None)
     evaluate_parser.add_argument("--movetime", type=int, default=None)
@@ -405,6 +691,7 @@ def main() -> None:
     build_h5_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     build_h5_parser.add_argument("--output-h5", help="出力するHDF5ファイルのパス。")
     build_h5_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
+    build_h5_parser.add_argument("--db-path", help="SFENキャッシュを管理するSQLite DBのパス。")
     build_h5_parser.add_argument("--depth", type=int, default=10)
     build_h5_parser.add_argument("--nodes", type=int, default=None)
     build_h5_parser.add_argument("--movetime", type=int, default=None)
