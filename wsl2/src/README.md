@@ -76,6 +76,18 @@ python src/analyze_sfen_dist.py --db-path <DBパス> --output-img <画像出力�
 *   総ユニーク局面数、最大出現頻度などの統計情報。
 *   出現頻度上位の局面（SFEN）リスト。
 *   出現頻度および出力頻度のヒストグラム（PNG画像）。
+
+### `analyze_app` (Gradio版 解析ツール)
+Gradioを使用したWeb UI形式の棋譜分析ツールです。評価値グラフと盤面図（SVG）を連動させて、インタラクティブに悪手を分析できます。
+```bash
+# 起動方法
+python src/analyze_app.py
+```
+**主な機能:**
+*   **インタラクティブグラフ**: Plotlyを使用し、グラフ上の点を選択するとその局面の盤面が表示されます。
+*   **盤面SVG表示**: `cshogi` を使用して、駒の動きがわかりやすい局面図を表示します。
+*   **外部アクセス**: 起動時に表示される `Public URL` (https://xxx.gradio.app) を使うことで、外部のブラウザからもアクセス可能です。
+
 **探索オプション:**
 *   `evaluate`コマンドと同様のオプション（`--depth`, `--nodes`, `--movetime`, `--early-xxx`等）が使用可能です。
 *   `--num-pv`: MultiPVで取得する候補手の数（デフォルト: 5）
