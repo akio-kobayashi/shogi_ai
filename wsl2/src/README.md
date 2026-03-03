@@ -90,6 +90,20 @@ python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --ou
 ```bash
 python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
 ```
+**主なオプション:**
+*   `--val-split`: 検証データ比率
+*   `--sfen-count-csv`: `count-sfen` が出力した頻度CSV
+*   `--sfen-sampling-mode`: `none` / `fixed` / `sqrt` / `log10`
+*   `--sfen-cutoff-value`: `fixed`方式の上限値
+*   `--sfen-sampling-min-freq`: この頻度未満のSFENにはサンプリング上限を適用しない
+
+**頻度サンプリングの仕様:**
+*   しきい値未満を除外するフィルタではなく、同一SFENごとに確率サンプリングを行います。
+*   サンプル後の期待頻度が以下に収束するように受理確率を決めます。
+*   `fixed`: 期待頻度 = `sfen-cutoff-value`
+*   `sqrt`: 期待頻度 = `sqrt(total_count)`
+*   `log10`: 期待頻度 = `log10(total_count)`（最小1）
+*   `total_count < sfen-sampling-min-freq` のSFENは、サンプリングせず全件残します。
 
 ### `build-h5`
 フィルタリング済みCSVを元に、USIエンジンで詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。

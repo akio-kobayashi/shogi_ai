@@ -15,6 +15,7 @@ import traceback
 import sqlite3
 import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import math
 
 try:
     from tqdm import tqdm
@@ -787,6 +788,19 @@ def write_bin_file(positions: list, output_path: str):
             except Exception as e:
                 print(f"\nデータ書き込みエラー: {pos} ({e})", file=sys.stderr)
 
+
+def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
+    if mode == "fixed":
+        return max(1.0, float(value))
+    if mode == "sqrt":
+        return max(1.0, math.sqrt(freq))
+    if mode == "log10":
+        if freq <= 1:
+            return 1.0
+        return max(1.0, math.log10(freq))
+    return float(freq)
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
@@ -797,6 +811,52 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
         all_positions = list(csv.DictReader(f))
     if not all_positions: sys.exit("エラー: 入力ファイルにデータがありません。")
     print(f"読み込み完了。総局面数: {len(all_positions)}")
+
+    if args.sfen_sampling_mode != "none":
+        if not args.sfen_count_csv:
+            sys.exit("エラー: SFEN頻度サンプリングを使う場合は --sfen-count-csv の指定が必須です。")
+        if not Path(args.sfen_count_csv).exists():
+            sys.exit(f"エラー: SFEN頻度CSV '{args.sfen_count_csv}' が見つかりません。")
+        if args.sfen_sampling_mode == "fixed" and args.sfen_cutoff_value <= 0:
+            sys.exit("エラー: --sfen-sampling-mode fixed の場合、--sfen-cutoff-value は1以上を指定してください。")
+        if args.sfen_sampling_min_freq < 1:
+            sys.exit("エラー: --sfen-sampling-min-freq は1以上を指定してください。")
+
+        freq_map = {}
+        with open(args.sfen_count_csv, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    freq_map[row['sfen']] = int(row['total_count'])
+                except (KeyError, ValueError):
+                    continue
+
+        by_sfen = defaultdict(list)
+        for pos in all_positions:
+            sfen = pos.get('sfen')
+            if sfen:
+                by_sfen[sfen].append(pos)
+
+        sampled_positions = []
+        applied_sfens = 0
+        for sfen, items in by_sfen.items():
+            freq = freq_map.get(sfen, len(items))
+            if freq < args.sfen_sampling_min_freq:
+                sampled_positions.extend(items)
+                continue
+            target = _compute_sampling_target(freq, args.sfen_sampling_mode, args.sfen_cutoff_value)
+            keep_prob = min(1.0, target / max(1, freq))
+            applied_sfens += 1
+            for item in items:
+                if random.random() < keep_prob:
+                    sampled_positions.append(item)
+        all_positions = sampled_positions
+        print(
+            f"SFEN頻度サンプリングを適用: mode={args.sfen_sampling_mode}, "
+            f"min_freq={args.sfen_sampling_min_freq}, "
+            f"局面数 {len(sampled_positions):,}, 適用SFEN数 {applied_sfens:,}"
+        )
+
     random.shuffle(all_positions)
     val_size = int(len(all_positions) * args.val_split)
     train_positions, val_positions = all_positions[val_size:], all_positions[:val_size]
@@ -966,6 +1026,10 @@ def main() -> None:
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
     generate_parser.add_argument("--val-split", type=float, default=0.1)
+    generate_parser.add_argument("--sfen-count-csv", help="count-sfenで生成したSFEN頻度CSVのパス。")
+    generate_parser.add_argument("--sfen-sampling-mode", choices=["none", "fixed", "sqrt", "log10"], default="none", help="SFEN頻度を使ったサンプリング上限方式。")
+    generate_parser.add_argument("--sfen-cutoff-value", type=float, default=1.0, help="fixed方式の上限値。")
+    generate_parser.add_argument("--sfen-sampling-min-freq", type=int, default=1, help="この頻度未満のSFENにはサンプリング上限を適用しない。")
     generate_parser.set_defaults(func=generate_datasets_logic)
 
     build_h5_parser = subparsers.add_parser("build-h5", help="フィルタリング済みCSVから階層的なHDF5データセットを生成します。")
