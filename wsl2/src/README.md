@@ -18,6 +18,9 @@
 ### C) `.h5`形式 (高機能版)
 `extract` → `filter` → `build-h5`
 
+### D) 局面頻度集計（外部メモリ方式）
+`extract` → `filter` → `count-sfen`
+
 ---
 
 ## コマンド詳細
@@ -57,6 +60,30 @@ python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --outp
 *   `--early-depth`, `--early-nodes`, `--early-movetime`: 序盤用の探索パラメータ
 *   `--early-ply-threshold`: 序盤用のパラメータを適用する最大手数（デフォルト: 0）
 *   `--min-ply`, `--max-ply`: 評価対象とする手数の範囲
+*   `--eval-workers`: evaluate時の並列ワーカー数（2以上でプロセス並列）
+*   `--eval-mode`: `stream`（逐次評価）/`unique`（ユニーク局面評価後に展開）
+
+**補足（制約）:**
+*   `--eval-workers > 1` の場合は、`--db-path` と `--max-sfen-count` は使用できません。
+*   `--eval-mode unique` は現在 `--eval-workers=1` のみ対応です。
+*   `--eval-mode unique` では `--db-path` は使用できません。
+
+### `count-sfen`
+フィルタリング済みCSVを元に、SFENの局面頻度を外部メモリ方式で集計し、CSVを生成します（SQLite不要）。
+```bash
+python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --output-csv <頻度CSV>
+```
+**主なオプション:**
+*   `--min-ply`, `--max-ply`: 集計対象とする手数の範囲
+*   `--min-count`: 出力する最小出現回数（デフォルト: 1）
+*   `--num-buckets`: 外部メモリ集計で使用するバケット数（デフォルト: 1024）
+*   `--temp-dir`: 一時バケットファイルの出力先
+*   `--keep-temp`: 集計後も一時ファイルを保持
+
+**出力CSV列:**
+*   `sfen`
+*   `total_count`
+*   `black_win_count`
 
 ### `generate`
 評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
