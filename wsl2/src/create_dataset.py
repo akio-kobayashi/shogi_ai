@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 import traceback
 import sqlite3
+import shutil
 
 try:
     from tqdm import tqdm
@@ -188,29 +189,45 @@ class SfenDB:
 
 def count_sfen_logic(args: argparse.Namespace) -> None:
     """
-    [count-sfenコマンド] 全棋譜をスキャンしてSFENの出現頻度をカウントする。
-    巨大なビットセットを使用して出現1回の局面をフィルタリングし、
-    重複局面のみをSQLiteに保存することで、メモリとディスクI/Oを劇的に節約する。
+    [count-sfenコマンド] 全棋譜をスキャンしてSFENの出現頻度をカウントし、CSVに保存する。
+    外部メモリ方式: 1) バケット分割して一時ファイルへ書き出し 2) バケットごとに集計。
     """
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
-    db = SfenDB(args.db_path)
-    
-    # ビットセットの初期化 (512MB = 4,294,967,296 ビット)
-    # これにより約40億局面までの重複判定を低衝突で行える
-    BITSET_SIZE = 512 * 1024 * 1024 * 8 
-    print(f"ビットセットを初期化中 ({BITSET_SIZE // (8*1024*1024)} MB)...")
-    bitset = bytearray(BITSET_SIZE // 8)
-    
+    if args.num_buckets <= 0: sys.exit("エラー: --num-buckets は1以上を指定してください。")
+    if args.min_count <= 0: sys.exit("エラー: --min-count は1以上を指定してください。")
+
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
         metas = list(csv.DictReader(f))
-    
-    print(f"--- SFEN頻度集計(1億局面対応版)を開始 (対象対局数: {len(metas)}) ---")
+
+    print(f"--- SFEN頻度集計を開始 (対象対局数: {len(metas)}) ---")
     kifs_by_file = defaultdict(list)
     for m in metas: kifs_by_file[m['file_path']].append(m)
-    
+
+    output_path = Path(args.output_csv)
+    temp_root = Path(args.temp_dir) if args.temp_dir else output_path.parent / f".count_sfen_tmp_{output_path.stem}"
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    bucket_paths = [temp_root / f"bucket_{i:04d}.txt" for i in range(args.num_buckets)]
+    buffer_by_bucket = defaultdict(list)
+    buffered_rows = 0
+    flush_every = 50000
+
+    def flush_buffers():
+        nonlocal buffered_rows
+        for bucket_id, records in buffer_by_bucket.items():
+            if not records:
+                continue
+            with open(bucket_paths[bucket_id], 'a', encoding='utf-8') as bf:
+                bf.write("\n".join(records))
+                bf.write("\n")
+        buffer_by_bucket.clear()
+        buffered_rows = 0
+
     total_positions = 0
-    duplicate_hits = 0
-    
+
+    print(f"フェーズ1/2: 一時バケットへ書き出し中 (buckets={args.num_buckets})")
     with tqdm(kifs_by_file.items(), unit="file") as pbar:
         for csa_path, metas_in_file in pbar:
             pbar.set_description(f"Counting {Path(csa_path).name}")
@@ -219,35 +236,61 @@ def count_sfen_logic(args: argparse.Namespace) -> None:
                 if not all_kifs: continue
                 for meta in metas_in_file:
                     kif = all_kifs[int(meta['kif_index'])]
+                    is_black_win = 1 if int(meta.get('game_result', 0)) == 1 else 0
                     board = cshogi.Board(kif.sfen)
                     for ply, move in enumerate(kif.moves, 1):
                         if ply > args.max_ply: break
                         if ply >= args.min_ply:
                             sfen = board.sfen()
                             total_positions += 1
-                            
-                            # SFENのハッシュ値を計算 (CRC32は高速)
-                            h = zlib.crc32(sfen.encode()) % BITSET_SIZE
-                            
-                            # ビットチェック
-                            if bitset[h // 8] & (1 << (h % 8)):
-                                # 重複の可能性あり -> DBを更新
-                                db.increment_total_count_if_duplicate(sfen)
-                                duplicate_hits += 1
-                                # 1000ヒットごとにコミット
-                                if duplicate_hits % 1000 == 0: db.commit()
-                            else:
-                                # 初出 -> ビットを立てる
-                                bitset[h // 8] |= (1 << (h % 8))
+                            bucket_id = zlib.crc32(sfen.encode('utf-8')) % args.num_buckets
+                            buffer_by_bucket[bucket_id].append(f"{sfen}\t{is_black_win}")
+                            buffered_rows += 1
+                            if buffered_rows >= flush_every:
+                                flush_buffers()
                         board.push(move)
             except Exception as e:
                 print(f"\nエラー: {csa_path} ({e})", file=sys.stderr)
-    
-    db.close()
+
+    if buffered_rows:
+        flush_buffers()
+
+    unique_positions = 0
+    output_rows = 0
+    print("フェーズ2/2: バケットごとに集計してCSVへ出力中")
+    with open(args.output_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['sfen', 'total_count', 'black_win_count'])
+        for bucket_path in tqdm(bucket_paths, unit="bucket"):
+            if not bucket_path.exists():
+                continue
+            counts = {}
+            with open(bucket_path, 'r', encoding='utf-8') as bf:
+                for line in bf:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    sfen, is_black_win = line.rsplit('\t', 1)
+                    if sfen:
+                        if sfen not in counts:
+                            counts[sfen] = [0, 0]  # total_count, black_win_count
+                        counts[sfen][0] += 1
+                        counts[sfen][1] += int(is_black_win)
+            unique_positions += len(counts)
+            rows = [(sfen, c[0], c[1]) for sfen, c in counts.items() if c[0] >= args.min_count]
+            rows.sort(key=lambda x: (-x[1], x[0]))
+            writer.writerows(rows)
+            output_rows += len(rows)
+
     print(f"\n集計完了。")
     print(f"総局面数: {total_positions:,}")
-    print(f"重複検知回数 (DB書き込み): {duplicate_hits:,}")
-    print(f"※出現1回の局面はDBに保存されていません。")
+    print(f"ユニーク局面数: {unique_positions:,}")
+    print(f"出力行数(min-count={args.min_count}): {output_rows:,}")
+    print(f"出力CSV: {args.output_csv}")
+    if args.keep_temp:
+        print(f"一時ファイルを保持しました: {temp_root}")
+    else:
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 def extract_metadata(csa_dir: str, output_csv: str) -> None:
     """
@@ -649,9 +692,13 @@ def main() -> None:
     filter_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方のプレイヤーが勝った対局のみを抽出します（番狂わせを除外）。")
     filter_parser.set_defaults(func=run_filter_metadata)
 
-    count_sfen_parser = subparsers.add_parser("count-sfen", help="SFENの出現頻度をカウントしてDBに保存します。")
+    count_sfen_parser = subparsers.add_parser("count-sfen", help="SFENの出現頻度をカウントしてCSVに保存します。")
     count_sfen_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
-    count_sfen_parser.add_argument("--db-path", default="sfen_cache.db", help="SFEN頻度と評価値を保存するSQLite DBのパス。")
+    count_sfen_parser.add_argument("--output-csv", default="sfen_counts.csv", help="SFEN頻度CSVの出力パス。")
+    count_sfen_parser.add_argument("--min-count", type=int, default=1, help="出力する最小出現回数。")
+    count_sfen_parser.add_argument("--num-buckets", type=int, default=1024, help="外部メモリ集計で使用するバケット数。")
+    count_sfen_parser.add_argument("--temp-dir", help="一時バケットファイルの出力先ディレクトリ。")
+    count_sfen_parser.add_argument("--keep-temp", action='store_true', help="集計後も一時バケットファイルを削除せず保持する。")
     count_sfen_parser.add_argument("--min-ply", type=int, default=0)
     count_sfen_parser.add_argument("--max-ply", type=int, default=999)
     count_sfen_parser.set_defaults(func=count_sfen_logic)
@@ -720,6 +767,12 @@ def main() -> None:
     elif args.command == "filter":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: filterコマンドには --input-csv と --output-csv の指定が必須です。")
+    elif args.command == "count-sfen":
+        if not args.input_csv:
+             sys.exit("エラー: count-sfenコマンドには --input-csv の指定が必須です。")
+        if not args.output_csv:
+             sys.exit("エラー: count-sfenコマンドには --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "label":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: labelコマンドには --input-csv と --output-csv の指定が必須です。")
