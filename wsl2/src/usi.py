@@ -84,14 +84,19 @@ class UsiEngine:
             if keyword in line:
                 return
 
-    def evaluate_sfen(self, sfen: str, depth: Optional[int] = None, nodes: Optional[int] = None, movetime: Optional[int] = None) -> Tuple[str, int]:
+    def new_game(self) -> None:
+        """新しい対局評価セッションを開始する。"""
+        self._send("usinewgame")
+
+    def evaluate_sfen(self, sfen: str, depth: Optional[int] = None, nodes: Optional[int] = None, movetime: Optional[int] = None, reset_game: bool = False) -> Tuple[str, int]:
         """
         指定されたSFENの局面を評価する。
         戻り値: (score_type, score_value)
             - score_type: "cp" (センチポーン) または "mate" (詰み)
             - score_value: 評価値または詰み手数
         """
-        self._send("usinewgame")
+        if reset_game:
+            self.new_game()
         self._send(f"position sfen {sfen.strip()}")
 
         go_commands = []
@@ -150,7 +155,7 @@ class UsiEngine:
                 ...
             ]
         """
-        self._send("usinewgame")
+        self.new_game()
         self.set_multipv(num_pv)
         self._send(f"position sfen {sfen.strip()}")
 

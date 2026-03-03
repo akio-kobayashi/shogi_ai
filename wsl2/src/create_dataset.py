@@ -14,6 +14,7 @@ import yaml
 import traceback
 import sqlite3
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 try:
     from tqdm import tqdm
@@ -453,6 +454,95 @@ def get_search_params(args: argparse.Namespace, ply: int):
         m = args.movetime
     return d, n, m
 
+
+def _partition_file_tasks(kifs_by_file: dict, num_workers: int) -> list:
+    """評価対象を局面数ベースで大まかに均等分割する。"""
+    buckets = [[] for _ in range(num_workers)]
+    loads = [0 for _ in range(num_workers)]
+    items = sorted(kifs_by_file.items(), key=lambda kv: len(kv[1]), reverse=True)
+    for item in items:
+        idx = loads.index(min(loads))
+        buckets[idx].append(item)
+        loads[idx] += len(item[1])
+    return buckets
+
+
+def _resolve_search_params_for_worker(cfg: dict, ply: int):
+    if ply <= cfg['early_ply_threshold']:
+        d = cfg['early_depth'] if cfg['early_depth'] is not None else cfg['depth']
+        n = cfg['early_nodes'] if cfg['early_nodes'] is not None else cfg['nodes']
+        m = cfg['early_movetime'] if cfg['early_movetime'] is not None else cfg['movetime']
+    else:
+        d = cfg['depth']
+        n = cfg['nodes']
+        m = cfg['movetime']
+    return d, n, m
+
+
+def _evaluate_worker(task: dict) -> dict:
+    """
+    並列evaluate用ワーカー。
+    注意: DB共有はロック競合しやすいため、このワーカーではDBを使用しない。
+    """
+    cfg = task['cfg']
+    output_header = task['output_header']
+    worker_output_csv = task['worker_output_csv']
+    file_tasks = task['file_tasks']
+
+    rows_written = 0
+    errors = 0
+    files_done = 0
+
+    engine = UsiEngine(cfg['engine_path'])
+    try:
+        with open(worker_output_csv, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            row_buffer = []
+            flush_size = 1000
+
+            for csa_path, metas in file_tasks:
+                try:
+                    all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                    if all_kifs_in_file is None:
+                        files_done += 1
+                        continue
+                    for meta in metas:
+                        kif = all_kifs_in_file[int(meta['kif_index'])]
+                        engine.new_game()
+                        board = cshogi.Board(kif.sfen)
+                        for ply, move in enumerate(kif.moves, 1):
+                            if ply > cfg['max_ply']:
+                                break
+                            if ply >= cfg['min_ply']:
+                                sfen = board.sfen()
+                                d, n, m = _resolve_search_params_for_worker(cfg, ply)
+                                score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
+                                eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
+                                meta_with_eval = meta.copy()
+                                meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
+                                row_buffer.append(meta_with_eval)
+                                if len(row_buffer) >= flush_size:
+                                    writer.writerows(row_buffer)
+                                    row_buffer.clear()
+                                rows_written += 1
+                            board.push(move)
+                    files_done += 1
+                except Exception:
+                    errors += 1
+                    traceback.print_exc()
+            if row_buffer:
+                writer.writerows(row_buffer)
+    finally:
+        engine.quit()
+
+    return {
+        'rows_written': rows_written,
+        'errors': errors,
+        'files_done': files_done,
+        'worker_output_csv': worker_output_csv,
+    }
+
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
     [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
@@ -461,76 +551,139 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力メタデータファイル '{args.input_csv}' が見つかりません。")
     if not Path(args.engine_path).exists(): sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
     
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
+        reader = csv.DictReader(f_in)
+        all_kifs_meta, header = list(reader), reader.fieldnames
+
+    output_csv_path = Path(args.output_csv)
+    output_header = header + ['ply', 'eval_score_cp', 'sfen']
+
+    kifs_by_file = defaultdict(list)
+    for meta in all_kifs_meta:
+        kifs_by_file[meta['file_path']].append(meta)
+
+    if args.eval_workers > 1:
+        if args.db_path or args.max_sfen_count > 0:
+            sys.exit("エラー: 並列evaluate(--eval-workers > 1)では --db-path / --max-sfen-count は使用できません。")
+
+        print(f"--- 局面評価を開始 (並列: {args.eval_workers} workers) ---")
+        temp_dir = output_csv_path.parent / f".evaluate_tmp_{output_csv_path.stem}"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        cfg = {
+            'engine_path': str(args.engine_path),
+            'min_ply': args.min_ply,
+            'max_ply': args.max_ply,
+            'depth': args.depth,
+            'nodes': args.nodes,
+            'movetime': args.movetime,
+            'early_depth': args.early_depth,
+            'early_nodes': args.early_nodes,
+            'early_movetime': args.early_movetime,
+            'early_ply_threshold': args.early_ply_threshold,
+        }
+        buckets = _partition_file_tasks(kifs_by_file, args.eval_workers)
+        tasks = []
+        for idx, file_tasks in enumerate(buckets):
+            if not file_tasks:
+                continue
+            tasks.append({
+                'cfg': cfg,
+                'output_header': output_header,
+                'worker_output_csv': str(temp_dir / f"worker_{idx:03d}.csv"),
+                'file_tasks': file_tasks,
+            })
+
+        results = []
+        with ProcessPoolExecutor(max_workers=args.eval_workers) as executor:
+            futures = [executor.submit(_evaluate_worker, task) for task in tasks]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="workers"):
+                results.append(fut.result())
+
+        with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            for res in sorted(results, key=lambda r: r['worker_output_csv']):
+                with open(res['worker_output_csv'], 'r', newline='', encoding='utf-8') as f_in:
+                    reader = csv.DictReader(f_in)
+                    for row in reader:
+                        writer.writerow(row)
+
+        total_rows = sum(r['rows_written'] for r in results)
+        total_errors = sum(r['errors'] for r in results)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"局面評価が完了しました。出力行数: {total_rows:,}, workerエラー件数: {total_errors}")
+        return
+
     db = SfenDB(args.db_path) if args.db_path else None
     print(f"--- 局面評価を開始 (DB: {args.db_path}, 上限: {args.max_sfen_count}) ---")
-    
     try:
         engine = UsiEngine(str(args.engine_path))
         print("USIエンジン準備完了。")
     except Exception as e:
         sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
-        
-    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
-        reader = csv.DictReader(f_in)
-        all_kifs_meta, header = list(reader), reader.fieldnames
-        
-    output_csv_path = Path(args.output_csv)
-    output_header = header + ['ply', 'eval_score_cp', 'sfen']
-    
+
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
         writer = csv.DictWriter(f_out, fieldnames=output_header)
         writer.writeheader()
-        kifs_by_file = defaultdict(list)
-        for meta in all_kifs_meta: kifs_by_file[meta['file_path']].append(meta)
-        
+        row_buffer = []
+        flush_size = 1000
+
         with tqdm(kifs_by_file.items(), unit="file") as pbar:
             for csa_path, metas in pbar:
                 pbar.set_description(f"Evaluating {Path(csa_path).name}")
                 try:
                     all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
-                    if all_kifs_in_file is None: continue
+                    if all_kifs_in_file is None:
+                        continue
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
+                        engine.new_game()
                         board = cshogi.Board(kif.sfen)
                         for ply, move in enumerate(kif.moves, 1):
-                            if ply > args.max_ply: break
+                            if ply > args.max_ply:
+                                break
                             if ply >= args.min_ply:
                                 sfen = board.sfen()
-                                # DB指定がある場合はキャップ判定
                                 if db is None or db.check_output_limit(sfen, args.max_sfen_count):
                                     try:
                                         d, n, m = get_search_params(args, ply)
                                         score_type, score_value = None, None
-                                        
-                                        # DB指定がある場合はキャッシュ確認
                                         if db:
                                             cached_eval = db.get_eval(sfen, d, n, m)
                                             if cached_eval:
                                                 score_type, score_value = cached_eval
-                                        
-                                        # キャッシュがなければエンジン評価
                                         if score_type is None:
                                             score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
                                             if db:
                                                 db.save_eval(sfen, d, n, m, score_type, score_value)
-                                        
+
                                         eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
                                         meta_with_eval = meta.copy()
                                         meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
-                                        writer.writerow(meta_with_eval)
-                                        
+                                        row_buffer.append(meta_with_eval)
+                                        if len(row_buffer) >= flush_size:
+                                            writer.writerows(row_buffer)
+                                            row_buffer.clear()
                                         if db:
                                             db.increment_output_count(sfen)
                                     except Exception as e:
                                         print(f"\n評価エラー: 棋譜{meta['kif_index']} 手数{ply} ({e})", file=sys.stderr)
                                         traceback.print_exc()
                             board.push(move)
-                    if db: db.commit()
+                    if row_buffer:
+                        writer.writerows(row_buffer)
+                        row_buffer.clear()
+                    if db:
+                        db.commit()
                 except Exception as e:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
                     traceback.print_exc()
     engine.quit()
-    if db: db.close()
+    if db:
+        db.close()
     print("局面評価が完了しました。")
 
 def write_bin_file(positions: list, output_path: str):
@@ -726,6 +879,7 @@ def main() -> None:
     evaluate_parser.add_argument("--early-ply-threshold", type=int, default=0, help="序盤とみなす最大手数（この手数以下でearlyパラメータを適用）。")
     evaluate_parser.add_argument("--min-ply", type=int, default=0)
     evaluate_parser.add_argument("--max-ply", type=int, default=999)
+    evaluate_parser.add_argument("--eval-workers", type=int, default=1, help="evaluate時の並列ワーカー数。2以上でプロセス並列（DB機能は無効）。")
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
     generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データ(.bin)を生成します。")
