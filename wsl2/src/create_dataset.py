@@ -543,6 +543,81 @@ def _evaluate_worker(task: dict) -> dict:
         'worker_output_csv': worker_output_csv,
     }
 
+
+def _evaluate_unique_mode(args: argparse.Namespace, kifs_by_file: dict, output_csv_path: Path, output_header: list) -> None:
+    """
+    ユニーク局面評価モード:
+    1) 全候補局面を列挙し (sfen, depth, nodes, movetime) キーで一意化して評価
+    2) 元の行へ評価値を展開してCSV出力
+    """
+    if args.db_path:
+        sys.exit("エラー: evaluate-mode=unique では --db-path は使用できません。")
+    if args.eval_workers > 1:
+        sys.exit("エラー: evaluate-mode=unique は現在 --eval-workers=1 のみ対応です。")
+
+    print("--- 局面評価を開始 (mode: unique) ---")
+    records = []
+    output_count_by_sfen = defaultdict(int)
+
+    with tqdm(kifs_by_file.items(), unit="file") as pbar:
+        for csa_path, metas in pbar:
+            pbar.set_description(f"Collecting {Path(csa_path).name}")
+            try:
+                all_kifs_in_file = cshogi.Parser.parse_file(csa_path)
+                if all_kifs_in_file is None:
+                    continue
+                for meta in metas:
+                    kif = all_kifs_in_file[int(meta['kif_index'])]
+                    board = cshogi.Board(kif.sfen)
+                    for ply, move in enumerate(kif.moves, 1):
+                        if ply > args.max_ply:
+                            break
+                        if ply >= args.min_ply:
+                            sfen = board.sfen()
+                            if args.max_sfen_count > 0 and output_count_by_sfen[sfen] >= args.max_sfen_count:
+                                board.push(move)
+                                continue
+                            output_count_by_sfen[sfen] += 1
+                            d, n, m = get_search_params(args, ply)
+                            records.append((meta.copy(), ply, sfen, d, n, m))
+                        board.push(move)
+            except Exception as e:
+                print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
+                traceback.print_exc()
+
+    unique_keys = sorted(set((sfen, d, n, m) for _, _, sfen, d, n, m in records))
+    print(f"展開対象行数: {len(records):,}, ユニーク評価キー数: {len(unique_keys):,}")
+
+    try:
+        engine = UsiEngine(str(args.engine_path))
+        print("USIエンジン準備完了。")
+    except Exception as e:
+        sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
+
+    eval_map = {}
+    try:
+        for sfen, d, n, m in tqdm(unique_keys, unit="pos", desc="Evaluating unique keys"):
+            score_type, score_value = engine.evaluate_sfen(sfen, depth=d, nodes=n, movetime=m)
+            eval_map[(sfen, d, n, m)] = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
+    finally:
+        engine.quit()
+
+    with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=output_header)
+        writer.writeheader()
+        row_buffer = []
+        flush_size = 1000
+        for meta, ply, sfen, d, n, m in records:
+            meta.update({'ply': ply, 'eval_score_cp': eval_map[(sfen, d, n, m)], 'sfen': sfen})
+            row_buffer.append(meta)
+            if len(row_buffer) >= flush_size:
+                writer.writerows(row_buffer)
+                row_buffer.clear()
+        if row_buffer:
+            writer.writerows(row_buffer)
+
+    print("局面評価が完了しました。")
+
 def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     """
     [evaluateコマンド] USIエンジンで各局面を評価し、評価値付きCSVを生成する。
@@ -561,6 +636,10 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     kifs_by_file = defaultdict(list)
     for meta in all_kifs_meta:
         kifs_by_file[meta['file_path']].append(meta)
+
+    if args.eval_mode == "unique":
+        _evaluate_unique_mode(args, kifs_by_file, output_csv_path, output_header)
+        return
 
     if args.eval_workers > 1:
         if args.db_path or args.max_sfen_count > 0:
@@ -880,6 +959,7 @@ def main() -> None:
     evaluate_parser.add_argument("--min-ply", type=int, default=0)
     evaluate_parser.add_argument("--max-ply", type=int, default=999)
     evaluate_parser.add_argument("--eval-workers", type=int, default=1, help="evaluate時の並列ワーカー数。2以上でプロセス並列（DB機能は無効）。")
+    evaluate_parser.add_argument("--eval-mode", choices=["stream", "unique"], default="stream", help="局面評価方式。stream=逐次、unique=ユニーク評価後に展開。")
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
     generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データ(.bin)を生成します。")
