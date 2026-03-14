@@ -5,7 +5,9 @@
 #   1. extract -> 2. filter -> 3. evaluate -> 4. generate
 # [B] .bin 形式 (エンジン評価なし)
 #   1. extract -> 2. filter -> 3. label -> 4. generate
-# [C] .h5 形式 (拡張)
+# [C] .bin 形式 (ユニーク局面評価)
+#   1. extract -> 2. filter -> 3. count-sfen -> 4. evaluate-sfen -> 5. generate
+# [D] .h5 形式 (拡張)
 #   1. extract -> 2. filter -> 3. build-h5
 
 # 'extract' コマンドの設定
@@ -40,11 +42,33 @@ evaluate:
   min_ply: 20
   max_ply: 512
 
+# 'count-sfen' コマンドの設定
+count-sfen:
+  input_csv: "output_data/filtered.csv"
+  output_csv: "output_data/sfen_counts.csv"
+  min_count: 1
+  min_ply: 1
+  max_ply: 512
+
+# 'evaluate-sfen' コマンドの設定
+evaluate-sfen:
+  input_csv: "output_data/sfen_counts.csv"
+  engine_path: "/path/to/your/usi_engine"
+  output_csv: "output_data/sfen_evaluated.csv"
+  depth: 12
+
 # 'generate' コマンドの設定
 generate:
   input_csv: "output_data/evaluated.csv"
   output_dir: "output_data"
   val_split: 0.1
+  min_ply: 20
+  max_ply: 512
+  quiet_level: "none"
+  sfen_count_csv: "output_data/sfen_counts.csv"
+  sfen_sampling_mode: "none"
+  sfen_cutoff_value: 1.0
+  sfen_sampling_min_freq: 1
 
 # 'build-h5' コマンドの設定
 build-h5:
