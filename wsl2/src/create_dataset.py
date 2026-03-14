@@ -480,6 +480,10 @@ def _resolve_search_params_for_worker(cfg: dict, ply: int):
     return d, n, m
 
 
+def _normalize_eval_score(score_type: str, score_value: int) -> int:
+    return score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
+
+
 def _evaluate_worker(task: dict) -> dict:
     """
     並列evaluate用ワーカー。
@@ -740,7 +744,7 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
                                             if db:
                                                 db.save_eval(sfen, d, n, m, score_type, score_value)
 
-                                        eval_score_cp = score_value if score_type == "cp" else (32000 if score_value > 0 else -32000)
+                                        eval_score_cp = _normalize_eval_score(score_type, score_value)
                                         meta_with_eval = meta.copy()
                                         meta_with_eval.update({'ply': ply, 'eval_score_cp': eval_score_cp, 'sfen': sfen})
                                         row_buffer.append(meta_with_eval)
@@ -765,6 +769,75 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     if db:
         db.close()
     print("局面評価が完了しました。")
+
+
+def evaluate_sfen_logic(args: argparse.Namespace) -> None:
+    """
+    [evaluate-sfenコマンド] SFEN一覧CSVを入力として、各ユニーク局面に評価値を付与する。
+    count-sfen の出力をそのまま入力できることを想定する。
+    """
+    if not Path(args.input_csv).exists():
+        sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
+    if not Path(args.engine_path).exists():
+        sys.exit(f"エラー: エンジン実行ファイルが見つかりません: {args.engine_path}")
+
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
+        reader = csv.DictReader(f_in)
+        rows, header = list(reader), reader.fieldnames
+
+    if not rows:
+        sys.exit("エラー: 入力ファイルにデータがありません。")
+    if not header or 'sfen' not in header:
+        sys.exit("エラー: 入力CSVに 'sfen' 列が必要です。")
+
+    output_header = list(header)
+    if 'eval_score_cp' not in output_header:
+        output_header.append('eval_score_cp')
+
+    db = SfenDB(args.db_path) if args.db_path else None
+    print(f"--- SFEN評価を開始 (DB: {args.db_path}) ---")
+    try:
+        engine = UsiEngine(str(args.engine_path))
+        print("USIエンジン準備完了。")
+    except Exception as e:
+        sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
+
+    try:
+        with open(args.output_csv, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            for row in tqdm(rows, desc="Evaluating SFENs"):
+                sfen = row.get('sfen')
+                if not sfen:
+                    continue
+
+                score_type, score_value = None, None
+                if db:
+                    cached_eval = db.get_eval(sfen, args.depth, args.nodes, args.movetime)
+                    if cached_eval:
+                        score_type, score_value = cached_eval
+
+                if score_type is None:
+                    score_type, score_value = engine.evaluate_sfen(
+                        sfen,
+                        depth=args.depth,
+                        nodes=args.nodes,
+                        movetime=args.movetime,
+                    )
+                    if db:
+                        db.save_eval(sfen, args.depth, args.nodes, args.movetime, score_type, score_value)
+
+                row['eval_score_cp'] = _normalize_eval_score(score_type, score_value)
+                writer.writerow(row)
+
+            if db:
+                db.commit()
+    finally:
+        engine.quit()
+        if db:
+            db.close()
+
+    print(f"SFEN評価が完了しました。出力CSV: {args.output_csv}")
 
 def write_bin_file(positions: list, output_path: str):
     """
@@ -801,6 +874,87 @@ def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
     return float(freq)
 
 
+def _analyze_board_tactical_state(board: cshogi.Board) -> dict:
+    capture_moves = 0
+    check_moves = 0
+    promotion_moves = 0
+    legal_moves = 0
+
+    for move in board.legal_moves:
+        legal_moves += 1
+        if board.is_capture(move):
+            capture_moves += 1
+        if cshogi.is_promote(move):
+            promotion_moves += 1
+        board.push(move)
+        if board.is_check():
+            check_moves += 1
+        board.pop()
+
+    my_king_sq = board.king_square(board.turn)
+    my_king_attackers = len(board.attackers_to(1 - board.turn, my_king_sq))
+
+    king_escape_routes = 0
+    y, x = divmod(my_king_sq, 9)
+    for dy in [-1, 0, 1]:
+        for dx in [-1, 0, 1]:
+            if dy == 0 and dx == 0:
+                continue
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < 9 and 0 <= nx < 9:
+                to_sq = ny * 9 + nx
+                move = cshogi.Move.from_squares(my_king_sq, to_sq, board.turn)
+                if not board.attackers_to(1 - board.turn, to_sq) and board.is_legal(move):
+                    king_escape_routes += 1
+
+    return {
+        "legal_moves": legal_moves,
+        "capture_moves": capture_moves,
+        "check_moves": check_moves,
+        "promotion_moves": promotion_moves,
+        "my_king_attackers": my_king_attackers,
+        "king_escape_routes": king_escape_routes,
+    }
+
+
+def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
+    if quiet_level == "none":
+        return True
+
+    if board.is_game_over():
+        return False
+    if board.is_nyugyoku():
+        return False
+    if board.is_draw() != cshogi.NOT_REPETITION:
+        return False
+    if board.is_check():
+        return False
+
+    if quiet_level == "1":
+        return True
+
+    analysis = _analyze_board_tactical_state(board)
+    if analysis["capture_moves"] > 0:
+        return False
+    if analysis["check_moves"] > 0:
+        return False
+    if analysis["promotion_moves"] > 0:
+        return False
+    if board.mate_move_in_1ply():
+        return False
+
+    if quiet_level == "2":
+        return True
+
+    # Strict quiet positions: additionally require low king pressure and no forced king flight.
+    if analysis["my_king_attackers"] > 0:
+        return False
+    if analysis["king_escape_routes"] <= 1:
+        return False
+
+    return True
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
@@ -811,6 +965,58 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
         all_positions = list(csv.DictReader(f))
     if not all_positions: sys.exit("エラー: 入力ファイルにデータがありません。")
     print(f"読み込み完了。総局面数: {len(all_positions)}")
+
+    if args.min_ply > args.max_ply:
+        sys.exit("エラー: --min-ply は --max-ply 以下である必要があります。")
+
+    if all('ply' in pos for pos in all_positions):
+        filtered_positions = []
+        skipped_invalid_ply = 0
+        for pos in all_positions:
+            try:
+                ply = int(pos['ply'])
+            except (TypeError, ValueError):
+                skipped_invalid_ply += 1
+                continue
+            if args.min_ply <= ply <= args.max_ply:
+                filtered_positions.append(pos)
+
+        if skipped_invalid_ply:
+            print(f"ply列を解釈できないため除外した局面数: {skipped_invalid_ply:,}")
+        all_positions = filtered_positions
+        if not all_positions:
+            sys.exit("エラー: plyフィルタ適用後に局面が残りませんでした。")
+        print(f"plyフィルタ適用後の局面数: {len(all_positions):,} (範囲: {args.min_ply}..{args.max_ply})")
+    else:
+        print("ply列が存在しないため、generate での ply フィルタはスキップします。")
+
+    if args.quiet_level not in ("none", "1", "2", "3"):
+        sys.exit("エラー: --quiet-level は none, 1, 2, 3 のいずれかを指定してください。")
+    if args.quiet_level != "none":
+        board = cshogi.Board()
+        quiet_positions = []
+        quiet_skipped = 0
+        for pos in tqdm(all_positions, desc=f"Filtering quiet level {args.quiet_level}"):
+            sfen = pos.get('sfen')
+            if not sfen:
+                quiet_skipped += 1
+                continue
+            try:
+                board.set_sfen(sfen)
+            except Exception:
+                quiet_skipped += 1
+                continue
+            if _is_quiet_position(board, args.quiet_level):
+                quiet_positions.append(pos)
+            else:
+                quiet_skipped += 1
+        all_positions = quiet_positions
+        if not all_positions:
+            sys.exit("エラー: 静止局面フィルタ適用後に局面が残りませんでした。")
+        print(
+            f"静止局面フィルタ適用後の局面数: {len(all_positions):,} "
+            f"(level={args.quiet_level}, 除外={quiet_skipped:,})"
+        )
 
     if args.sfen_sampling_mode != "none":
         if not args.sfen_count_csv:
@@ -1028,10 +1234,28 @@ def main() -> None:
     evaluate_parser.add_argument("--eval-mode", choices=["stream", "unique"], default="stream", help="局面評価方式。stream=逐次、unique=ユニーク評価後に展開。")
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
+    evaluate_sfen_parser = subparsers.add_parser("evaluate-sfen", parents=[config_parent], help="SFEN一覧CSVの各局面を評価します。")
+    evaluate_sfen_parser.add_argument("--input-csv", help="入力となるSFEN一覧CSVのパス。count-sfen の出力を想定。")
+    evaluate_sfen_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
+    evaluate_sfen_parser.add_argument("--output-csv", help="評価値付きSFEN CSVの出力パス。")
+    evaluate_sfen_parser.add_argument("--db-path", help="評価値キャッシュを管理するSQLite DBのパス。")
+    evaluate_sfen_parser.add_argument("--depth", type=int, default=10)
+    evaluate_sfen_parser.add_argument("--nodes", type=int, default=None)
+    evaluate_sfen_parser.add_argument("--movetime", type=int, default=None)
+    evaluate_sfen_parser.set_defaults(func=evaluate_sfen_logic)
+
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
     generate_parser.add_argument("--val-split", type=float, default=0.1)
+    generate_parser.add_argument("--min-ply", type=int, default=0, help="生成対象とする最小手数。")
+    generate_parser.add_argument("--max-ply", type=int, default=999, help="生成対象とする最大手数。")
+    generate_parser.add_argument(
+        "--quiet-level",
+        choices=["none", "1", "2", "3"],
+        default="none",
+        help="静止局面フィルタの強さ。none=無効, 1=終局/王手/反復除外, 2=取り/王手/成り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+    )
     generate_parser.add_argument("--sfen-count-csv", help="count-sfenで生成したSFEN頻度CSVのパス。")
     generate_parser.add_argument("--sfen-sampling-mode", choices=["none", "fixed", "sqrt", "log10"], default="none", help="SFEN頻度を使ったサンプリング上限方式。")
     generate_parser.add_argument("--sfen-cutoff-value", type=float, default=1.0, help="fixed方式の上限値。")
@@ -1083,6 +1307,9 @@ def main() -> None:
     elif args.command == "evaluate":
         if not (args.input_csv and args.engine_path and args.output_csv):
              sys.exit("エラー: evaluateコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
+    elif args.command == "evaluate-sfen":
+        if not (args.input_csv and args.engine_path and args.output_csv):
+             sys.exit("エラー: evaluate-sfenコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
     elif args.command == "generate":
         if not (args.input_csv and args.output_dir):
              sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")

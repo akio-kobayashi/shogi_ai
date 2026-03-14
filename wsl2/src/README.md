@@ -21,6 +21,9 @@
 ### D) 局面頻度集計（外部メモリ方式）
 `extract` → `filter` → `count-sfen`
 
+### E) ユニーク局面評価
+`extract` → `filter` → `count-sfen` → `evaluate-sfen`
+
 ---
 
 ## コマンド詳細
@@ -68,6 +71,21 @@ python src/create_dataset.py evaluate --input-csv <フィルタ済みCSV> --outp
 *   `--eval-mode unique` は現在 `--eval-workers=1` のみ対応です。
 *   `--eval-mode unique` では `--db-path` は使用できません。
 
+### `evaluate-sfen`
+`count-sfen` などで作成した SFEN 一覧 CSV を元に、各ユニーク局面へ評価値を付与します。
+```bash
+python src/create_dataset.py evaluate-sfen --input-csv <頻度CSV> --output-csv <評価値付きSFEN CSV> --engine-path <エンジンパス> [探索オプション]
+```
+**主なオプション:**
+*   `--depth`: 探索深さ（デフォルト: 10）
+*   `--nodes`: 探索ノード数
+*   `--movetime`: 1局面あたりの思考時間（ミリ秒）
+*   `--db-path`: 評価値キャッシュ用SQLite DB
+
+**入力要件:**
+*   少なくとも `sfen` 列を含むCSVであること
+*   `count-sfen` の出力をそのまま入力可能
+
 ### `count-sfen`
 フィルタリング済みCSVを元に、SFENの局面頻度を外部メモリ方式で集計し、CSVを生成します（SQLite不要）。
 ```bash
@@ -92,10 +110,18 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 ```
 **主なオプション:**
 *   `--val-split`: 検証データ比率
+*   `--min-ply`, `--max-ply`: 生成対象とする手数の範囲
+*   `--quiet-level`: 静止局面フィルタの強さ (`none` / `1` / `2` / `3`)
 *   `--sfen-count-csv`: `count-sfen` が出力した頻度CSV
 *   `--sfen-sampling-mode`: `none` / `fixed` / `sqrt` / `log10`
 *   `--sfen-cutoff-value`: `fixed`方式の上限値
 *   `--sfen-sampling-min-freq`: この頻度未満のSFENにはサンプリング上限を適用しない
+
+**静止局面フィルタ (`--quiet-level`)**
+*   `none`: フィルタなし（デフォルト）
+*   `1`: 終局、入玉、反復、王手中の局面を除外
+*   `2`: `1` に加えて、取り手・王手手・成り手・1手詰め筋がある局面を除外
+*   `3`: `2` に加えて、自玉への直接利きがなく、玉の逃げ道が乏しすぎない局面に限定
 
 **頻度サンプリングの仕様:**
 *   しきい値未満を除外するフィルタではなく、同一SFENごとに確率サンプリングを行います。
