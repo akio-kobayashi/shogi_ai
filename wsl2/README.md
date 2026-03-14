@@ -1,3 +1,6 @@
+0. Pythonのライブラリをインストール
+  - sudo apt update
+  - sudo apt install python3-dev
 1. WSL2ターミナルで以下を実行
   - ./setup_env.sh
 2. セットアップが終了したら，以下のコマンドで仮想環境を有効化
