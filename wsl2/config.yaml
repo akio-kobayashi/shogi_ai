@@ -38,7 +38,11 @@ evaluate:
   input_csv: "output_data/filtered.csv"
   engine_path: "/path/to/your/usi_engine"
   output_csv: "output_data/evaluated.csv"
+  db_path: null
   depth: 12
+  nodes: null
+  movetime: null
+  eval_workers: 1
   min_ply: 20
   max_ply: 512
 
@@ -55,7 +59,11 @@ evaluate-sfen:
   input_csv: "output_data/sfen_counts.csv"
   engine_path: "/path/to/your/usi_engine"
   output_csv: "output_data/sfen_evaluated.csv"
+  db_path: null
   depth: 12
+  nodes: null
+  movetime: null
+  eval_workers: 1
 
 # 'generate' コマンドの設定
 generate:

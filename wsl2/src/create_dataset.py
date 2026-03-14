@@ -771,6 +771,46 @@ def evaluate_metadata_logic(args: argparse.Namespace) -> None:
     print("局面評価が完了しました。")
 
 
+def _evaluate_sfen_worker(task: dict) -> dict:
+    rows = task['rows']
+    output_header = task['output_header']
+    worker_output_csv = task['worker_output_csv']
+
+    rows_written = 0
+    errors = 0
+    engine = UsiEngine(task['engine_path'])
+    try:
+        with open(worker_output_csv, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            for row in rows:
+                sfen = row.get('sfen')
+                if not sfen:
+                    continue
+                try:
+                    score_type, score_value = engine.evaluate_sfen(
+                        sfen,
+                        depth=task['depth'],
+                        nodes=task['nodes'],
+                        movetime=task['movetime'],
+                    )
+                    row = row.copy()
+                    row['eval_score_cp'] = _normalize_eval_score(score_type, score_value)
+                    writer.writerow(row)
+                    rows_written += 1
+                except Exception:
+                    errors += 1
+                    traceback.print_exc()
+    finally:
+        engine.quit()
+
+    return {
+        'rows_written': rows_written,
+        'errors': errors,
+        'worker_output_csv': worker_output_csv,
+    }
+
+
 def evaluate_sfen_logic(args: argparse.Namespace) -> None:
     """
     [evaluate-sfenコマンド] SFEN一覧CSVを入力として、各ユニーク局面に評価値を付与する。
@@ -794,6 +834,55 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
     if 'eval_score_cp' not in output_header:
         output_header.append('eval_score_cp')
 
+    output_csv_path = Path(args.output_csv)
+
+    if args.eval_workers > 1:
+        if args.db_path:
+            sys.exit("エラー: 並列evaluate-sfen(--eval-workers > 1)では --db-path は使用できません。")
+
+        print(f"--- SFEN評価を開始 (並列: {args.eval_workers} workers) ---")
+        temp_dir = output_csv_path.parent / f".evaluate_sfen_tmp_{output_csv_path.stem}"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        chunk_size = math.ceil(len(rows) / args.eval_workers)
+        tasks = []
+        for idx in range(args.eval_workers):
+            chunk = rows[idx * chunk_size:(idx + 1) * chunk_size]
+            if not chunk:
+                continue
+            tasks.append({
+                'engine_path': str(args.engine_path),
+                'output_header': output_header,
+                'worker_output_csv': str(temp_dir / f"worker_{idx:03d}.csv"),
+                'rows': chunk,
+                'depth': args.depth,
+                'nodes': args.nodes,
+                'movetime': args.movetime,
+            })
+
+        results = []
+        with ProcessPoolExecutor(max_workers=args.eval_workers) as executor:
+            futures = [executor.submit(_evaluate_sfen_worker, task) for task in tasks]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="workers"):
+                results.append(fut.result())
+
+        with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            for res in sorted(results, key=lambda r: r['worker_output_csv']):
+                with open(res['worker_output_csv'], 'r', newline='', encoding='utf-8') as f_in:
+                    reader = csv.DictReader(f_in)
+                    for row in reader:
+                        writer.writerow(row)
+
+        total_rows = sum(r['rows_written'] for r in results)
+        total_errors = sum(r['errors'] for r in results)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"SFEN評価が完了しました。出力行数: {total_rows:,}, workerエラー件数: {total_errors}")
+        return
+
     db = SfenDB(args.db_path) if args.db_path else None
     print(f"--- SFEN評価を開始 (DB: {args.db_path}) ---")
     try:
@@ -803,7 +892,7 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
         sys.exit(f"エラー: USIエンジンの初期化に失敗しました: {e}")
 
     try:
-        with open(args.output_csv, 'w', newline='', encoding='utf-8') as f_out:
+        with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
             writer = csv.DictWriter(f_out, fieldnames=output_header)
             writer.writeheader()
             for row in tqdm(rows, desc="Evaluating SFENs"):
@@ -837,7 +926,7 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
         if db:
             db.close()
 
-    print(f"SFEN評価が完了しました。出力CSV: {args.output_csv}")
+    print(f"SFEN評価が完了しました。出力CSV: {output_csv_path}")
 
 def write_bin_file(positions: list, output_path: str):
     """
@@ -1171,6 +1260,15 @@ def main() -> None:
     """スクリプトのエントリポイント。引数をパースして各処理を実行する。"""
     config_parent = argparse.ArgumentParser(add_help=False)
     config_parent.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
+    eval_common_parent = argparse.ArgumentParser(add_help=False)
+    eval_common_parent.add_argument("--input-csv", help="入力CSVのパス。")
+    eval_common_parent.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
+    eval_common_parent.add_argument("--output-csv", help="評価結果CSVの出力パス。")
+    eval_common_parent.add_argument("--db-path", help="評価値キャッシュを管理するSQLite DBのパス。")
+    eval_common_parent.add_argument("--depth", type=int, default=10)
+    eval_common_parent.add_argument("--nodes", type=int, default=None)
+    eval_common_parent.add_argument("--movetime", type=int, default=None)
+    eval_common_parent.add_argument("--eval-workers", type=int, default=1, help="評価時の並列ワーカー数。2以上でプロセス並列。")
 
     parser = argparse.ArgumentParser(
         description="CSA棋譜から学習データを生成するスクリプト。",
@@ -1215,33 +1313,18 @@ def main() -> None:
     label_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
     label_parser.set_defaults(func=run_label)
 
-    evaluate_parser = subparsers.add_parser("evaluate", parents=[config_parent], help="フィルタリング済みCSVの局面を評価します。")
-    evaluate_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
-    evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
-    evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
-    evaluate_parser.add_argument("--db-path", help="SFEN頻度と評価値を管理するSQLite DBのパス。指定するとキャッシュと上限管理が有効になります。")
+    evaluate_parser = subparsers.add_parser("evaluate", parents=[config_parent, eval_common_parent], help="フィルタリング済みCSVの局面を評価します。")
     evaluate_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
-    evaluate_parser.add_argument("--depth", type=int, default=10)
-    evaluate_parser.add_argument("--nodes", type=int, default=None)
-    evaluate_parser.add_argument("--movetime", type=int, default=None)
     evaluate_parser.add_argument("--early-depth", type=int, default=None)
     evaluate_parser.add_argument("--early-nodes", type=int, default=None)
     evaluate_parser.add_argument("--early-movetime", type=int, default=None)
     evaluate_parser.add_argument("--early-ply-threshold", type=int, default=0, help="序盤とみなす最大手数（この手数以下でearlyパラメータを適用）。")
     evaluate_parser.add_argument("--min-ply", type=int, default=0)
     evaluate_parser.add_argument("--max-ply", type=int, default=999)
-    evaluate_parser.add_argument("--eval-workers", type=int, default=1, help="evaluate時の並列ワーカー数。2以上でプロセス並列（DB機能は無効）。")
     evaluate_parser.add_argument("--eval-mode", choices=["stream", "unique"], default="stream", help="局面評価方式。stream=逐次、unique=ユニーク評価後に展開。")
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
-    evaluate_sfen_parser = subparsers.add_parser("evaluate-sfen", parents=[config_parent], help="SFEN一覧CSVの各局面を評価します。")
-    evaluate_sfen_parser.add_argument("--input-csv", help="入力となるSFEN一覧CSVのパス。count-sfen の出力を想定。")
-    evaluate_sfen_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
-    evaluate_sfen_parser.add_argument("--output-csv", help="評価値付きSFEN CSVの出力パス。")
-    evaluate_sfen_parser.add_argument("--db-path", help="評価値キャッシュを管理するSQLite DBのパス。")
-    evaluate_sfen_parser.add_argument("--depth", type=int, default=10)
-    evaluate_sfen_parser.add_argument("--nodes", type=int, default=None)
-    evaluate_sfen_parser.add_argument("--movetime", type=int, default=None)
+    evaluate_sfen_parser = subparsers.add_parser("evaluate-sfen", parents=[config_parent, eval_common_parent], help="SFEN一覧CSVの各局面を評価します。")
     evaluate_sfen_parser.set_defaults(func=evaluate_sfen_logic)
 
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
