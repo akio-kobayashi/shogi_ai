@@ -963,16 +963,22 @@ def run_build_h5(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """スクリプトのエントリポイント。引数をパースして各処理を実行する。"""
-    parser = argparse.ArgumentParser(description="CSA棋譜から学習データを生成するスクリプト。", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
+    config_parent = argparse.ArgumentParser(add_help=False)
+    config_parent.add_argument("-c", "--config", help="設定YAMLファイルのパス。")
+
+    parser = argparse.ArgumentParser(
+        description="CSA棋譜から学習データを生成するスクリプト。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        parents=[config_parent],
+    )
     subparsers = parser.add_subparsers(dest="command", required=True, help="利用可能なコマンド")
 
-    extract_parser = subparsers.add_parser("extract", help="CSAファイルから棋譜のメタデータを抽出します。")
+    extract_parser = subparsers.add_parser("extract", parents=[config_parent], help="CSAファイルから棋譜のメタデータを抽出します。")
     extract_parser.add_argument("--csa-dir", help="CSAファイルが格納されているルートディレクトリ。")
     extract_parser.add_argument("--output-csv", help="メタデータCSVの出力パス。")
     extract_parser.set_defaults(func=lambda args: extract_metadata(args.csa_dir, args.output_csv))
 
-    filter_parser = subparsers.add_parser("filter", help="メタデータCSVをフィルタリングします。")
+    filter_parser = subparsers.add_parser("filter", parents=[config_parent], help="メタデータCSVをフィルタリングします。")
     filter_parser.add_argument("--input-csv", help="入力となるメタデータCSVのパス。")
     filter_parser.add_argument("--output-csv", help="フィルタリング結果を保存するCSVのパス。")
     filter_parser.add_argument("--min-rating", type=int, default=0)
@@ -984,7 +990,7 @@ def main() -> None:
     filter_parser.add_argument("--filter-by-rating-outcome", action='store_true', help="レーティングが高い方のプレイヤーが勝った対局のみを抽出します（番狂わせを除外）。")
     filter_parser.set_defaults(func=run_filter_metadata)
 
-    count_sfen_parser = subparsers.add_parser("count-sfen", help="SFENの出現頻度をカウントしてCSVに保存します。")
+    count_sfen_parser = subparsers.add_parser("count-sfen", parents=[config_parent], help="SFENの出現頻度をカウントしてCSVに保存します。")
     count_sfen_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     count_sfen_parser.add_argument("--output-csv", default="sfen_counts.csv", help="SFEN頻度CSVの出力パス。")
     count_sfen_parser.add_argument("--min-count", type=int, default=1, help="出力する最小出現回数。")
@@ -995,7 +1001,7 @@ def main() -> None:
     count_sfen_parser.add_argument("--max-ply", type=int, default=999)
     count_sfen_parser.set_defaults(func=count_sfen_logic)
 
-    label_parser = subparsers.add_parser("label", help="対局結果から評価値をラベリングします（エンジン不要）。")
+    label_parser = subparsers.add_parser("label", parents=[config_parent], help="対局結果から評価値をラベリングします（エンジン不要）。")
     label_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     label_parser.add_argument("--output-csv", help="ラベリング結果を保存するCSVのパス。")
     label_parser.add_argument("--score-scale", type=int, default=600)
@@ -1003,7 +1009,7 @@ def main() -> None:
     label_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
     label_parser.set_defaults(func=run_label)
 
-    evaluate_parser = subparsers.add_parser("evaluate", help="フィルタリング済みCSVの局面を評価します。")
+    evaluate_parser = subparsers.add_parser("evaluate", parents=[config_parent], help="フィルタリング済みCSVの局面を評価します。")
     evaluate_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     evaluate_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")
     evaluate_parser.add_argument("--output-csv", help="評価値付きCSVの出力パス。")
@@ -1022,7 +1028,7 @@ def main() -> None:
     evaluate_parser.add_argument("--eval-mode", choices=["stream", "unique"], default="stream", help="局面評価方式。stream=逐次、unique=ユニーク評価後に展開。")
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
-    generate_parser = subparsers.add_parser("generate", help="評価値付きCSVから学習データ(.bin)を生成します。")
+    generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
     generate_parser.add_argument("--val-split", type=float, default=0.1)
@@ -1032,7 +1038,7 @@ def main() -> None:
     generate_parser.add_argument("--sfen-sampling-min-freq", type=int, default=1, help="この頻度未満のSFENにはサンプリング上限を適用しない。")
     generate_parser.set_defaults(func=generate_datasets_logic)
 
-    build_h5_parser = subparsers.add_parser("build-h5", help="フィルタリング済みCSVから階層的なHDF5データセットを生成します。")
+    build_h5_parser = subparsers.add_parser("build-h5", parents=[config_parent], help="フィルタリング済みCSVから階層的なHDF5データセットを生成します。")
     build_h5_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     build_h5_parser.add_argument("--output-h5", help="出力するHDF5ファイルのパス。")
     build_h5_parser.add_argument("--engine-path", help="USIエンジンの実行ファイルのパス。")

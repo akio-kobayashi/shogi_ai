@@ -25,6 +25,7 @@ yaneuraou.exe %*
 ### 実行例
 ```bash
 python src/create_dataset.py evaluate \
+    --config wsl2/config.yaml \
     --input-csv metadata.csv \
     --output-csv evaluated.csv \
     --engine-path /mnt/c/shogi/yaneuraou/run_engine.bat

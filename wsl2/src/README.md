@@ -118,5 +118,11 @@ python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --outp
 ## 設定ファイル (`wsl2/config.yaml`)
 各コマンドのオプションは`wsl2/config.yaml`にまとめて記述することで、コマンドライン入力を簡略化できます。
 ```bash
-python src/create_dataset.py -c wsl2/config.yaml <command>
+python src/create_dataset.py <command> --config wsl2/config.yaml
+```
+
+必要に応じて、`--config` の内容はその後ろのコマンドラインオプションで上書きできます。
+
+```bash
+python src/create_dataset.py evaluate --config wsl2/config.yaml --depth 12
 ```
