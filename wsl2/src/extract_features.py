@@ -61,7 +61,7 @@ COLUMN_DTYPES = {
 }
 
 
-def get_winner_info(kifu: cshogi.Game) -> float:
+def get_winner_info(kifu: Any) -> float:
     """棋譜情報から先手の勝敗を 1.0, 0.0, 0.5 で返す"""
     if kifu.win == cshogi.BLACK_WIN:
         return 1.0
@@ -82,7 +82,7 @@ def make_feature_dict(board: cshogi.Board) -> Dict[str, Any]:
     is_capture_available = 0
     is_give_check_available = 0
     
-    legal_moves = board.generate_legal_moves()
+    legal_moves = board.legal_moves
     for m in legal_moves:
         if board.is_capture(m):
             is_capture_available = 1
@@ -104,11 +104,9 @@ def make_feature_dict(board: cshogi.Board) -> Dict[str, Any]:
 
     # 先手・後手両方の持ち駒を記録
     hands = board.pieces_in_hand
-    for turn, hand_int in enumerate(hands):
+    for turn, hand_counts in enumerate(hands):
         prefix = 'S' if turn == 0 else 'G'
-        for pt_id, pt_name in CSHOGI_PIECE_TO_NAME.items():
-            # cshogi のビットシフトを利用して駒数を取得
-            count = (hand_int >> cshogi.HAND_SHIFT[pt_id]) & cshogi.HAND_MASK[pt_id]
+        for count, pt_name in zip(hand_counts, PIECE_NAMES):
             features[f'{prefix}_hand_{pt_name}'] = count
             
     return features
