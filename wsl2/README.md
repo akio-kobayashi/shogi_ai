@@ -21,8 +21,8 @@
 ### D) 局面頻度集計（外部メモリ方式）
 `extract` → `filter` → `count-sfen`
 
-### E) ユニーク局面評価
-`extract` → `filter` → `count-sfen` → `evaluate-sfen`
+### E) ユニーク局面評価（静止/非静止を分離）
+`extract` → `filter` → `count-sfen` → `classify-sfen` → `evaluate-sfen` → `merge-eval-sfen` → `generate`
 
 ---
 
@@ -92,6 +92,7 @@ python src/create_dataset.py evaluate-sfen --input-csv <頻度CSV> --output-csv 
 **入力要件:**
 *   少なくとも `sfen` 列を含むCSVであること
 *   `count-sfen` の出力をそのまま入力可能
+*   `classify-sfen` の `output-quiet-csv` / `output-tactical-csv` もそのまま入力可能
 
 ### `count-sfen`
 フィルタリング済みCSVを元に、SFENの局面頻度を外部メモリ方式で集計し、CSVを生成します（SQLite不要）。
@@ -110,6 +111,34 @@ python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --ou
 *   `total_count`
 *   `black_win_count`
 
+### `classify-sfen`
+`count-sfen` の出力などを元に、SFEN を静止局面と非静止局面へ分類します。高コストな評価の前にデータを分けるための前処理です。
+```bash
+python src/create_dataset.py classify-sfen \
+  --input-csv <頻度CSV> \
+  --output-quiet-csv <静止局面CSV> \
+  --output-tactical-csv <非静止局面CSV>
+```
+**主なオプション:**
+*   `--quiet-level`: 静止局面判定の強さ (`1` / `2` / `3`)
+*   `--output-quiet-csv`: 静止局面側の出力先
+*   `--output-tactical-csv`: 非静止局面側の出力先
+
+**使い方の意図:**
+*   静止局面には shallow / 0手読み評価を付ける
+*   非静止局面には静止探索付き、またはより重い評価を付ける
+
+### `merge-eval-sfen`
+複数の評価済み SFEN CSV を1つにまとめます。`classify-sfen` 後に quiet / tactical を別条件で評価した結果を、`generate` に渡す前段として使います。
+```bash
+python src/create_dataset.py merge-eval-sfen \
+  --input-csvs <静止局面CSV>,<非静止局面CSV> \
+  --output-csv <マージ後CSV>
+```
+**主なオプション:**
+*   `--input-csvs`: マージ対象CSVのカンマ区切りリスト
+*   `--output-csv`: マージ後CSVの出力先
+
 ### `generate`
 評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
 ```bash
@@ -118,7 +147,7 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 **主なオプション:**
 *   `--val-split`: 検証データ比率
 *   `--min-ply`, `--max-ply`: 生成対象とする手数の範囲
-*   `--quiet-level`: 静止局面フィルタの強さ (`none` / `1` / `2` / `3`)
+*   `--quiet-level`: 静止局面フィルタの強さ (`none` / `1` / `2` / `3`)。後方互換用で、新フローでは `classify-sfen` を推奨
 *   `--sfen-count-csv`: `count-sfen` が出力した頻度CSV
 *   `--sfen-sampling-mode`: `none` / `fixed` / `sqrt` / `log10`
 *   `--sfen-cutoff-value`: `fixed`方式の上限値

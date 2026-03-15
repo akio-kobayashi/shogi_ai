@@ -6,7 +6,7 @@
 # [B] .bin 形式 (エンジン評価なし)
 #   1. extract -> 2. filter -> 3. label -> 4. generate
 # [C] .bin 形式 (ユニーク局面評価)
-#   1. extract -> 2. filter -> 3. count-sfen -> 4. evaluate-sfen -> 5. generate
+#   1. extract -> 2. filter -> 3. count-sfen -> 4. classify-sfen -> 5. evaluate-sfen -> 6. generate
 # [D] .h5 形式 (拡張)
 #   1. extract -> 2. filter -> 3. build-h5
 
@@ -56,7 +56,7 @@ count-sfen:
 
 # 'evaluate-sfen' コマンドの設定
 evaluate-sfen:
-  input_csv: "output_data/sfen_counts.csv"
+  input_csv: "output_data/sfen_quiet.csv"
   engine_path: "/path/to/your/usi_engine"
   output_csv: "output_data/sfen_evaluated.csv"
   db_path: null
@@ -64,6 +64,18 @@ evaluate-sfen:
   nodes: null
   movetime: null
   eval_workers: 1
+
+# 'classify-sfen' コマンドの設定
+classify-sfen:
+  input_csv: "output_data/sfen_counts.csv"
+  output_quiet_csv: "output_data/sfen_quiet.csv"
+  output_tactical_csv: "output_data/sfen_tactical.csv"
+  quiet_level: "2"
+
+# 'merge-eval-sfen' コマンドの設定
+merge-eval-sfen:
+  input_csvs: "output_data/sfen_quiet_evaluated.csv,output_data/sfen_tactical_evaluated.csv"
+  output_csv: "output_data/sfen_evaluated_merged.csv"
 
 # 'generate' コマンドの設定
 generate:

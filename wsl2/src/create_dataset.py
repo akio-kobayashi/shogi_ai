@@ -1044,6 +1044,110 @@ def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
     return True
 
 
+def classify_sfen_logic(args: argparse.Namespace) -> None:
+    """
+    [classify-sfenコマンド] SFEN一覧CSVを静止局面と非静止局面に分類する。
+    evaluate-sfen の前段で使い、評価条件を分けることを目的とする。
+    """
+    if not Path(args.input_csv).exists():
+        sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
+    if args.quiet_level not in ("1", "2", "3"):
+        sys.exit("エラー: classify-sfen の --quiet-level は 1, 2, 3 のいずれかを指定してください。")
+
+    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
+        reader = csv.DictReader(f_in)
+        rows = list(reader)
+        header = reader.fieldnames
+
+    if not rows:
+        sys.exit("エラー: 入力ファイルにデータがありません。")
+    if not header or 'sfen' not in header:
+        sys.exit("エラー: 入力CSVに 'sfen' 列が必要です。")
+
+    quiet_output = Path(args.output_quiet_csv)
+    tactical_output = Path(args.output_tactical_csv)
+    quiet_output.parent.mkdir(parents=True, exist_ok=True)
+    tactical_output.parent.mkdir(parents=True, exist_ok=True)
+
+    board = cshogi.Board()
+    quiet_rows = []
+    tactical_rows = []
+    invalid_rows = 0
+
+    print(f"--- SFEN分類を開始 (quiet-level={args.quiet_level}) ---")
+    for row in tqdm(rows, desc="Classifying SFENs"):
+        sfen = row.get('sfen')
+        if not sfen:
+            invalid_rows += 1
+            continue
+        try:
+            board.set_sfen(sfen)
+        except Exception:
+            tactical_rows.append(row)
+            invalid_rows += 1
+            continue
+
+        if _is_quiet_position(board, args.quiet_level):
+            quiet_rows.append(row)
+        else:
+            tactical_rows.append(row)
+
+    with open(quiet_output, 'w', newline='', encoding='utf-8') as f_quiet:
+        writer = csv.DictWriter(f_quiet, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(quiet_rows)
+
+    with open(tactical_output, 'w', newline='', encoding='utf-8') as f_tactical:
+        writer = csv.DictWriter(f_tactical, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(tactical_rows)
+
+    print(
+        f"SFEN分類が完了しました。静止局面: {len(quiet_rows):,}, "
+        f"非静止局面: {len(tactical_rows):,}, 無効/解析失敗: {invalid_rows:,}"
+    )
+
+
+def merge_eval_sfen_logic(args: argparse.Namespace) -> None:
+    """
+    [merge-eval-sfenコマンド] 複数の評価済みSFEN CSVを1つにマージする。
+    classify-sfen -> evaluate-sfen を複数条件で回した後、generate の前段で使用する。
+    """
+    input_paths = [Path(p.strip()) for p in args.input_csvs.split(',') if p.strip()]
+    if not input_paths:
+        sys.exit("エラー: merge-eval-sfen には --input-csvs を1つ以上指定してください。")
+
+    for path in input_paths:
+        if not path.exists():
+            sys.exit(f"エラー: 入力ファイル '{path}' が見つかりません。")
+
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    merged_rows = 0
+    header = None
+    with open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = None
+        for path in input_paths:
+            with open(path, 'r', newline='', encoding='utf-8') as f_in:
+                reader = csv.DictReader(f_in)
+                current_header = reader.fieldnames
+                if not current_header:
+                    continue
+                if header is None:
+                    header = current_header
+                    writer = csv.DictWriter(f_out, fieldnames=header)
+                    writer.writeheader()
+                elif current_header != header:
+                    sys.exit(f"エラー: ヘッダが一致しません: {path}")
+
+                for row in reader:
+                    writer.writerow(row)
+                    merged_rows += 1
+
+    print(f"評価済みSFEN CSVのマージが完了しました。入力数: {len(input_paths)}, 出力行数: {merged_rows:,}")
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
@@ -1082,6 +1186,7 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
     if args.quiet_level not in ("none", "1", "2", "3"):
         sys.exit("エラー: --quiet-level は none, 1, 2, 3 のいずれかを指定してください。")
     if args.quiet_level != "none":
+        print("注意: generate での --quiet-level は後方互換用です。新フローでは classify-sfen を evaluate-sfen の前段で使用してください。")
         board = cshogi.Board()
         quiet_positions = []
         quiet_skipped = 0
@@ -1305,6 +1410,18 @@ def main() -> None:
     count_sfen_parser.add_argument("--max-ply", type=int, default=999)
     count_sfen_parser.set_defaults(func=count_sfen_logic)
 
+    classify_sfen_parser = subparsers.add_parser("classify-sfen", parents=[config_parent], help="SFEN一覧CSVを静止局面と非静止局面に分類します。")
+    classify_sfen_parser.add_argument("--input-csv", help="入力となるSFEN一覧CSVのパス。")
+    classify_sfen_parser.add_argument("--output-quiet-csv", help="静止局面CSVの出力パス。")
+    classify_sfen_parser.add_argument("--output-tactical-csv", help="非静止局面CSVの出力パス。")
+    classify_sfen_parser.add_argument(
+        "--quiet-level",
+        choices=["1", "2", "3"],
+        default="2",
+        help="静止局面判定の強さ。1=終局/王手/反復除外, 2=取り/王手/成り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+    )
+    classify_sfen_parser.set_defaults(func=classify_sfen_logic)
+
     label_parser = subparsers.add_parser("label", parents=[config_parent], help="対局結果から評価値をラベリングします（エンジン不要）。")
     label_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     label_parser.add_argument("--output-csv", help="ラベリング結果を保存するCSVのパス。")
@@ -1326,6 +1443,11 @@ def main() -> None:
 
     evaluate_sfen_parser = subparsers.add_parser("evaluate-sfen", parents=[config_parent, eval_common_parent], help="SFEN一覧CSVの各局面を評価します。")
     evaluate_sfen_parser.set_defaults(func=evaluate_sfen_logic)
+
+    merge_eval_sfen_parser = subparsers.add_parser("merge-eval-sfen", parents=[config_parent], help="複数の評価済みSFEN CSVを1つにマージします。")
+    merge_eval_sfen_parser.add_argument("--input-csvs", help="マージ対象CSVのカンマ区切りリスト。")
+    merge_eval_sfen_parser.add_argument("--output-csv", help="マージ後CSVの出力パス。")
+    merge_eval_sfen_parser.set_defaults(func=merge_eval_sfen_logic)
 
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
@@ -1393,6 +1515,15 @@ def main() -> None:
     elif args.command == "evaluate-sfen":
         if not (args.input_csv and args.engine_path and args.output_csv):
              sys.exit("エラー: evaluate-sfenコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
+    elif args.command == "merge-eval-sfen":
+        if not (args.input_csvs and args.output_csv):
+             sys.exit("エラー: merge-eval-sfenコマンドには --input-csvs と --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+    elif args.command == "classify-sfen":
+        if not (args.input_csv and args.output_quiet_csv and args.output_tactical_csv):
+             sys.exit("エラー: classify-sfenコマンドには --input-csv, --output-quiet-csv, --output-tactical-csv の指定が必須です。")
+        Path(args.output_quiet_csv).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output_tactical_csv).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "generate":
         if not (args.input_csv and args.output_dir):
              sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")
