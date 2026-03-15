@@ -1011,42 +1011,43 @@ def _analyze_board_tactical_state(board: cshogi.Board, include_king_safety: bool
     return result
 
 
-def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
+def _classify_quiet_rejection_reason(board: cshogi.Board, quiet_level: str):
     if quiet_level == "none":
-        return True
+        return None, None
 
     if board.is_game_over():
-        return False
+        return "game_over", None
     if board.is_nyugyoku():
-        return False
+        return "nyugyoku", None
     if board.is_draw() != cshogi.NOT_REPETITION:
-        return False
+        return "draw", None
     if board.is_check():
-        return False
+        return "in_check", None
 
     if quiet_level == "1":
-        return True
+        return None, None
 
     analysis = _analyze_board_tactical_state(board, include_king_safety=(quiet_level == "3"))
     if analysis["capture_moves"] > 0:
-        return False
-    if analysis["check_moves"] > 0:
-        return False
-    if analysis["promotion_moves"] > 0:
-        return False
+        return "capture_available", analysis
     if board.mate_move_in_1ply():
-        return False
+        return "mate_in_1_available", analysis
 
     if quiet_level == "2":
-        return True
+        return None, analysis
 
     # Strict quiet positions: additionally require low king pressure and no forced king flight.
     if analysis["my_king_attackers"] > 0:
-        return False
+        return "king_under_attack", analysis
     if analysis["king_escape_routes"] <= 1:
-        return False
+        return "few_king_escape_routes", analysis
 
-    return True
+    return None, analysis
+
+
+def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
+    reason, _ = _classify_quiet_rejection_reason(board, quiet_level)
+    return reason is None
 
 
 def classify_sfen_logic(args: argparse.Namespace) -> None:
@@ -1078,6 +1079,7 @@ def classify_sfen_logic(args: argparse.Namespace) -> None:
     quiet_rows = []
     tactical_rows = []
     invalid_rows = 0
+    rejection_counts = defaultdict(int)
 
     print(f"--- SFEN分類を開始 (quiet-level={args.quiet_level}) ---")
     for row in tqdm(rows, desc="Classifying SFENs"):
@@ -1092,10 +1094,12 @@ def classify_sfen_logic(args: argparse.Namespace) -> None:
             invalid_rows += 1
             continue
 
-        if _is_quiet_position(board, args.quiet_level):
+        rejection_reason, _ = _classify_quiet_rejection_reason(board, args.quiet_level)
+        if rejection_reason is None:
             quiet_rows.append(row)
         else:
             tactical_rows.append(row)
+            rejection_counts[rejection_reason] += 1
 
     with open(quiet_output, 'w', newline='', encoding='utf-8') as f_quiet:
         writer = csv.DictWriter(f_quiet, fieldnames=header)
@@ -1111,6 +1115,9 @@ def classify_sfen_logic(args: argparse.Namespace) -> None:
         f"SFEN分類が完了しました。静止局面: {len(quiet_rows):,}, "
         f"非静止局面: {len(tactical_rows):,}, 無効/解析失敗: {invalid_rows:,}"
     )
+    if rejection_counts:
+        summary = ", ".join(f"{key}={value:,}" for key, value in sorted(rejection_counts.items()))
+        print(f"非静止判定の内訳: {summary}")
 
 
 def merge_eval_sfen_logic(args: argparse.Namespace) -> None:
@@ -1423,7 +1430,7 @@ def main() -> None:
         "--quiet-level",
         choices=["1", "2", "3"],
         default="2",
-        help="静止局面判定の強さ。1=終局/王手/反復除外, 2=取り/王手/成り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+        help="静止局面判定の強さ。1=終局/王手/反復除外, 2=取り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
     )
     classify_sfen_parser.set_defaults(func=classify_sfen_logic)
 
@@ -1464,7 +1471,7 @@ def main() -> None:
         "--quiet-level",
         choices=["none", "1", "2", "3"],
         default="none",
-        help="静止局面フィルタの強さ。none=無効, 1=終局/王手/反復除外, 2=取り/王手/成り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+        help="静止局面フィルタの強さ。none=無効, 1=終局/王手/反復除外, 2=取り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
     )
     generate_parser.add_argument("--sfen-count-csv", help="count-sfenで生成したSFEN頻度CSVのパス。")
     generate_parser.add_argument("--sfen-sampling-mode", choices=["none", "fixed", "sqrt", "log10"], default="none", help="SFEN頻度を使ったサンプリング上限方式。")
