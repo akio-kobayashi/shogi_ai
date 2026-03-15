@@ -963,7 +963,23 @@ def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
     return float(freq)
 
 
-def _analyze_board_tactical_state(board: cshogi.Board) -> dict:
+def _count_king_escape_routes(board: cshogi.Board, king_sq: int) -> int:
+    king_escape_routes = 0
+    y, x = divmod(king_sq, 9)
+    for dy in [-1, 0, 1]:
+        for dx in [-1, 0, 1]:
+            if dy == 0 and dx == 0:
+                continue
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < 9 and 0 <= nx < 9:
+                to_sq = ny * 9 + nx
+                move = board.move(king_sq, to_sq, False)
+                if board.is_legal(move):
+                    king_escape_routes += 1
+    return king_escape_routes
+
+
+def _analyze_board_tactical_state(board: cshogi.Board, include_king_safety: bool = False) -> dict:
     capture_moves = 0
     check_moves = 0
     promotion_moves = 0
@@ -980,30 +996,19 @@ def _analyze_board_tactical_state(board: cshogi.Board) -> dict:
             check_moves += 1
         board.pop()
 
-    my_king_sq = board.king_square(board.turn)
-    my_king_attackers = len(board.attackers_to(1 - board.turn, my_king_sq))
-
-    king_escape_routes = 0
-    y, x = divmod(my_king_sq, 9)
-    for dy in [-1, 0, 1]:
-        for dx in [-1, 0, 1]:
-            if dy == 0 and dx == 0:
-                continue
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < 9 and 0 <= nx < 9:
-                to_sq = ny * 9 + nx
-                move = cshogi.Move.from_squares(my_king_sq, to_sq, board.turn)
-                if not board.attackers_to(1 - board.turn, to_sq) and board.is_legal(move):
-                    king_escape_routes += 1
-
-    return {
+    result = {
         "legal_moves": legal_moves,
         "capture_moves": capture_moves,
         "check_moves": check_moves,
         "promotion_moves": promotion_moves,
-        "my_king_attackers": my_king_attackers,
-        "king_escape_routes": king_escape_routes,
     }
+
+    if include_king_safety:
+        my_king_sq = board.king_square(board.turn)
+        result["my_king_attackers"] = 1 if board.is_check() else 0
+        result["king_escape_routes"] = _count_king_escape_routes(board, my_king_sq)
+
+    return result
 
 
 def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
@@ -1022,7 +1027,7 @@ def _is_quiet_position(board: cshogi.Board, quiet_level: str) -> bool:
     if quiet_level == "1":
         return True
 
-    analysis = _analyze_board_tactical_state(board)
+    analysis = _analyze_board_tactical_state(board, include_king_safety=(quiet_level == "3"))
     if analysis["capture_moves"] > 0:
         return False
     if analysis["check_moves"] > 0:
