@@ -971,9 +971,9 @@ def _analyze_board_tactical_state(board: cshogi.Board) -> dict:
 
     for move in board.legal_moves:
         legal_moves += 1
-        if board.is_capture(move):
+        if cshogi.move_cap(move) != 0:
             capture_moves += 1
-        if cshogi.is_promote(move):
+        if cshogi.move_is_promotion(move):
             promotion_moves += 1
         board.push(move)
         if board.is_check():
