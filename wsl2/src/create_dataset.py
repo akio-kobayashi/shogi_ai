@@ -963,6 +963,85 @@ def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
     return float(freq)
 
 
+QUIET_POSITION_PIECE_VALUES = {
+    cshogi.PAWN: 100,
+    cshogi.LANCE: 300,
+    cshogi.KNIGHT: 320,
+    cshogi.SILVER: 480,
+    cshogi.GOLD: 520,
+    cshogi.BISHOP: 850,
+    cshogi.ROOK: 950,
+    cshogi.KING: 15000,
+    cshogi.PROM_PAWN: 420,
+    cshogi.PROM_LANCE: 400,
+    cshogi.PROM_KNIGHT: 420,
+    cshogi.PROM_SILVER: 500,
+    cshogi.PROM_BISHOP: 950,
+    cshogi.PROM_ROOK: 1150,
+}
+
+
+def _piece_value(piece_type: int) -> int:
+    return QUIET_POSITION_PIECE_VALUES.get(piece_type, 0)
+
+
+def _least_attacker_value(board: cshogi.Board, color: int, sq: int):
+    """Return the least valuable on-board attacker for a square, if any."""
+    least_value = None
+    for attacker_sq in board.attackers_to(color, sq):
+        piece_value = _piece_value(board.piece_type(attacker_sq))
+        if piece_value <= 0:
+            continue
+        if least_value is None or piece_value < least_value:
+            least_value = piece_value
+    return least_value
+
+
+def _has_see_like_capture(board: cshogi.Board) -> bool:
+    """
+    Approximate SEE for quiet-position filtering.
+
+    This is intentionally not a full swap-list / gain-array SEE:
+    it only checks whether a legal capture still looks materially favorable
+    after at most one recapture and one re-recapture using least-value attackers.
+    """
+    side_to_move = board.turn
+    opponent = 1 - side_to_move
+
+    for move in board.legal_moves:
+        captured_piece_type = cshogi.move_cap(move)
+        if captured_piece_type == 0:
+            continue
+
+        to_sq = cshogi.move_to(move)
+        captured_value = _piece_value(captured_piece_type)
+        if captured_value <= 0:
+            continue
+
+        board.push(move)
+        try:
+            occupied_value = _piece_value(board.piece_type(to_sq))
+            opp_recapture_value = _least_attacker_value(board, board.turn, to_sq)
+            if opp_recapture_value is None:
+                return True
+
+            if captured_value >= occupied_value:
+                return True
+
+            our_rerecapture_value = _least_attacker_value(board, opponent, to_sq)
+            if our_rerecapture_value is None:
+                continue
+
+            # A cheap SEE-like proxy: keep captures that still look material-positive
+            # after one recapture / re-recapture cycle with least-value attackers.
+            if captured_value + our_rerecapture_value >= occupied_value + opp_recapture_value:
+                return True
+        finally:
+            board.pop()
+
+    return False
+
+
 def _count_king_escape_routes(board: cshogi.Board, king_sq: int) -> int:
     king_escape_routes = 0
     y, x = divmod(king_sq, 9)
@@ -979,21 +1058,44 @@ def _count_king_escape_routes(board: cshogi.Board, king_sq: int) -> int:
     return king_escape_routes
 
 
+def _king_zone_squares(king_sq: int):
+    squares = {king_sq}
+    y, x = divmod(king_sq, 9)
+    for dy in [-1, 0, 1]:
+        for dx in [-1, 0, 1]:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < 9 and 0 <= nx < 9:
+                squares.add(ny * 9 + nx)
+    return squares
+
+
 def _analyze_board_tactical_state(board: cshogi.Board, include_king_safety: bool = False) -> dict:
     capture_moves = 0
     check_moves = 0
     promotion_moves = 0
     legal_moves = 0
+    king_zone_tactical_moves = 0
+
+    opp_king_sq = board.king_square(1 - board.turn)
+    opp_king_zone = _king_zone_squares(opp_king_sq)
 
     for move in board.legal_moves:
         legal_moves += 1
-        if cshogi.move_cap(move) != 0:
+        to_sq = cshogi.move_to(move)
+        is_capture = cshogi.move_cap(move) != 0
+        is_promotion = cshogi.move_is_promotion(move)
+
+        if is_capture:
             capture_moves += 1
-        if cshogi.move_is_promotion(move):
+        if is_promotion:
             promotion_moves += 1
+        if to_sq in opp_king_zone and (is_capture or is_promotion):
+            king_zone_tactical_moves += 1
         board.push(move)
         if board.is_check():
             check_moves += 1
+            if to_sq in opp_king_zone:
+                king_zone_tactical_moves += 1
         board.pop()
 
     result = {
@@ -1001,12 +1103,16 @@ def _analyze_board_tactical_state(board: cshogi.Board, include_king_safety: bool
         "capture_moves": capture_moves,
         "check_moves": check_moves,
         "promotion_moves": promotion_moves,
+        "king_zone_tactical_moves": king_zone_tactical_moves,
     }
 
     if include_king_safety:
         my_king_sq = board.king_square(board.turn)
+        my_king_zone = _king_zone_squares(my_king_sq)
         result["my_king_attackers"] = 1 if board.is_check() else 0
         result["king_escape_routes"] = _count_king_escape_routes(board, my_king_sq)
+        result["opp_king_zone_pressure"] = sum(board.attackers_to_count(board.turn, sq) for sq in opp_king_zone)
+        result["my_king_zone_pressure"] = sum(board.attackers_to_count(1 - board.turn, sq) for sq in my_king_zone)
 
     return result
 
@@ -1028,17 +1134,27 @@ def _classify_quiet_rejection_reason(board: cshogi.Board, quiet_level: str):
         return None, None
 
     analysis = _analyze_board_tactical_state(board, include_king_safety=(quiet_level == "3"))
-    if analysis["capture_moves"] > 0:
-        return "capture_available", analysis
     if board.mate_move_in_1ply():
         return "mate_in_1_available", analysis
 
     if quiet_level == "2":
         return None, analysis
 
-    # Strict quiet positions: additionally require low king pressure and no forced king flight.
+    # Strict quiet positions: approximate qsearch-relevant tactics and king danger.
+    if _has_see_like_capture(board):
+        return "favorable_capture_available", analysis
+    if analysis["check_moves"] > 0:
+        return "checking_move_available", analysis
+    if analysis["promotion_moves"] > 0:
+        return "promotion_tactic_available", analysis
+    if analysis["king_zone_tactical_moves"] > 0:
+        return "king_zone_tactic_available", analysis
     if analysis["my_king_attackers"] > 0:
         return "king_under_attack", analysis
+    if analysis["opp_king_zone_pressure"] >= 3:
+        return "opp_king_zone_pressure_high", analysis
+    if analysis["my_king_zone_pressure"] >= 4:
+        return "my_king_zone_pressure_high", analysis
     if analysis["king_escape_routes"] <= 1:
         return "few_king_escape_routes", analysis
 
@@ -1430,7 +1546,7 @@ def main() -> None:
         "--quiet-level",
         choices=["1", "2", "3"],
         default="2",
-        help="静止局面判定の強さ。1=終局/王手/反復除外, 2=取り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+        help="静止局面判定の強さ。1=終局/王手/反復除外, 2=1手詰め筋も除外, 3=SEE風に得な取り・王手候補・成り筋・玉周辺の危険も抑える。",
     )
     classify_sfen_parser.set_defaults(func=classify_sfen_logic)
 
@@ -1471,7 +1587,7 @@ def main() -> None:
         "--quiet-level",
         choices=["none", "1", "2", "3"],
         default="none",
-        help="静止局面フィルタの強さ。none=無効, 1=終局/王手/反復除外, 2=取り/1手詰め筋も除外, 3=さらに玉の危険度も抑える。",
+        help="静止局面フィルタの強さ。none=無効, 1=終局/王手/反復除外, 2=1手詰め筋も除外, 3=SEE風に得な取り・王手候補・成り筋・玉周辺の危険も抑える。",
     )
     generate_parser.add_argument("--sfen-count-csv", help="count-sfenで生成したSFEN頻度CSVのパス。")
     generate_parser.add_argument("--sfen-sampling-mode", choices=["none", "fixed", "sqrt", "log10"], default="none", help="SFEN頻度を使ったサンプリング上限方式。")
