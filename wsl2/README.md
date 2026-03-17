@@ -139,6 +139,33 @@ python src/create_dataset.py merge-eval-sfen \
 *   `--input-csvs`: マージ対象CSVのカンマ区切りリスト
 *   `--output-csv`: マージ後CSVの出力先
 
+### `diff-sfen`
+candidate 側の SFEN 一覧から、base 側に存在する SFEN を除外します。高レート側に出現しない low-only SFEN を作る用途を想定しています。
+```bash
+python src/create_dataset.py diff-sfen \
+  --base-csv <高レート側SFEN CSV> \
+  --candidate-csv <低レート側SFEN CSV> \
+  --output-csv <low-only SFEN CSV>
+```
+**主なオプション:**
+*   `--base-csv`: 差分の基準となるCSV
+*   `--candidate-csv`: 差分抽出対象のCSV
+*   `--output-csv`: 差分抽出後CSVの出力先
+
+### `adjust-eval`
+評価済み CSV の `eval_score_cp` を縮小・ゼロ寄せ・クリップします。low-only SFEN を学習データへ弱く加える用途を想定しています。
+```bash
+python src/create_dataset.py adjust-eval \
+  --input-csv <評価済みCSV> \
+  --output-csv <調整後CSV> \
+  --mode scale --scale 0.5
+```
+**主なオプション:**
+*   `--mode`: `scale` / `zero` / `clip`
+*   `--scale`: `scale` / `clip` 時の係数
+*   `--max-abs-cp`: `clip` 時の絶対値上限
+*   出力には `source_eval_score_cp`, `eval_adjust_mode`, `eval_adjust_param` 列が追加されます
+
 ### `generate`
 評価値付きCSVを元に、最終的な`.bin`形式の学習データセットを生成します。
 ```bash

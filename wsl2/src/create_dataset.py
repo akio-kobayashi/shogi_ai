@@ -1276,6 +1276,132 @@ def merge_eval_sfen_logic(args: argparse.Namespace) -> None:
     print(f"評価済みSFEN CSVのマージが完了しました。入力数: {len(input_paths)}, 出力行数: {merged_rows:,}")
 
 
+def diff_sfen_logic(args: argparse.Namespace) -> None:
+    """
+    [diff-sfenコマンド] candidate CSV から、base CSV に存在する SFEN を除外する。
+    low-only SFEN を作る用途を想定。
+    """
+    base_path = Path(args.base_csv)
+    candidate_path = Path(args.candidate_csv)
+    if not base_path.exists():
+        sys.exit(f"エラー: base CSV '{base_path}' が見つかりません。")
+    if not candidate_path.exists():
+        sys.exit(f"エラー: candidate CSV '{candidate_path}' が見つかりません。")
+
+    with open(base_path, 'r', newline='', encoding='utf-8') as f_base:
+        base_reader = csv.DictReader(f_base)
+        if not base_reader.fieldnames or 'sfen' not in base_reader.fieldnames:
+            sys.exit("エラー: base CSV に 'sfen' 列が必要です。")
+        base_sfens = {row['sfen'] for row in base_reader if row.get('sfen')}
+
+    with open(candidate_path, 'r', newline='', encoding='utf-8') as f_candidate:
+        candidate_reader = csv.DictReader(f_candidate)
+        header = candidate_reader.fieldnames
+        if not header or 'sfen' not in header:
+            sys.exit("エラー: candidate CSV に 'sfen' 列が必要です。")
+        candidate_rows = list(candidate_reader)
+
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    output_rows = []
+    skipped_rows = 0
+    for row in candidate_rows:
+        sfen = row.get('sfen')
+        if not sfen:
+            skipped_rows += 1
+            continue
+        if sfen in base_sfens:
+            skipped_rows += 1
+            continue
+        output_rows.append(row)
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(output_rows)
+
+    print(
+        f"SFEN差分抽出が完了しました。base SFEN数: {len(base_sfens):,}, "
+        f"candidate 行数: {len(candidate_rows):,}, 出力行数: {len(output_rows):,}, 除外行数: {skipped_rows:,}"
+    )
+
+
+def _adjust_eval_score(score: int, mode: str, scale: float, max_abs_cp: int) -> int:
+    if mode == "zero":
+        return 0
+    if mode == "scale":
+        return int(round(score * scale))
+    if mode == "clip":
+        if max_abs_cp <= 0:
+            return score
+        clipped = max(-max_abs_cp, min(max_abs_cp, score))
+        return int(round(clipped * scale))
+    return score
+
+
+def adjust_eval_logic(args: argparse.Namespace) -> None:
+    """
+    [adjust-evalコマンド] 評価済みCSVの eval_score_cp を縮小・ゼロ寄せ・クリップする。
+    low-only SFEN の教師を弱める用途を想定。
+    """
+    input_path = Path(args.input_csv)
+    if not input_path.exists():
+        sys.exit(f"エラー: 入力ファイル '{input_path}' が見つかりません。")
+
+    with open(input_path, 'r', newline='', encoding='utf-8') as f_in:
+        reader = csv.DictReader(f_in)
+        rows = list(reader)
+        header = list(reader.fieldnames or [])
+
+    if not header or 'eval_score_cp' not in header:
+        sys.exit("エラー: 入力CSVに 'eval_score_cp' 列が必要です。")
+
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if 'source_eval_score_cp' not in header:
+        header.append('source_eval_score_cp')
+    if 'eval_adjust_mode' not in header:
+        header.append('eval_adjust_mode')
+    if 'eval_adjust_param' not in header:
+        header.append('eval_adjust_param')
+
+    adjusted_rows = 0
+    skipped_rows = 0
+    adjusted = []
+    for row in rows:
+        try:
+            original_score = int(row['eval_score_cp'])
+        except (TypeError, ValueError):
+            skipped_rows += 1
+            adjusted.append(row)
+            continue
+
+        new_score = _adjust_eval_score(original_score, args.mode, args.scale, args.max_abs_cp)
+        row['source_eval_score_cp'] = original_score
+        row['eval_score_cp'] = new_score
+        row['eval_adjust_mode'] = args.mode
+        if args.mode == "clip":
+            row['eval_adjust_param'] = f"scale={args.scale:g},max_abs_cp={args.max_abs_cp}"
+        elif args.mode == "scale":
+            row['eval_adjust_param'] = f"scale={args.scale:g}"
+        else:
+            row['eval_adjust_param'] = "zero"
+        adjusted.append(row)
+        adjusted_rows += 1
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(adjusted)
+
+    print(
+        f"評価値調整が完了しました。mode={args.mode}, 行数: {len(rows):,}, "
+        f"調整済み: {adjusted_rows:,}, スキップ: {skipped_rows:,}, 出力CSV: {output_path}"
+    )
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
@@ -1577,6 +1703,20 @@ def main() -> None:
     merge_eval_sfen_parser.add_argument("--output-csv", help="マージ後CSVの出力パス。")
     merge_eval_sfen_parser.set_defaults(func=merge_eval_sfen_logic)
 
+    diff_sfen_parser = subparsers.add_parser("diff-sfen", parents=[config_parent], help="candidate CSV から、base CSV に存在する SFEN を除外します。")
+    diff_sfen_parser.add_argument("--base-csv", help="差分の基準となるCSV。")
+    diff_sfen_parser.add_argument("--candidate-csv", help="差分抽出対象のCSV。")
+    diff_sfen_parser.add_argument("--output-csv", help="差分抽出後CSVの出力パス。")
+    diff_sfen_parser.set_defaults(func=diff_sfen_logic)
+
+    adjust_eval_parser = subparsers.add_parser("adjust-eval", parents=[config_parent], help="評価済みCSVの eval_score_cp を縮小・ゼロ寄せ・クリップします。")
+    adjust_eval_parser.add_argument("--input-csv", help="入力となる評価済みCSVのパス。")
+    adjust_eval_parser.add_argument("--output-csv", help="調整後CSVの出力パス。")
+    adjust_eval_parser.add_argument("--mode", choices=["scale", "zero", "clip"], default="scale", help="評価値調整方式。")
+    adjust_eval_parser.add_argument("--scale", type=float, default=0.5, help="scale/clip時に掛ける係数。")
+    adjust_eval_parser.add_argument("--max-abs-cp", type=int, default=1200, help="clip時の絶対値上限。")
+    adjust_eval_parser.set_defaults(func=adjust_eval_logic)
+
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
@@ -1646,6 +1786,16 @@ def main() -> None:
     elif args.command == "merge-eval-sfen":
         if not (args.input_csvs and args.output_csv):
              sys.exit("エラー: merge-eval-sfenコマンドには --input-csvs と --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+    elif args.command == "diff-sfen":
+        if not (args.base_csv and args.candidate_csv and args.output_csv):
+             sys.exit("エラー: diff-sfenコマンドには --base-csv, --candidate-csv, --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+    elif args.command == "adjust-eval":
+        if not (args.input_csv and args.output_csv):
+             sys.exit("エラー: adjust-evalコマンドには --input-csv と --output-csv の指定が必須です。")
+        if args.mode == "clip" and args.max_abs_cp <= 0:
+             sys.exit("エラー: adjust-eval --mode clip では --max-abs-cp は1以上を指定してください。")
         Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "classify-sfen":
         if not (args.input_csv and args.output_quiet_csv and args.output_tactical_csv):
