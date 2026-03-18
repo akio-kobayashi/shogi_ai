@@ -963,6 +963,57 @@ def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
     return float(freq)
 
 
+def _load_sfen_frequency_map(sfen_count_csv: str) -> dict:
+    freq_map = {}
+    with open(sfen_count_csv, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                freq_map[row['sfen']] = int(row['total_count'])
+            except (KeyError, ValueError):
+                continue
+    return freq_map
+
+
+def _compute_sampling_keep_probability(freq: int, mode: str, cutoff_value: float, min_freq: int) -> float:
+    if mode == "none" or freq < min_freq:
+        return 1.0
+    target = _compute_sampling_target(freq, mode, cutoff_value)
+    return min(1.0, target / max(1, freq))
+
+
+def _weighted_quantile(sorted_pairs, q: float) -> float:
+    if not sorted_pairs:
+        raise ValueError("重み付き分位点を計算するためのデータがありません。")
+    if q <= 0.0:
+        return float(sorted_pairs[0][0])
+    if q >= 1.0:
+        return float(sorted_pairs[-1][0])
+
+    total_weight = sum(weight for _, weight in sorted_pairs)
+    if total_weight <= 0.0:
+        raise ValueError("重み付き分位点の総重みが0以下です。")
+
+    threshold = total_weight * q
+    cumulative = 0.0
+    for value, weight in sorted_pairs:
+        cumulative += weight
+        if cumulative >= threshold:
+            return float(value)
+    return float(sorted_pairs[-1][0])
+
+
+def _cp_to_teacher_logit(value_cp: float, score_scaling: float, teacher_temperature: float) -> float:
+    return float(value_cp) / (float(score_scaling) * float(teacher_temperature))
+
+
+def _load_corn_threshold_positions(args: argparse.Namespace) -> tuple[list, list]:
+    input_paths, _, all_positions = _load_positions_from_csvs(args.input_csv, args.input_csvs)
+    if not all_positions:
+        sys.exit("エラー: 入力ファイルにデータがありません。")
+    return input_paths, all_positions
+
+
 QUIET_POSITION_PIECE_VALUES = {
     cshogi.PAWN: 100,
     cshogi.LANCE: 300,
@@ -1402,16 +1453,46 @@ def adjust_eval_logic(args: argparse.Namespace) -> None:
     )
 
 
+def _load_positions_from_csvs(input_csv: str = None, input_csvs: str = None):
+    input_paths = []
+    if input_csv:
+        input_paths.append(Path(input_csv))
+    if input_csvs:
+        input_paths.extend(Path(p.strip()) for p in input_csvs.split(',') if p.strip())
+
+    if not input_paths:
+        sys.exit("エラー: 少なくとも1つの入力CSVが必要です。")
+
+    rows = []
+    header = None
+    for path in input_paths:
+        if not path.exists():
+            sys.exit(f"エラー: 入力ファイル '{path}' が見つかりません。")
+        with open(path, 'r', newline='', encoding='utf-8') as f_in:
+            reader = csv.DictReader(f_in)
+            current_header = reader.fieldnames
+            if not current_header:
+                continue
+            if header is None:
+                header = current_header
+            elif current_header != header:
+                sys.exit(f"エラー: ヘッダが一致しません: {path}")
+            rows.extend(reader)
+
+    return input_paths, header, rows
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
     """
-    if not Path(args.input_csv).exists(): sys.exit(f"エラー: 入力ファイル '{args.input_csv}' が見つかりません。")
     print(f"--- .bin データセット生成を開始 ---")
-    with open(args.input_csv, 'r', newline='', encoding='utf-8') as f:
-        all_positions = list(csv.DictReader(f))
+    input_paths, _, all_positions = _load_positions_from_csvs(args.input_csv, args.input_csvs)
     if not all_positions: sys.exit("エラー: 入力ファイルにデータがありません。")
-    print(f"読み込み完了。総局面数: {len(all_positions)}")
+    if len(input_paths) == 1:
+        print(f"読み込み完了。入力CSV: {input_paths[0]}, 総局面数: {len(all_positions)}")
+    else:
+        print(f"読み込み完了。入力CSV数: {len(input_paths)}, 総局面数: {len(all_positions)}")
 
     if args.min_ply > args.max_ply:
         sys.exit("エラー: --min-ply は --max-ply 以下である必要があります。")
@@ -1476,14 +1557,7 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
         if args.sfen_sampling_min_freq < 1:
             sys.exit("エラー: --sfen-sampling-min-freq は1以上を指定してください。")
 
-        freq_map = {}
-        with open(args.sfen_count_csv, 'r', newline='', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    freq_map[row['sfen']] = int(row['total_count'])
-                except (KeyError, ValueError):
-                    continue
+        freq_map = _load_sfen_frequency_map(args.sfen_count_csv)
 
         by_sfen = defaultdict(list)
         for pos in all_positions:
@@ -1495,11 +1569,15 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
         applied_sfens = 0
         for sfen, items in by_sfen.items():
             freq = freq_map.get(sfen, len(items))
-            if freq < args.sfen_sampling_min_freq:
+            keep_prob = _compute_sampling_keep_probability(
+                freq,
+                args.sfen_sampling_mode,
+                args.sfen_cutoff_value,
+                args.sfen_sampling_min_freq,
+            )
+            if keep_prob >= 1.0:
                 sampled_positions.extend(items)
                 continue
-            target = _compute_sampling_target(freq, args.sfen_sampling_mode, args.sfen_cutoff_value)
-            keep_prob = min(1.0, target / max(1, freq))
             applied_sfens += 1
             for item in items:
                 if random.random() < keep_prob:
@@ -1520,6 +1598,139 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
     write_bin_file(train_positions, str(output_dir / "train.bin"))
     write_bin_file(val_positions, str(output_dir / "val.bin"))
     print("\nすべての処理が完了しました。")
+
+
+def build_corn_thresholds_logic(args: argparse.Namespace) -> None:
+    """
+    [corn-thresholdsコマンド]
+    generate と同じ頻度補正の期待分布から、CORN 用の cp/logit 閾値を構築する。
+    """
+    if args.num_thresholds <= 0:
+        sys.exit("エラー: --num-thresholds は1以上を指定してください。")
+    if args.score_scaling <= 0.0:
+        sys.exit("エラー: --score-scaling は正の値である必要があります。")
+    if args.teacher_temperature <= 0.0:
+        sys.exit("エラー: --teacher-temperature は正の値である必要があります。")
+    if args.sfen_sampling_mode != "none":
+        if not args.sfen_count_csv:
+            sys.exit("エラー: SFEN頻度補正を使う場合は --sfen-count-csv の指定が必須です。")
+        if not Path(args.sfen_count_csv).exists():
+            sys.exit(f"エラー: SFEN頻度CSV '{args.sfen_count_csv}' が見つかりません。")
+        if args.sfen_sampling_mode == "fixed" and args.sfen_cutoff_value <= 0:
+            sys.exit("エラー: --sfen-sampling-mode fixed の場合、--sfen-cutoff-value は1以上を指定してください。")
+        if args.sfen_sampling_min_freq < 1:
+            sys.exit("エラー: --sfen-sampling-min-freq は1以上を指定してください。")
+
+    input_paths, all_positions = _load_corn_threshold_positions(args)
+    print("--- CORN閾値の構築を開始 ---")
+    if len(input_paths) == 1:
+        print(f"読み込み完了。入力CSV: {input_paths[0]}, 総局面数: {len(all_positions):,}")
+    else:
+        print(f"読み込み完了。入力CSV数: {len(input_paths)}, 総局面数: {len(all_positions):,}")
+
+    if args.min_ply > args.max_ply:
+        sys.exit("エラー: --min-ply は --max-ply 以下である必要があります。")
+
+    filtered_positions = []
+    skipped_invalid_ply = 0
+    skipped_invalid_score = 0
+    for pos in all_positions:
+        try:
+            ply = int(pos['ply'])
+        except (KeyError, TypeError, ValueError):
+            skipped_invalid_ply += 1
+            continue
+        if not (args.min_ply <= ply <= args.max_ply):
+            continue
+        try:
+            pos['_eval_score_cp_float'] = float(pos['eval_score_cp'])
+        except (KeyError, TypeError, ValueError):
+            skipped_invalid_score += 1
+            continue
+        filtered_positions.append(pos)
+
+    if skipped_invalid_ply:
+        print(f"ply列を解釈できないため除外した局面数: {skipped_invalid_ply:,}")
+    if skipped_invalid_score:
+        print(f"eval_score_cp列を解釈できないため除外した局面数: {skipped_invalid_score:,}")
+    if not filtered_positions:
+        sys.exit("エラー: フィルタ適用後に局面が残りませんでした。")
+    print(f"plyフィルタ適用後の局面数: {len(filtered_positions):,} (範囲: {args.min_ply}..{args.max_ply})")
+
+    freq_map = {}
+    if args.sfen_sampling_mode != "none":
+        freq_map = _load_sfen_frequency_map(args.sfen_count_csv)
+
+    weighted_scores = []
+    by_sfen = defaultdict(list)
+    for pos in filtered_positions:
+        sfen = pos.get('sfen')
+        if not sfen:
+            continue
+        by_sfen[sfen].append(pos)
+
+    applied_sfens = 0
+    for sfen, items in by_sfen.items():
+        freq = freq_map.get(sfen, len(items))
+        keep_prob = _compute_sampling_keep_probability(
+            freq,
+            args.sfen_sampling_mode,
+            args.sfen_cutoff_value,
+            args.sfen_sampling_min_freq,
+        )
+        if keep_prob < 1.0:
+            applied_sfens += 1
+        for item in items:
+            weighted_scores.append((item['_eval_score_cp_float'], keep_prob))
+
+    weighted_scores.sort(key=lambda x: x[0])
+    total_weight = sum(weight for _, weight in weighted_scores)
+    if total_weight <= 0.0:
+        sys.exit("エラー: 有効な重み付き評価値分布を構築できませんでした。")
+
+    cp_thresholds = []
+    for i in range(1, args.num_thresholds + 1):
+        q = i / (args.num_thresholds + 1)
+        cp_thresholds.append(round(_weighted_quantile(weighted_scores, q), 6))
+
+    deduped_cp_thresholds = []
+    last = None
+    for value in cp_thresholds:
+        if last is None or value != last:
+            deduped_cp_thresholds.append(value)
+            last = value
+
+    logit_thresholds = [
+        round(_cp_to_teacher_logit(value, args.score_scaling, args.teacher_temperature), 6)
+        for value in deduped_cp_thresholds
+    ]
+
+    print(
+        f"重み付き分布を構築: 局面数={len(weighted_scores):,}, "
+        f"期待総重み={total_weight:.2f}, "
+        f"sampling_mode={args.sfen_sampling_mode}, "
+        f"補正適用SFEN数={applied_sfens:,}"
+    )
+    print("")
+    print("derived_from_cp_thresholds:")
+    for value in deduped_cp_thresholds:
+        print(f"  - {value:g}")
+    print("")
+    print("corn_aux_thresholds (logit space):")
+    for value in logit_thresholds:
+        print(f"  - {value:g}")
+    print("")
+    print(
+        "logit conversion: cp / (score_scaling * teacher_temperature)"
+        f" = cp / ({args.score_scaling:g} * {args.teacher_temperature:g})"
+    )
+    if args.corn_aux_weight is not None:
+        print(f"corn_aux_weight: {args.corn_aux_weight:g}")
+    print("")
+    cli_values = ",".join(f"{v:g}" for v in logit_thresholds)
+    print("CLI example:")
+    suffix = f" --model.corn_aux_weight={args.corn_aux_weight:g}" if args.corn_aux_weight is not None else ""
+    print(f"  --model.corn_aux_thresholds=[{cli_values}]{suffix}")
 
 def run_build_h5(args: argparse.Namespace) -> None:
     """
@@ -1717,8 +1928,24 @@ def main() -> None:
     adjust_eval_parser.add_argument("--max-abs-cp", type=int, default=1200, help="clip時の絶対値上限。")
     adjust_eval_parser.set_defaults(func=adjust_eval_logic)
 
+    corn_thresholds_parser = subparsers.add_parser("corn-thresholds", parents=[config_parent], help="generate と同じ頻度補正を考慮した CORN 閾値を構築します。")
+    corn_thresholds_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
+    corn_thresholds_parser.add_argument("--input-csvs", help="マージして扱う評価値付きCSVのカンマ区切りリスト。")
+    corn_thresholds_parser.add_argument("--min-ply", type=int, default=0, help="閾値計算対象とする最小手数。")
+    corn_thresholds_parser.add_argument("--max-ply", type=int, default=999, help="閾値計算対象とする最大手数。")
+    corn_thresholds_parser.add_argument("--sfen-count-csv", help="count-sfenで生成したSFEN頻度CSVのパス。")
+    corn_thresholds_parser.add_argument("--sfen-sampling-mode", choices=["none", "fixed", "sqrt", "log10"], default="none", help="generate と同じ SFEN 頻度補正方式。")
+    corn_thresholds_parser.add_argument("--sfen-cutoff-value", type=float, default=1.0, help="fixed方式の上限値。")
+    corn_thresholds_parser.add_argument("--sfen-sampling-min-freq", type=int, default=1, help="この頻度未満のSFENには頻度補正を適用しない。")
+    corn_thresholds_parser.add_argument("--num-thresholds", type=int, default=4, help="生成する閾値数。K個の閾値で K+1 クラス。")
+    corn_thresholds_parser.add_argument("--score-scaling", type=float, default=361.0, help="cp から teacher-logit 空間へ変換する際の score_scaling。")
+    corn_thresholds_parser.add_argument("--teacher-temperature", type=float, default=1.0, help="teacher-logit 空間へ変換する際の teacher_temperature。")
+    corn_thresholds_parser.add_argument("--corn-aux-weight", type=float, default=None, help="出力例に含める corn_aux_weight。")
+    corn_thresholds_parser.set_defaults(func=build_corn_thresholds_logic)
+
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
+    generate_parser.add_argument("--input-csvs", help="マージして扱う評価値付きCSVのカンマ区切りリスト。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
     generate_parser.add_argument("--val-split", type=float, default=0.1)
     generate_parser.add_argument("--min-ply", type=int, default=0, help="生成対象とする最小手数。")
@@ -1797,14 +2024,21 @@ def main() -> None:
         if args.mode == "clip" and args.max_abs_cp <= 0:
              sys.exit("エラー: adjust-eval --mode clip では --max-abs-cp は1以上を指定してください。")
         Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+    elif args.command == "corn-thresholds":
+        if not (args.input_csv or args.input_csvs):
+             sys.exit("エラー: corn-thresholdsコマンドには --input-csv または --input-csvs の指定が必須です。")
+        if args.input_csv and args.input_csvs:
+             sys.exit("エラー: corn-thresholdsコマンドでは --input-csv と --input-csvs を同時に指定できません。")
     elif args.command == "classify-sfen":
         if not (args.input_csv and args.output_quiet_csv and args.output_tactical_csv):
              sys.exit("エラー: classify-sfenコマンドには --input-csv, --output-quiet-csv, --output-tactical-csv の指定が必須です。")
         Path(args.output_quiet_csv).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output_tactical_csv).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "generate":
-        if not (args.input_csv and args.output_dir):
-             sys.exit("エラー: generateコマンドには --input-csv と --output-dir の指定が必須です。")
+        if not ((args.input_csv or args.input_csvs) and args.output_dir):
+             sys.exit("エラー: generateコマンドには (--input-csv または --input-csvs) と --output-dir の指定が必須です。")
+        if args.input_csv and args.input_csvs:
+             sys.exit("エラー: generateコマンドでは --input-csv と --input-csvs を同時に指定できません。")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     elif args.command == "build-h5":
         if not (args.input_csv and args.output_h5 and args.engine_path):

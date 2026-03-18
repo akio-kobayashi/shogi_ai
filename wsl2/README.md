@@ -172,6 +172,8 @@ python src/create_dataset.py adjust-eval \
 python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
 ```
 **主なオプション:**
+*   `--input-csv`: 単一の評価値付きCSVを入力する場合
+*   `--input-csvs`: 分割評価した複数CSVをカンマ区切りでまとめて入力する場合
 *   `--val-split`: 検証データ比率
 *   `--min-ply`, `--max-ply`: 生成対象とする手数の範囲
 *   `--quiet-level`: 静止局面フィルタの強さ (`none` / `1` / `2` / `3`)。後方互換用で、新フローでは `classify-sfen` を推奨
@@ -179,6 +181,10 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 *   `--sfen-sampling-mode`: `none` / `fixed` / `sqrt` / `log10`
 *   `--sfen-cutoff-value`: `fixed`方式の上限値
 *   `--sfen-sampling-min-freq`: この頻度未満のSFENにはサンプリング上限を適用しない
+
+**補足:**
+*   `--input-csv` と `--input-csvs` は同時指定できません。
+*   `--input-csvs` を使うと、複数の評価済みCSVを `generate` 内でヘッダ一致確認のうえ連結してから `.bin` を生成できます。
 
 **静止局面フィルタ (`--quiet-level`)**
 *   `none`: フィルタなし（デフォルト）
