@@ -188,8 +188,12 @@ python src/create_dataset.py adjust-eval \
 python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-dir <出力ディレクトリ>
 ```
 **主なオプション:**
-*   `--input-csv`: 単一の評価値付きCSVを入力する場合
-*   `--input-csvs`: 分割評価した複数CSVをカンマ区切りでまとめて入力する場合
+*   `--input-csv`: 単一の評価値付きCSVを直接入力する場合
+*   `--input-csvs`: 分割評価した複数の評価値付きCSVをカンマ区切りでまとめて直接入力する場合
+*   `--positions-csv`: `label` 出力などの局面展開済みCSVを入力し、内部で `eval-sfen` 結果を join する場合
+*   `--positions-csvs`: 分割された局面展開済みCSVをカンマ区切りでまとめて join する場合
+*   `--eval-sfen-csv`: `evaluate-sfen` で生成した評価済みSFEN CSV
+*   `--eval-sfen-csvs`: 分割評価した複数の評価済みSFEN CSVをカンマ区切りで指定する場合
 *   `--val-split`: 検証データ比率
 *   `--min-ply`, `--max-ply`: 生成対象とする手数の範囲
 *   `--quiet-level`: 静止局面フィルタの強さ (`none` / `1` / `2` / `3`)。後方互換用で、新フローでは `classify-sfen` を推奨
@@ -200,7 +204,19 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 
 **補足:**
 *   `--input-csv` と `--input-csvs` は同時指定できません。
+*   `--positions-csv` と `--positions-csvs` は同時指定できません。
+*   `--eval-sfen-csv` と `--eval-sfen-csvs` は同時指定できません。
+*   direct入力 (`--input-csv` / `--input-csvs`) と join入力 (`--positions-csv` / `--eval-sfen-csv` 系) は同時指定できません。
 *   `--input-csvs` を使うと、複数の評価済みCSVを `generate` 内でヘッダ一致確認のうえ連結してから `.bin` を生成できます。
+*   join入力では、局面CSV側の `game_result` と `ply` を保持したまま、`sfen` 一致で `eval_score_cp` を付与します。評価値が無い局面は読み飛ばします。
+
+**join入力の例:**
+```bash
+python src/create_dataset.py generate \
+  --positions-csv labeled_positions.csv \
+  --eval-sfen-csv evaluated_sfen.csv \
+  --output-dir out
+```
 
 **静止局面フィルタ (`--quiet-level`)**
 *   `none`: フィルタなし（デフォルト）

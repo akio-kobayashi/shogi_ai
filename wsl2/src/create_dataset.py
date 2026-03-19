@@ -1557,12 +1557,82 @@ def _load_positions_from_csvs(input_csv: str = None, input_csvs: str = None):
     return input_paths, header, rows
 
 
+def _load_eval_map_from_csvs(input_csv: str = None, input_csvs: str = None) -> tuple[list, dict]:
+    input_paths, header, rows = _load_positions_from_csvs(input_csv, input_csvs)
+    if not header or 'sfen' not in header or 'eval_score_cp' not in header:
+        sys.exit("エラー: 評価済みSFEN CSV には 'sfen' と 'eval_score_cp' 列が必要です。")
+
+    eval_map = {}
+    duplicate_same_score = 0
+    for row in rows:
+        sfen = row.get('sfen')
+        if not sfen:
+            continue
+        try:
+            score = int(row['eval_score_cp'])
+        except (TypeError, ValueError):
+            continue
+        if sfen in eval_map:
+            if eval_map[sfen] != score:
+                sys.exit(f"エラー: 同一SFENに対して異なる評価値が存在します: {sfen}")
+            duplicate_same_score += 1
+            continue
+        eval_map[sfen] = score
+
+    if not eval_map:
+        sys.exit("エラー: 評価済みSFEN CSV から有効な評価値を読み取れませんでした。")
+
+    if duplicate_same_score:
+        print(f"重複SFEN（同一評価値）を統合: {duplicate_same_score:,}")
+    return input_paths, eval_map
+
+
+def _load_generate_positions(args: argparse.Namespace) -> tuple[list, list]:
+    if args.positions_csv or args.positions_csvs:
+        position_paths, header, rows = _load_positions_from_csvs(args.positions_csv, args.positions_csvs)
+        if not header:
+            sys.exit("エラー: 局面CSVのヘッダを読み取れません。")
+        required = {'sfen', 'ply', 'game_result'}
+        missing = [key for key in required if key not in header]
+        if missing:
+            sys.exit(f"エラー: 局面CSVに必要な列が不足しています: {', '.join(missing)}")
+
+        _, eval_map = _load_eval_map_from_csvs(args.eval_sfen_csv, args.eval_sfen_csvs)
+        joined_rows = []
+        missing_eval = 0
+        for row in rows:
+            sfen = row.get('sfen')
+            if not sfen:
+                missing_eval += 1
+                continue
+            if sfen not in eval_map:
+                missing_eval += 1
+                continue
+            joined = row.copy()
+            joined['eval_score_cp'] = eval_map[sfen]
+            joined_rows.append(joined)
+
+        if not joined_rows:
+            sys.exit("エラー: 評価値を join できた局面がありませんでした。")
+        print(
+            f"評価済みSFENを局面CSVへ結合: 入力局面数={len(rows):,}, "
+            f"採用局面数={len(joined_rows):,}, 評価値なし除外={missing_eval:,}, "
+            f"評価SFEN数={len(eval_map):,}"
+        )
+        return position_paths, joined_rows
+
+    input_paths, header, rows = _load_positions_from_csvs(args.input_csv, args.input_csvs)
+    if not header or 'eval_score_cp' not in header:
+        sys.exit("エラー: generate の直接入力CSVには 'eval_score_cp' 列が必要です。")
+    return input_paths, rows
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
     """
     print(f"--- .bin データセット生成を開始 ---")
-    input_paths, _, all_positions = _load_positions_from_csvs(args.input_csv, args.input_csvs)
+    input_paths, all_positions = _load_generate_positions(args)
     if not all_positions: sys.exit("エラー: 入力ファイルにデータがありません。")
     if len(input_paths) == 1:
         print(f"読み込み完了。入力CSV: {input_paths[0]}, 総局面数: {len(all_positions)}")
@@ -2044,6 +2114,10 @@ def main() -> None:
     generate_parser = subparsers.add_parser("generate", parents=[config_parent], help="評価値付きCSVから学習データ(.bin)を生成します。")
     generate_parser.add_argument("--input-csv", help="入力となる評価値付きCSVのパス。")
     generate_parser.add_argument("--input-csvs", help="マージして扱う評価値付きCSVのカンマ区切りリスト。")
+    generate_parser.add_argument("--positions-csv", help="label 出力などの局面展開済みCSV。内部で eval-sfen 結果を join する場合に使用。")
+    generate_parser.add_argument("--positions-csvs", help="マージして扱う局面展開済みCSVのカンマ区切りリスト。")
+    generate_parser.add_argument("--eval-sfen-csv", help="evaluate-sfen で生成した評価済みSFEN CSV。")
+    generate_parser.add_argument("--eval-sfen-csvs", help="マージして扱う評価済みSFEN CSVのカンマ区切りリスト。")
     generate_parser.add_argument("--output-dir", help="生成されたデータセットを保存するディレクトリ。")
     generate_parser.add_argument("--val-split", type=float, default=0.1)
     generate_parser.add_argument("--min-ply", type=int, default=0, help="生成対象とする最小手数。")
@@ -2139,10 +2213,22 @@ def main() -> None:
         Path(args.output_quiet_csv).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output_tactical_csv).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "generate":
-        if not ((args.input_csv or args.input_csvs) and args.output_dir):
-             sys.exit("エラー: generateコマンドには (--input-csv または --input-csvs) と --output-dir の指定が必須です。")
+        direct_input = bool(args.input_csv or args.input_csvs)
+        joined_input = bool(args.positions_csv or args.positions_csvs or args.eval_sfen_csv or args.eval_sfen_csvs)
+        if not args.output_dir:
+             sys.exit("エラー: generateコマンドには --output-dir の指定が必須です。")
+        if direct_input and joined_input:
+             sys.exit("エラー: generateコマンドでは direct入力(--input-csv/--input-csvs) と join入力(--positions-csv/--eval-sfen-csv 系) を同時に指定できません。")
+        if not direct_input and not joined_input:
+             sys.exit("エラー: generateコマンドには direct入力または join入力のどちらかが必要です。")
         if args.input_csv and args.input_csvs:
              sys.exit("エラー: generateコマンドでは --input-csv と --input-csvs を同時に指定できません。")
+        if args.positions_csv and args.positions_csvs:
+             sys.exit("エラー: generateコマンドでは --positions-csv と --positions-csvs を同時に指定できません。")
+        if args.eval_sfen_csv and args.eval_sfen_csvs:
+             sys.exit("エラー: generateコマンドでは --eval-sfen-csv と --eval-sfen-csvs を同時に指定できません。")
+        if bool(args.positions_csv or args.positions_csvs) != bool(args.eval_sfen_csv or args.eval_sfen_csvs):
+             sys.exit("エラー: join入力では --positions-csv 系と --eval-sfen-csv 系を両方指定してください。")
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     elif args.command == "build-h5":
         if not (args.input_csv and args.output_h5 and args.engine_path):
