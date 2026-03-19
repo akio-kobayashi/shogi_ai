@@ -1001,6 +1001,8 @@ def write_bin_file(positions: list, output_path: str):
     print(f"データセット '{output_path}' の生成を開始 (対象局面数: {len(positions)})")
     board = cshogi.Board()
     psv = np.zeros(1, dtype=cshogi.PackedSfenValue)
+    int16_info = np.iinfo(np.int16)
+    clipped_scores = 0
     with open(output_path, "wb") as f_out:
         for pos in tqdm(positions, desc=f"Writing {Path(output_path).name}"):
             try:
@@ -1008,13 +1010,19 @@ def write_bin_file(positions: list, output_path: str):
                 board.to_psfen(psv)
                 cshogi_result = int(pos['game_result'])
                 write_result = 1 if cshogi_result == 1 else -1 if cshogi_result == 2 else 0
-                psv[0]["score"] = np.int16(pos['eval_score_cp'])
+                score = int(pos['eval_score_cp'])
+                clipped_score = max(int16_info.min, min(int16_info.max, score))
+                if clipped_score != score:
+                    clipped_scores += 1
+                psv[0]["score"] = np.int16(clipped_score)
                 psv[0]["move"] = np.uint16(0)
                 psv[0]["gamePly"] = np.uint16(pos['ply'])
                 psv[0]["game_result"] = np.int8(write_result)
                 psv.tofile(f_out)
             except Exception as e:
                 print(f"\nデータ書き込みエラー: {pos} ({e})", file=sys.stderr)
+    if clipped_scores:
+        print(f"score を int16 範囲へクリップした局面数: {clipped_scores:,}")
 
 
 def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
