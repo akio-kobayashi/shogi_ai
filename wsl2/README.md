@@ -111,6 +111,22 @@ python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --ou
 *   `total_count`
 *   `black_win_count`
 
+### `plot-sfen-histogram`
+`count-sfen` の出力CSVから `total_count` 分布のヒストグラム画像を生成します。
+```bash
+python src/create_dataset.py plot-sfen-histogram \
+  --input-csv sfen_counts.csv \
+  --output-png sfen_histogram.png \
+  --log-x --log-y
+```
+**主なオプション:**
+*   `--input-csv`: `count-sfen` の出力CSV
+*   `--output-png`: 出力画像パス
+*   `--count-column`: 可視化する列名。通常は `total_count`
+*   `--bins`: ビン数
+*   `--max-count`: この値を超える頻度を描画から除外
+*   `--log-x`, `--log-y`: 各軸を対数表示
+
 ### `classify-sfen`
 `count-sfen` の出力などを元に、SFEN を静止局面と非静止局面へ分類します。高コストな評価の前にデータを分けるための前処理です。
 ```bash
@@ -207,12 +223,51 @@ python src/create_dataset.py generate --input-csv <評価値付きCSV> --output-
 *   そのため `quiet-level=3` は「YaneuraOu の qsearch / フル SEE 相当」ではなく、「qsearch が必要になりやすい局面を多めに落とす高コスト判定」です。
 
 **頻度サンプリングの仕様:**
-*   しきい値未満を除外するフィルタではなく、同一SFENごとに確率サンプリングを行います。
-*   サンプル後の期待頻度が以下に収束するように受理確率を決めます。
-*   `fixed`: 期待頻度 = `sfen-cutoff-value`
-*   `sqrt`: 期待頻度 = `sqrt(total_count)`
-*   `log10`: 期待頻度 = `log10(total_count)`（最小1）
+*   しきい値未満を除外するフィルタではなく、同一SFENごとに「目標出力回数」を決めます。
+*   実際の採用は `目標出力回数 / 真の頻度(total_count)` を keep probability とする確率サンプリングです。
+*   同じ評価済み行を複製して増やすことはしません。
+*   `fixed`: 目標出力回数 = `sfen-cutoff-value`
+*   `sqrt`: 目標出力回数 = `sqrt(total_count)`
+*   `log10`: 目標出力回数 = `log10(total_count)`（最小1）
 *   `total_count < sfen-sampling-min-freq` のSFENは、サンプリングせず全件残します。
+*   `total_count >= sfen-sampling-min-freq` のSFENでも、目標出力回数は `sfen-sampling-min-freq` 未満には下げません。これにより、しきい値直上のSFENが直下のSFENより少なくなる逆転を防ぎます。
+
+**頻度サンプリングの例:**
+*   頻度調整なし
+```bash
+python src/create_dataset.py generate \
+  --input-csv evaluated.csv \
+  --output-dir out \
+  --sfen-sampling-mode none
+```
+*   単純カット: 出現頻度100以上のSFENは最大100回に圧縮
+```bash
+python src/create_dataset.py generate \
+  --input-csv evaluated.csv \
+  --output-dir out \
+  --sfen-count-csv sfen_counts.csv \
+  --sfen-sampling-mode fixed \
+  --sfen-cutoff-value 100 \
+  --sfen-sampling-min-freq 100
+```
+*   `sqrt`: 出現頻度100以上のSFENを `sqrt(total_count)` 回まで圧縮
+```bash
+python src/create_dataset.py generate \
+  --input-csv evaluated.csv \
+  --output-dir out \
+  --sfen-count-csv sfen_counts.csv \
+  --sfen-sampling-mode sqrt \
+  --sfen-sampling-min-freq 100
+```
+*   `log10`: 出現頻度100以上のSFENを `log10(total_count)` 回まで圧縮
+```bash
+python src/create_dataset.py generate \
+  --input-csv evaluated.csv \
+  --output-dir out \
+  --sfen-count-csv sfen_counts.csv \
+  --sfen-sampling-mode log10 \
+  --sfen-sampling-min-freq 100
+```
 
 ### `build-h5`
 フィルタリング済みCSVを元に、USIエンジンで詳細な評価を行い、階層的なHDF5データセット (`.h5`) を直接生成します。

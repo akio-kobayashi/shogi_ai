@@ -294,6 +294,72 @@ def count_sfen_logic(args: argparse.Namespace) -> None:
     else:
         shutil.rmtree(temp_root, ignore_errors=True)
 
+
+def plot_sfen_histogram_logic(args: argparse.Namespace) -> None:
+    """[plot-sfen-histogramコマンド] count-sfen 出力の total_count 分布をヒストグラム化する。"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        sys.exit("エラー: matplotlib が必要です。`pip install matplotlib` を実行してください。")
+
+    input_path = Path(args.input_csv)
+    if not input_path.exists():
+        sys.exit(f"エラー: 入力CSV '{args.input_csv}' が見つかりません。")
+    if args.bins <= 0:
+        sys.exit("エラー: --bins は1以上を指定してください。")
+
+    counts = []
+    with open(input_path, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or args.count_column not in reader.fieldnames:
+            sys.exit(f"エラー: 入力CSVに '{args.count_column}' 列が必要です。")
+        for row in reader:
+            try:
+                value = int(row[args.count_column])
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            counts.append(value)
+
+    if not counts:
+        sys.exit("エラー: ヒストグラム化できる正の頻度データがありません。")
+
+    max_count = max(counts)
+    if args.max_count is not None:
+        counts = [value for value in counts if value <= args.max_count]
+        if not counts:
+            sys.exit("エラー: --max-count 適用後にデータが残りませんでした。")
+        max_count = max(counts)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    if args.log_x:
+        bins = np.logspace(0, math.log10(max_count), args.bins + 1)
+    else:
+        bins = args.bins
+    ax.hist(counts, bins=bins, color="#3B82F6", edgecolor="#1E3A8A", alpha=0.85)
+    ax.set_title(args.title or "SFEN Frequency Histogram")
+    ax.set_xlabel(args.count_column)
+    ax.set_ylabel("Number of SFENs")
+    if args.log_x:
+        ax.set_xscale("log")
+    if args.log_y:
+        ax.set_yscale("log")
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+
+    output_path = Path(args.output_png)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=args.dpi)
+    plt.close(fig)
+
+    print(
+        f"ヒストグラムを出力しました: {output_path} "
+        f"(SFEN数={len(counts):,}, max_count={max_count:,}, bins={args.bins})"
+    )
+
 def extract_metadata(csa_dir: str, output_csv: str) -> None:
     """
     [extractコマンド] CSAファイル群をスキャンし、棋譜のメタデータをCSVに書き出す。
@@ -975,11 +1041,20 @@ def _load_sfen_frequency_map(sfen_count_csv: str) -> dict:
     return freq_map
 
 
-def _compute_sampling_keep_probability(freq: int, mode: str, cutoff_value: float, min_freq: int) -> float:
+def _compute_sampling_target_count(freq: int, mode: str, cutoff_value: float, min_freq: int) -> float:
     if mode == "none" or freq < min_freq:
-        return 1.0
+        return float(freq)
     target = _compute_sampling_target(freq, mode, cutoff_value)
-    return min(1.0, target / max(1, freq))
+    # Keep the target monotonic around min_freq. Otherwise freq=min_freq may be
+    # compressed below freq=min_freq-1, which inverts the frequency ordering.
+    return min(float(freq), max(float(min_freq), target))
+
+
+def _compute_sampling_keep_probability(freq: int, mode: str, cutoff_value: float, min_freq: int) -> float:
+    if mode == "none":
+        return 1.0
+    target = _compute_sampling_target_count(freq, mode, cutoff_value, min_freq)
+    return min(1.0, target / max(1.0, float(freq)))
 
 
 def _weighted_quantile(sorted_pairs, q: float) -> float:
@@ -1567,14 +1642,22 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
 
         sampled_positions = []
         applied_sfens = 0
+        expected_output_positions = 0.0
         for sfen, items in by_sfen.items():
             freq = freq_map.get(sfen, len(items))
+            target_count = _compute_sampling_target_count(
+                freq,
+                args.sfen_sampling_mode,
+                args.sfen_cutoff_value,
+                args.sfen_sampling_min_freq,
+            )
             keep_prob = _compute_sampling_keep_probability(
                 freq,
                 args.sfen_sampling_mode,
                 args.sfen_cutoff_value,
                 args.sfen_sampling_min_freq,
             )
+            expected_output_positions += target_count
             if keep_prob >= 1.0:
                 sampled_positions.extend(items)
                 continue
@@ -1586,7 +1669,9 @@ def generate_datasets_logic(args: argparse.Namespace) -> None:
         print(
             f"SFEN頻度サンプリングを適用: mode={args.sfen_sampling_mode}, "
             f"min_freq={args.sfen_sampling_min_freq}, "
-            f"局面数 {len(sampled_positions):,}, 適用SFEN数 {applied_sfens:,}"
+            f"局面数 {len(sampled_positions):,}, "
+            f"期待局面数 {expected_output_positions:.2f}, "
+            f"適用SFEN数 {applied_sfens:,}"
         )
 
     random.shuffle(all_positions)
@@ -1672,16 +1757,17 @@ def build_corn_thresholds_logic(args: argparse.Namespace) -> None:
     applied_sfens = 0
     for sfen, items in by_sfen.items():
         freq = freq_map.get(sfen, len(items))
-        keep_prob = _compute_sampling_keep_probability(
+        target_count = _compute_sampling_target_count(
             freq,
             args.sfen_sampling_mode,
             args.sfen_cutoff_value,
             args.sfen_sampling_min_freq,
         )
-        if keep_prob < 1.0:
+        weight_per_item = target_count / max(1, len(items))
+        if target_count != len(items):
             applied_sfens += 1
         for item in items:
-            weighted_scores.append((item['_eval_score_cp_float'], keep_prob))
+            weighted_scores.append((item['_eval_score_cp_float'], weight_per_item))
 
     weighted_scores.sort(key=lambda x: x[0])
     total_weight = sum(weight for _, weight in weighted_scores)
@@ -1875,6 +1961,18 @@ def main() -> None:
     count_sfen_parser.add_argument("--max-ply", type=int, default=999)
     count_sfen_parser.set_defaults(func=count_sfen_logic)
 
+    plot_sfen_hist_parser = subparsers.add_parser("plot-sfen-histogram", parents=[config_parent], help="count-sfen の total_count 分布をヒストグラム画像として出力します。")
+    plot_sfen_hist_parser.add_argument("--input-csv", help="count-sfen で生成した入力CSVのパス。")
+    plot_sfen_hist_parser.add_argument("--output-png", help="出力するヒストグラム画像のパス。")
+    plot_sfen_hist_parser.add_argument("--count-column", default="total_count", help="ヒストグラム化する頻度列名。")
+    plot_sfen_hist_parser.add_argument("--bins", type=int, default=100, help="ヒストグラムのビン数。")
+    plot_sfen_hist_parser.add_argument("--max-count", type=int, default=None, help="この値を超える頻度を描画から除外する。")
+    plot_sfen_hist_parser.add_argument("--log-x", action='store_true', help="x軸を対数にする。")
+    plot_sfen_hist_parser.add_argument("--log-y", action='store_true', help="y軸を対数にする。")
+    plot_sfen_hist_parser.add_argument("--dpi", type=int, default=150, help="出力画像のDPI。")
+    plot_sfen_hist_parser.add_argument("--title", help="グラフタイトル。")
+    plot_sfen_hist_parser.set_defaults(func=plot_sfen_histogram_logic)
+
     classify_sfen_parser = subparsers.add_parser("classify-sfen", parents=[config_parent], help="SFEN一覧CSVを静止局面と非静止局面に分類します。")
     classify_sfen_parser.add_argument("--input-csv", help="入力となるSFEN一覧CSVのパス。")
     classify_sfen_parser.add_argument("--output-quiet-csv", help="静止局面CSVの出力パス。")
@@ -2000,7 +2098,13 @@ def main() -> None:
              sys.exit("エラー: count-sfenコマンドには --input-csv の指定が必須です。")
         if not args.output_csv:
              sys.exit("エラー: count-sfenコマンドには --output-csv の指定が必須です。")
-        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+
+    elif args.command == "plot-sfen-histogram":
+        if not args.input_csv:
+             sys.exit("エラー: plot-sfen-histogramコマンドには --input-csv の指定が必須です。")
+        if not args.output_png:
+             sys.exit("エラー: plot-sfen-histogramコマンドには --output-png の指定が必須です。")
+        Path(args.output_png).parent.mkdir(parents=True, exist_ok=True)
     elif args.command == "label":
         if not (args.input_csv and args.output_csv):
              sys.exit("エラー: labelコマンドには --input-csv と --output-csv の指定が必須です。")
