@@ -399,6 +399,44 @@ def extract_metadata(csa_dir: str, output_csv: str) -> None:
                     print(f"\nファイル処理エラー: {csa_path} ({e})", file=sys.stderr)
     print("フェーズ1: メタデータ抽出が完了しました。")
 
+
+def merge_extract_logic(args: argparse.Namespace) -> None:
+    """
+    [merge-extractコマンド] 複数の extract 出力CSVを1つにマージする。
+    """
+    input_paths = [Path(p.strip()) for p in args.input_csvs.split(',') if p.strip()]
+    if not input_paths:
+        sys.exit("エラー: merge-extract には --input-csvs を1つ以上指定してください。")
+
+    for path in input_paths:
+        if not path.exists():
+            sys.exit(f"エラー: 入力ファイル '{path}' が見つかりません。")
+
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    merged_rows = 0
+    header = None
+    with open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = None
+        for path in input_paths:
+            with open(path, 'r', newline='', encoding='utf-8') as f_in:
+                reader = csv.DictReader(f_in)
+                current_header = reader.fieldnames
+                if not current_header:
+                    continue
+                if header is None:
+                    header = current_header
+                    writer = csv.DictWriter(f_out, fieldnames=header)
+                    writer.writeheader()
+                elif current_header != header:
+                    sys.exit(f"エラー: ヘッダが一致しません: {path}")
+                for row in reader:
+                    writer.writerow(row)
+                    merged_rows += 1
+
+    print(f"extract CSV のマージが完了しました。入力CSV数: {len(input_paths)}, 出力行数: {merged_rows:,}, 出力: {output_path}")
+
 def run_filter_metadata(args: argparse.Namespace) -> None:
     """
     [filterコマンド] メタデータCSVをフィルタリングし、新しいCSVファイルを出力する。
@@ -2024,6 +2062,11 @@ def main() -> None:
     extract_parser.add_argument("--output-csv", help="メタデータCSVの出力パス。")
     extract_parser.set_defaults(func=lambda args: extract_metadata(args.csa_dir, args.output_csv))
 
+    merge_extract_parser = subparsers.add_parser("merge-extract", parents=[config_parent], help="複数の extract 出力CSVを1つにマージします。")
+    merge_extract_parser.add_argument("--input-csvs", help="マージ対象CSVのカンマ区切りリスト。")
+    merge_extract_parser.add_argument("--output-csv", help="マージ後CSVの出力パス。")
+    merge_extract_parser.set_defaults(func=merge_extract_logic)
+
     filter_parser = subparsers.add_parser("filter", parents=[config_parent], help="メタデータCSVをフィルタリングします。")
     filter_parser.add_argument("--input-csv", help="入力となるメタデータCSVのパス。")
     filter_parser.add_argument("--output-csv", help="フィルタリング結果を保存するCSVのパス。")
@@ -2178,6 +2221,11 @@ def main() -> None:
     if args.command == "extract":
         if not (args.csa_dir and args.output_csv):
             sys.exit("エラー: extractコマンドには --csa-dir と --output-csv の指定が必須です。")
+        Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
+
+    elif args.command == "merge-extract":
+        if not (args.input_csvs and args.output_csv):
+             sys.exit("エラー: merge-extractコマンドには --input-csvs と --output-csv の指定が必須です。")
         Path(args.output_csv).parent.mkdir(parents=True, exist_ok=True)
     
     elif args.command == "filter":

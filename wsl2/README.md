@@ -111,6 +111,17 @@ python src/create_dataset.py count-sfen --input-csv <フィルタ済みCSV> --ou
 *   `total_count`
 *   `black_win_count`
 
+### `merge-extract`
+複数の `extract` 出力CSVを1つにまとめます。日付ごと・ディレクトリごとに分割抽出したメタデータを後段の `filter` に渡す前段として使います。
+```bash
+python src/create_dataset.py merge-extract \
+  --input-csvs extract_a.csv,extract_b.csv,extract_c.csv \
+  --output-csv merged_extract.csv
+```
+**主なオプション:**
+*   `--input-csvs`: マージ対象CSVのカンマ区切りリスト
+*   `--output-csv`: マージ後CSVの出力先
+
 ### `plot-sfen-histogram`
 `count-sfen` の出力CSVから `total_count` 分布のヒストグラム画像を生成します。
 ```bash
