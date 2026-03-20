@@ -1797,14 +1797,18 @@ def build_corn_thresholds_logic(args: argparse.Namespace) -> None:
     filtered_positions = []
     skipped_invalid_ply = 0
     skipped_invalid_score = 0
+    has_any_ply = False
     for pos in all_positions:
-        try:
-            ply = int(pos['ply'])
-        except (KeyError, TypeError, ValueError):
-            skipped_invalid_ply += 1
-            continue
-        if not (args.min_ply <= ply <= args.max_ply):
-            continue
+        ply_raw = pos.get('ply')
+        if ply_raw not in (None, ""):
+            try:
+                ply = int(ply_raw)
+            except (TypeError, ValueError):
+                skipped_invalid_ply += 1
+                continue
+            has_any_ply = True
+            if not (args.min_ply <= ply <= args.max_ply):
+                continue
         try:
             pos['_eval_score_cp_float'] = float(pos['eval_score_cp'])
         except (KeyError, TypeError, ValueError):
@@ -1818,7 +1822,11 @@ def build_corn_thresholds_logic(args: argparse.Namespace) -> None:
         print(f"eval_score_cp列を解釈できないため除外した局面数: {skipped_invalid_score:,}")
     if not filtered_positions:
         sys.exit("エラー: フィルタ適用後に局面が残りませんでした。")
-    print(f"plyフィルタ適用後の局面数: {len(filtered_positions):,} (範囲: {args.min_ply}..{args.max_ply})")
+    if has_any_ply:
+        print(f"plyフィルタ適用後の局面数: {len(filtered_positions):,} (範囲: {args.min_ply}..{args.max_ply})")
+    else:
+        print("ply列が無いため、plyフィルタは適用せず全局面を使用します。")
+        print(f"評価値として使用する局面数: {len(filtered_positions):,}")
 
     freq_map = {}
     if args.sfen_sampling_mode != "none":

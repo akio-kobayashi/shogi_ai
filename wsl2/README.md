@@ -171,7 +171,7 @@ python src/create_dataset.py corn-thresholds \
 **主なオプション:**
 *   `--input-csv`: 単一の評価済みCSVを入力する場合
 *   `--input-csvs`: 分割評価した複数CSVをカンマ区切りでまとめて入力する場合
-*   `--min-ply`, `--max-ply`: 閾値計算対象とする手数の範囲
+*   `--min-ply`, `--max-ply`: 閾値計算対象とする手数の範囲。入力CSVに `ply` 列がある場合のみ適用
 *   `--sfen-count-csv`: `count-sfen` の出力CSV
 *   `--sfen-sampling-mode`: `generate` と同じ頻度補正方式 (`none` / `fixed` / `sqrt` / `log10`)
 *   `--sfen-cutoff-value`: `fixed` 方式の上限値
@@ -184,6 +184,9 @@ python src/create_dataset.py corn-thresholds \
 *   cp 空間の閾値
 *   teacher-logit 空間へ変換した `corn_aux_thresholds`
 *   `nnue-pytorch` の CLI / config に貼れる例
+
+**注意:**
+*   `evaluate-sfen` / `merge-eval-sfen` の出力には通常 `ply` 列がありません。その場合、`corn-thresholds` は ply フィルタを適用せず、入力された全局面の評価値分布を使います。
 
 ### `diff-sfen`
 candidate 側の SFEN 一覧から、base 側に存在する SFEN を除外します。高レート側に出現しない low-only SFEN を作る用途を想定しています。
