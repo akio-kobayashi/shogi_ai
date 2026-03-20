@@ -155,6 +155,36 @@ python src/create_dataset.py merge-eval-sfen \
 *   `--input-csvs`: マージ対象CSVのカンマ区切りリスト
 *   `--output-csv`: マージ後CSVの出力先
 
+### `corn-thresholds`
+`generate` と同じ SFEN 頻度補正を前提に、`nnue-pytorch` の `CORN` 用閾値を構築します。
+学習前の分割は、`.bin` 生成後に `nnue-pytorch/corn_thresholds.py` でやるより、このコマンドを source of truth にする方が自然です。
+```bash
+python src/create_dataset.py corn-thresholds \
+  --input-csv <評価済みSFEN CSV> \
+  --sfen-count-csv <頻度CSV> \
+  --sfen-sampling-mode sqrt \
+  --num-thresholds 7 \
+  --score-scaling 361 \
+  --teacher-temperature 1.0 \
+  --corn-aux-weight 0.1
+```
+**主なオプション:**
+*   `--input-csv`: 単一の評価済みCSVを入力する場合
+*   `--input-csvs`: 分割評価した複数CSVをカンマ区切りでまとめて入力する場合
+*   `--min-ply`, `--max-ply`: 閾値計算対象とする手数の範囲
+*   `--sfen-count-csv`: `count-sfen` の出力CSV
+*   `--sfen-sampling-mode`: `generate` と同じ頻度補正方式 (`none` / `fixed` / `sqrt` / `log10`)
+*   `--sfen-cutoff-value`: `fixed` 方式の上限値
+*   `--sfen-sampling-min-freq`: この頻度未満のSFENには補正を適用しない
+*   `--num-thresholds`: 生成する閾値数。K個なら K+1 クラス
+*   `--score-scaling`, `--teacher-temperature`: cp から teacher-logit へ変換する係数
+*   `--corn-aux-weight`: 出力例に含める `nnue-pytorch` 側の補助損失重み
+
+**出力内容:**
+*   cp 空間の閾値
+*   teacher-logit 空間へ変換した `corn_aux_thresholds`
+*   `nnue-pytorch` の CLI / config に貼れる例
+
 ### `diff-sfen`
 candidate 側の SFEN 一覧から、base 側に存在する SFEN を除外します。高レート側に出現しない low-only SFEN を作る用途を想定しています。
 ```bash

@@ -90,6 +90,21 @@ generate:
   sfen_cutoff_value: 1.0
   sfen_sampling_min_freq: 1
 
+# 'corn-thresholds' コマンドの設定
+corn-thresholds:
+  input_csv: "output_data/sfen_evaluated_merged.csv"
+  input_csvs: null
+  min_ply: 20
+  max_ply: 512
+  sfen_count_csv: "output_data/sfen_counts.csv"
+  sfen_sampling_mode: "none"
+  sfen_cutoff_value: 1.0
+  sfen_sampling_min_freq: 1
+  num_thresholds: 7
+  score_scaling: 361.0
+  teacher_temperature: 1.0
+  corn_aux_weight: 0.1
+
 # 'build-h5' コマンドの設定
 build-h5:
   input_csv: "output_data/filtered.csv"
