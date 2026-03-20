@@ -85,9 +85,12 @@ python src/create_dataset.py evaluate-sfen --input-csv <頻度CSV> --output-csv 
 ```
 **主なオプション:**
 *   `evaluate` と共通の評価オプションを使用: 入力CSV、エンジン、出力先、探索条件、並列ワーカー数を指定可能
+*   `--existing-eval-csv`: 既存の評価済みSFEN CSV。ここにある SFEN は再評価せず流用
+*   `--existing-eval-csvs`: 既存の評価済みSFEN CSV のカンマ区切りリスト
 
 **注意:**
 *   `--eval-workers > 1` の場合は `--db-path` は使用できません。
+*   `--existing-eval-csv` / `--existing-eval-csvs` を指定すると、未評価の SFEN だけエンジンで新規評価します。
 
 **入力要件:**
 *   少なくとも `sfen` 列を含むCSVであること

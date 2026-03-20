@@ -939,6 +939,13 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
         output_header.append('eval_score_cp')
 
     output_csv_path = Path(args.output_csv)
+    existing_eval_map = {}
+    if args.existing_eval_csv or args.existing_eval_csvs:
+        existing_paths, existing_eval_map = _load_eval_map_from_csvs(args.existing_eval_csv, args.existing_eval_csvs)
+        print(f"既存の評価済みSFEN CSV を読み込み: {len(existing_paths)} files, {len(existing_eval_map):,} SFEN")
+
+    rows_to_evaluate = [row for row in rows if row.get('sfen') not in existing_eval_map]
+    reused_rows = len(rows) - len(rows_to_evaluate)
 
     if args.eval_workers > 1:
         if args.db_path:
@@ -950,10 +957,21 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
             shutil.rmtree(temp_dir)
         temp_dir.mkdir(parents=True, exist_ok=True)
 
-        chunk_size = math.ceil(len(rows) / args.eval_workers)
+        if not rows_to_evaluate:
+            with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
+                writer = csv.DictWriter(f_out, fieldnames=output_header)
+                writer.writeheader()
+                for row in rows:
+                    row = row.copy()
+                    row['eval_score_cp'] = existing_eval_map[row['sfen']]
+                    writer.writerow(row)
+            print(f"SFEN評価が完了しました。既存評価のみを利用: {reused_rows:,} 行, 新規評価 0 行")
+            return
+
+        chunk_size = math.ceil(len(rows_to_evaluate) / args.eval_workers)
         tasks = []
         for idx in range(args.eval_workers):
-            chunk = rows[idx * chunk_size:(idx + 1) * chunk_size]
+            chunk = rows_to_evaluate[idx * chunk_size:(idx + 1) * chunk_size]
             if not chunk:
                 continue
             tasks.append({
@@ -972,23 +990,59 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
             for fut in tqdm(as_completed(futures), total=len(futures), desc="workers"):
                 results.append(fut.result())
 
+        new_eval_map = {}
+        for res in sorted(results, key=lambda r: r['worker_output_csv']):
+            with open(res['worker_output_csv'], 'r', newline='', encoding='utf-8') as f_in:
+                reader = csv.DictReader(f_in)
+                for row in reader:
+                    sfen = row.get('sfen')
+                    if not sfen:
+                        continue
+                    try:
+                        new_eval_map[sfen] = int(row['eval_score_cp'])
+                    except (TypeError, ValueError, KeyError):
+                        continue
+
         with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
             writer = csv.DictWriter(f_out, fieldnames=output_header)
             writer.writeheader()
-            for res in sorted(results, key=lambda r: r['worker_output_csv']):
-                with open(res['worker_output_csv'], 'r', newline='', encoding='utf-8') as f_in:
-                    reader = csv.DictReader(f_in)
-                    for row in reader:
-                        writer.writerow(row)
+            for row in rows:
+                sfen = row.get('sfen')
+                if not sfen:
+                    continue
+                if sfen in existing_eval_map:
+                    out_row = row.copy()
+                    out_row['eval_score_cp'] = existing_eval_map[sfen]
+                    writer.writerow(out_row)
+                elif sfen in new_eval_map:
+                    out_row = row.copy()
+                    out_row['eval_score_cp'] = new_eval_map[sfen]
+                    writer.writerow(out_row)
 
         total_rows = sum(r['rows_written'] for r in results)
         total_errors = sum(r['errors'] for r in results)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        print(f"SFEN評価が完了しました。出力行数: {total_rows:,}, workerエラー件数: {total_errors}")
+        print(
+            f"SFEN評価が完了しました。出力行数: {reused_rows + total_rows:,}, "
+            f"既存流用: {reused_rows:,}, 新規評価: {total_rows:,}, workerエラー件数: {total_errors}"
+        )
         return
 
     db = SfenDB(args.db_path) if args.db_path else None
     print(f"--- SFEN評価を開始 (DB: {args.db_path}) ---")
+    if not rows_to_evaluate and existing_eval_map:
+        with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
+            writer = csv.DictWriter(f_out, fieldnames=output_header)
+            writer.writeheader()
+            for row in rows:
+                sfen = row.get('sfen')
+                if not sfen:
+                    continue
+                row = row.copy()
+                row['eval_score_cp'] = existing_eval_map[sfen]
+                writer.writerow(row)
+        print(f"SFEN評価が完了しました。既存評価のみを利用: {reused_rows:,} 行, 新規評価 0 行")
+        return
     try:
         engine = UsiEngine(str(args.engine_path))
         print("USIエンジン準備完了。")
@@ -999,9 +1053,15 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
         with open(output_csv_path, 'w', newline='', encoding='utf-8') as f_out:
             writer = csv.DictWriter(f_out, fieldnames=output_header)
             writer.writeheader()
+            newly_evaluated = 0
             for row in tqdm(rows, desc="Evaluating SFENs"):
                 sfen = row.get('sfen')
                 if not sfen:
+                    continue
+                if sfen in existing_eval_map:
+                    row = row.copy()
+                    row['eval_score_cp'] = existing_eval_map[sfen]
+                    writer.writerow(row)
                     continue
 
                 score_type, score_value = None, None
@@ -1019,6 +1079,7 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
                     )
                     if db:
                         db.save_eval(sfen, args.depth, args.nodes, args.movetime, score_type, score_value)
+                    newly_evaluated += 1
 
                 row['eval_score_cp'] = _normalize_eval_score(score_type, score_value)
                 writer.writerow(row)
@@ -1030,7 +1091,10 @@ def evaluate_sfen_logic(args: argparse.Namespace) -> None:
         if db:
             db.close()
 
-    print(f"SFEN評価が完了しました。出力CSV: {output_csv_path}")
+    print(
+        f"SFEN評価が完了しました。出力CSV: {output_csv_path}, "
+        f"既存流用: {reused_rows:,}, 新規評価: {newly_evaluated:,}"
+    )
 
 def write_bin_file(positions: list, output_path: str):
     """
@@ -2134,6 +2198,8 @@ def main() -> None:
     evaluate_parser.set_defaults(func=evaluate_metadata_logic)
 
     evaluate_sfen_parser = subparsers.add_parser("evaluate-sfen", parents=[config_parent, eval_common_parent], help="SFEN一覧CSVの各局面を評価します。")
+    evaluate_sfen_parser.add_argument("--existing-eval-csv", help="既存の評価済みSFEN CSV。ここにあるSFENは再評価せず流用する。")
+    evaluate_sfen_parser.add_argument("--existing-eval-csvs", help="既存の評価済みSFEN CSV のカンマ区切りリスト。")
     evaluate_sfen_parser.set_defaults(func=evaluate_sfen_logic)
 
     merge_eval_sfen_parser = subparsers.add_parser("merge-eval-sfen", parents=[config_parent], help="複数の評価済みSFEN CSVを1つにマージします。")
@@ -2252,6 +2318,8 @@ def main() -> None:
     elif args.command == "evaluate-sfen":
         if not (args.input_csv and args.engine_path and args.output_csv):
              sys.exit("エラー: evaluate-sfenコマンドには --input-csv, --engine-path, --output-csv の指定が必須です。")
+        if args.existing_eval_csv and args.existing_eval_csvs:
+             sys.exit("エラー: evaluate-sfenコマンドでは --existing-eval-csv と --existing-eval-csvs を同時に指定できません。")
     elif args.command == "merge-eval-sfen":
         if not (args.input_csvs and args.output_csv):
              sys.exit("エラー: merge-eval-sfenコマンドには --input-csvs と --output-csv の指定が必須です。")
