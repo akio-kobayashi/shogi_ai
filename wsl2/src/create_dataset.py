@@ -487,6 +487,35 @@ def run_filter_metadata(args: argparse.Namespace) -> None:
     except IOError as e:
         sys.exit(f"エラー: ファイルの書き込みに失敗しました: {e}")
 
+def _compute_result_label_score(
+    game_result: int,
+    current_turn: int,
+    ply: int,
+    total_moves: int,
+    max_score: int,
+    min_score: int,
+    curve: float,
+) -> int:
+    if game_result == 0:
+        return 0
+
+    total_moves = max(int(total_moves), 1)
+    ply = min(max(int(ply), 1), total_moves)
+    max_score = max(int(max_score), 1)
+    min_score = max(0, min(int(min_score), max_score))
+    curve = max(float(curve), 1e-6)
+
+    progress = ply / float(total_moves)
+    growth = (1.0 - math.exp(-curve * progress)) / (1.0 - math.exp(-curve))
+    magnitude = int(round(min_score + (max_score - min_score) * growth))
+
+    if game_result == 1:
+        return magnitude if current_turn == cshogi.BLACK else -magnitude
+    if game_result == 2:
+        return -magnitude if current_turn == cshogi.BLACK else magnitude
+    return 0
+
+
 def run_label(args: argparse.Namespace) -> None:
     """
     [labelコマンド] エンジンを使わず、対局結果から評価値を付与（ラベリング）する。
@@ -519,17 +548,22 @@ def run_label(args: argparse.Namespace) -> None:
                     for meta in metas:
                         kif = all_kifs_in_file[int(meta['kif_index'])]
                         game_result = int(meta['game_result'])
+                        total_moves = len(kif.moves)
                         board = cshogi.Board(kif.sfen)
                         for ply, move in enumerate(kif.moves, 1):
                             sfen = board.sfen()
                             # DB指定がある場合はキャップ判定
                             if db is None or db.check_output_limit(sfen, args.max_sfen_count):
                                 current_turn = board.turn
-                                score = 0
-                                if game_result == 1:
-                                    score = args.score_scale if current_turn == cshogi.BLACK else -args.score_scale
-                                elif game_result == 2:
-                                    score = -args.score_scale if current_turn == cshogi.BLACK else args.score_scale
+                                score = _compute_result_label_score(
+                                    game_result=game_result,
+                                    current_turn=current_turn,
+                                    ply=ply,
+                                    total_moves=total_moves,
+                                    max_score=args.score_scale,
+                                    min_score=args.label_min_score,
+                                    curve=args.label_curve,
+                                )
                                 
                                 meta_with_eval = meta.copy()
                                 meta_with_eval.update({'ply': ply, 'eval_score_cp': score, 'sfen': sfen})
@@ -2181,7 +2215,9 @@ def main() -> None:
     label_parser = subparsers.add_parser("label", parents=[config_parent], help="対局結果から評価値をラベリングします（エンジン不要）。")
     label_parser.add_argument("--input-csv", help="入力となるフィルタリング済みCSVのパス。")
     label_parser.add_argument("--output-csv", help="ラベリング結果を保存するCSVのパス。")
-    label_parser.add_argument("--score-scale", type=int, default=600)
+    label_parser.add_argument("--score-scale", type=int, default=600, help="終局付近で到達する評価値の最大絶対値。")
+    label_parser.add_argument("--label-min-score", type=int, default=100, help="序盤側で使う評価値の最小絶対値。")
+    label_parser.add_argument("--label-curve", type=float, default=4.0, help="終局に近づくほど評価値を増やす曲線の強さ。大きいほど終盤寄りで立ち上がる。")
     label_parser.add_argument("--db-path", help="SFEN頻度を管理するSQLite DBのパス。指定すると上限管理が有効になります。")
     label_parser.add_argument("--max-sfen-count", type=int, default=0, help="同一SFENの最大出力回数。0は無制限。")
     label_parser.set_defaults(func=run_label)
