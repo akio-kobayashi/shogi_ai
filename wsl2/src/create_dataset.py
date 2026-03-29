@@ -1161,6 +1161,47 @@ def write_bin_file(positions: list, output_path: str):
         print(f"score が int16 範囲外のため除外した局面数: {skipped_out_of_range_scores:,}")
 
 
+class PackedSfenBinWriter:
+    """PackedSfenValue を逐次書き込むための軽量ライタ。"""
+    def __init__(self, output_path: str):
+        self.output_path = output_path
+        self.board = cshogi.Board()
+        self.psv = np.zeros(1, dtype=cshogi.PackedSfenValue)
+        self.int16_info = np.iinfo(np.int16)
+        self.skipped_out_of_range_scores = 0
+        self.rows_written = 0
+        self.f_out = open(output_path, "wb")
+
+    def write_position(self, pos: dict) -> bool:
+        try:
+            self.board.set_sfen(pos['sfen'])
+            self.board.to_psfen(self.psv)
+            cshogi_result = int(pos['game_result'])
+            write_result = 1 if cshogi_result == 1 else -1 if cshogi_result == 2 else 0
+            score = int(pos['eval_score_cp'])
+            if not (self.int16_info.min <= score <= self.int16_info.max):
+                self.skipped_out_of_range_scores += 1
+                return False
+            self.psv[0]["score"] = np.int16(score)
+            self.psv[0]["move"] = np.uint16(0)
+            self.psv[0]["gamePly"] = np.uint16(pos['ply'])
+            self.psv[0]["game_result"] = np.int8(write_result)
+            self.psv.tofile(self.f_out)
+            self.rows_written += 1
+            return True
+        except Exception as e:
+            print(f"\nデータ書き込みエラー: {pos} ({e})", file=sys.stderr)
+            return False
+
+    def close(self):
+        self.f_out.close()
+        if self.skipped_out_of_range_scores:
+            print(
+                f"データセット '{self.output_path}' で "
+                f"score が int16 範囲外のため除外した局面数: {self.skipped_out_of_range_scores:,}"
+            )
+
+
 def _compute_sampling_target(freq: int, mode: str, value: float) -> float:
     if mode == "fixed":
         return max(1.0, float(value))
@@ -1771,11 +1812,178 @@ def _load_generate_positions(args: argparse.Namespace) -> tuple[list, list]:
     return input_paths, rows
 
 
+def _iter_csv_paths(input_csv: str = None, input_csvs: str = None) -> list[Path]:
+    input_paths = []
+    if input_csv:
+        input_paths.append(Path(input_csv))
+    if input_csvs:
+        input_paths.extend(Path(p.strip()) for p in input_csvs.split(',') if p.strip())
+    return input_paths
+
+
+def _build_eval_lookup_db(eval_csv: str = None, eval_csvs: str = None, db_path: Path = None) -> tuple[list, Path]:
+    input_paths = _iter_csv_paths(eval_csv, eval_csvs)
+    if not input_paths:
+        sys.exit("エラー: 評価済みSFEN CSV が指定されていません。")
+
+    if db_path is None:
+        db_path = Path(".generate_eval_lookup.sqlite3")
+
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('PRAGMA journal_mode = WAL')
+    cursor.execute('PRAGMA synchronous = NORMAL')
+    cursor.execute('CREATE TABLE eval_map (sfen TEXT PRIMARY KEY, eval_score_cp INTEGER NOT NULL)')
+
+    inserted = 0
+    duplicate_same_score = 0
+    for path in input_paths:
+        if not path.exists():
+            conn.close()
+            sys.exit(f"エラー: 評価済みSFEN CSV '{path}' が見つかりません。")
+        with open(path, 'r', newline='', encoding='utf-8') as f_in:
+            reader = csv.DictReader(f_in)
+            header = reader.fieldnames or []
+            if 'sfen' not in header or 'eval_score_cp' not in header:
+                conn.close()
+                sys.exit("エラー: 評価済みSFEN CSV には 'sfen' と 'eval_score_cp' 列が必要です。")
+            for row in reader:
+                sfen = row.get('sfen')
+                if not sfen:
+                    continue
+                try:
+                    score = int(row['eval_score_cp'])
+                except (TypeError, ValueError):
+                    continue
+                cursor.execute('SELECT eval_score_cp FROM eval_map WHERE sfen = ?', (sfen,))
+                existing = cursor.fetchone()
+                if existing is not None:
+                    if existing[0] != score:
+                        conn.close()
+                        sys.exit(f"エラー: 同一SFENに対して異なる評価値が存在します: {sfen}")
+                    duplicate_same_score += 1
+                    continue
+                cursor.execute('INSERT INTO eval_map (sfen, eval_score_cp) VALUES (?, ?)', (sfen, score))
+                inserted += 1
+                if inserted % 100000 == 0:
+                    conn.commit()
+    conn.commit()
+    conn.close()
+
+    if inserted == 0:
+        sys.exit("エラー: 評価済みSFEN CSV から有効な評価値を読み取れませんでした。")
+    if duplicate_same_score:
+        print(f"重複SFEN（同一評価値）を統合: {duplicate_same_score:,}")
+    return input_paths, db_path
+
+
+def _stream_generate_join_mode(args: argparse.Namespace) -> bool:
+    """
+    join入力かつ追加の全体保持が不要な場合は、CSVを逐次joinして直接.binへ書く。
+    戻り値がTrueならこの経路で generate を完了済み。
+    """
+    if not (args.positions_csv or args.positions_csvs):
+        return False
+    if args.sfen_sampling_mode != "none":
+        return False
+    if args.quiet_level != "none":
+        return False
+
+    position_paths = _iter_csv_paths(args.positions_csv, args.positions_csvs)
+    if not position_paths:
+        return False
+
+    print("大規模 join 入力向けのストリーミング generate を使用します。")
+
+    output_dir = Path(args.output_dir)
+    lookup_db_path = output_dir / ".generate_eval_lookup.sqlite3"
+    _, eval_db_path = _build_eval_lookup_db(args.eval_sfen_csv, args.eval_sfen_csvs, lookup_db_path)
+    conn = sqlite3.connect(eval_db_path)
+    cursor = conn.cursor()
+
+    train_writer = PackedSfenBinWriter(str(output_dir / "train.bin"))
+    val_writer = PackedSfenBinWriter(str(output_dir / "val.bin"))
+
+    total_rows = 0
+    train_rows = 0
+    val_rows = 0
+    missing_eval = 0
+    skipped_invalid_ply = 0
+
+    try:
+        for path in position_paths:
+            if not path.exists():
+                sys.exit(f"エラー: 局面CSV '{path}' が見つかりません。")
+            with open(path, 'r', newline='', encoding='utf-8') as f_in:
+                reader = csv.DictReader(f_in)
+                header = reader.fieldnames or []
+                required = {'sfen', 'ply', 'game_result'}
+                missing = [key for key in required if key not in header]
+                if missing:
+                    sys.exit(f"エラー: 局面CSVに必要な列が不足しています: {', '.join(missing)}")
+
+                for row in tqdm(reader, desc=f"Joining {path.name}"):
+                    total_rows += 1
+                    sfen = row.get('sfen')
+                    if not sfen:
+                        missing_eval += 1
+                        continue
+                    try:
+                        ply = int(row['ply'])
+                    except (TypeError, ValueError):
+                        skipped_invalid_ply += 1
+                        continue
+                    if not (args.min_ply <= ply <= args.max_ply):
+                        continue
+
+                    cursor.execute('SELECT eval_score_cp FROM eval_map WHERE sfen = ?', (sfen,))
+                    res = cursor.fetchone()
+                    if res is None:
+                        missing_eval += 1
+                        continue
+
+                    joined = row.copy()
+                    joined['ply'] = ply
+                    joined['eval_score_cp'] = res[0]
+                    if random.random() < args.val_split:
+                        if val_writer.write_position(joined):
+                            val_rows += 1
+                    else:
+                        if train_writer.write_position(joined):
+                            train_rows += 1
+    finally:
+        train_writer.close()
+        val_writer.close()
+        conn.close()
+        try:
+            eval_db_path.unlink()
+        except OSError:
+            pass
+
+    if train_rows + val_rows == 0:
+        sys.exit("エラー: フィルタ適用後に局面が残りませんでした。")
+
+    print(
+        f"評価済みSFENを局面CSVへストリーミング結合: 入力局面数={total_rows:,}, "
+        f"採用局面数={train_rows + val_rows:,}, 評価値なし/不正除外={missing_eval + skipped_invalid_ply:,}"
+    )
+    if skipped_invalid_ply:
+        print(f"ply列を解釈できないため除外した局面数: {skipped_invalid_ply:,}")
+    print(f"分割結果 - 訓練: {train_rows}局面, 検証: {val_rows}局面")
+    print("\nすべての処理が完了しました。")
+    return True
+
+
 def generate_datasets_logic(args: argparse.Namespace) -> None:
     """
     [generateコマンド] 評価値付きCSVから、.bin形式の学習データを生成する。
     """
     print(f"--- .bin データセット生成を開始 ---")
+    if _stream_generate_join_mode(args):
+        return
     input_paths, all_positions = _load_generate_positions(args)
     if not all_positions: sys.exit("エラー: 入力ファイルにデータがありません。")
     if len(input_paths) == 1:
