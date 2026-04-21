@@ -625,6 +625,16 @@ def get_candidate_search_params(args: argparse.Namespace, ply: int) -> list[tupl
     return [get_search_params(args, ply)]
 
 
+def packed_sfen_field_view(record: np.void) -> np.ndarray:
+    """
+    構造化レコードの `psv` フィールドを PackedSfenValue の 1 要素配列として返す。
+
+    `record["psv"]` は numpy.void になるため、そのままでは cshogi の
+    `to_psfen()` / `set_psfen()` に渡せない。
+    """
+    return np.asarray(record["psv"], dtype=cshogi.PackedSfenValue).reshape(1)
+
+
 def _partition_file_tasks(kifs_by_file: dict, num_workers: int) -> list:
     """評価対象を局面数ベースで大まかに均等分割する。"""
     buckets = [[] for _ in range(num_workers)]
@@ -2365,7 +2375,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
-                    board.to_psfen(pos_struct[0]['psv'])
+                    board.to_psfen(packed_sfen_field_view(pos_struct[0]))
                     pos_struct[0]['actual_move'] = np.uint16(move)
                     pos_struct[0]['is_check'] = board.is_check()
                     

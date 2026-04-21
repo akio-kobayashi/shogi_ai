@@ -47,6 +47,11 @@ def _fail(msg: str) -> None:
     print(f"[ERROR] {msg}", file=sys.stderr)
 
 
+def packed_sfen_field_view(record: np.void) -> np.ndarray:
+    """構造化レコードの `psv` フィールドを PackedSfenValue の 1 要素配列に直す。"""
+    return np.asarray(record["psv"], dtype=cshogi.PackedSfenValue).reshape(1)
+
+
 def inspect_schema(h5_path: Path) -> bool:
     ok = True
     with h5py.File(h5_path, "r") as f:
@@ -151,7 +156,7 @@ def inspect_samples(h5_path: Path, max_games: int, max_positions: int, check_mov
 
                 if check_moves:
                     try:
-                        board.set_psfen(np.asarray(pos["psv"]))
+                        board.set_psfen(packed_sfen_field_view(pos))
                     except Exception as exc:
                         _fail(f"{game_name} pos[{pos_index}] の psv 復元に失敗しました: {exc}")
                         ok = False
