@@ -71,6 +71,16 @@ def get_winner_info(kifu: Any) -> float:
         return 0.5
 
 
+def is_capture_move(board: cshogi.Board, move: int) -> bool:
+    """
+    cshogi には Board.is_capture() がないため、着手先の駒有無で判定する。
+
+    将棋には en passant がなく、合法な打ち駒は空きマスにしか打てないので、
+    着手前の着手先マスに駒があれば capture とみなしてよい。
+    """
+    return board.piece(cshogi.move_to(move)) != 0
+
+
 def make_feature_dict(board: cshogi.Board) -> Dict[str, Any]:
     """
     特定の局面(board)から、統計的な特徴量を抽出して辞書形式で返す。
@@ -84,7 +94,7 @@ def make_feature_dict(board: cshogi.Board) -> Dict[str, Any]:
     
     legal_moves = board.legal_moves
     for m in legal_moves:
-        if board.is_capture(m):
+        if is_capture_move(board, m):
             is_capture_available = 1
         
         board.push(m)
@@ -167,7 +177,7 @@ def extract_features_for_game(metadata_row: pd.Series, path_column: str) -> Opti
 
         game_features.append(features)
 
-        captured_after_flag = 1 if board.is_capture(move) else 0
+        captured_after_flag = 1 if is_capture_move(board, move) else 0
         board.push(move)
 
     if not game_features:
