@@ -340,6 +340,23 @@ python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --outp
 **探索オプション:**
 *   `evaluate`コマンドと同様のオプション（`--depth`, `--nodes`, `--movetime`, `--early-xxx`等）が使用可能です。
 *   `--num-pv`: MultiPVで取得する候補手の数（デフォルト: 5）
+*   `--candidate-depths`: 中終盤で保存する候補探索深さのカンマ区切り
+*   `--early-candidate-depths`: 序盤で保存する候補探索深さのカンマ区切り
+
+**HDF5に含まれる主な局面情報:**
+*   `psv`: 局面の `PackedSfenValue`
+*   `actual_move`: 棋譜で実際に指された次の指し手
+*   `candidates`: USIエンジンの MultiPV 候補手列
+    各候補には `search_depth`, `search_nodes`, `search_movetime`, `multipv`, `move`, `score`, `is_mate` が含まれる
+
+**補足:**
+*   `candidate-depths` 系を指定しない場合は、従来どおり単一の探索条件 (`depth` / `nodes` / `movetime`, および `early-xxx`) で候補を保存する
+*   `candidate-depths` 系を指定した場合は、対応する各深さについて候補手列を取得し、`candidates` にまとめて保存する
+
+**生成後の検査例:**
+```bash
+python src/check_h5_dataset.py output.h5 --check-moves
+```
 
 ---
 ## 設定ファイル (`wsl2/config.yaml`)

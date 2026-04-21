@@ -594,6 +594,37 @@ def get_search_params(args: argparse.Namespace, ply: int):
     return d, n, m
 
 
+def _parse_int_list_option(value: str | None) -> list[int]:
+    """カンマ区切り整数列をパースする。未指定時は空配列を返す。"""
+    if not value:
+        return []
+    values = []
+    for token in value.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(int(token))
+    return values
+
+
+def get_candidate_search_params(args: argparse.Namespace, ply: int) -> list[tuple[int | None, int | None, int | None]]:
+    """
+    build-h5 用の候補探索条件を返す。
+
+    - `candidate_depths` / `early_candidate_depths` が指定されていれば、その複数深さを使う
+    - 未指定なら既存の `get_search_params()` と同じ単一条件を返す
+    """
+    if ply <= args.early_ply_threshold:
+        depth_values = _parse_int_list_option(getattr(args, "early_candidate_depths", None))
+    else:
+        depth_values = _parse_int_list_option(getattr(args, "candidate_depths", None))
+
+    if depth_values:
+        return [(depth, None, None) for depth in depth_values]
+
+    return [get_search_params(args, ply)]
+
+
 def _partition_file_tasks(kifs_by_file: dict, num_workers: int) -> list:
     """評価対象を局面数ベースで大まかに均等分割する。"""
     buckets = [[] for _ in range(num_workers)]
@@ -2270,7 +2301,15 @@ def run_build_h5(args: argparse.Namespace) -> None:
     with open(args.input_csv, 'r', newline='', encoding='utf-8') as f_in:
         games_to_process = list(csv.DictReader(f_in))
         
-    candidate_dtype = np.dtype([('move', np.uint16), ('score', np.int16), ('is_mate', np.bool_)])
+    candidate_dtype = np.dtype([
+        ('search_depth', np.int16),
+        ('search_nodes', np.int32),
+        ('search_movetime', np.int32),
+        ('multipv', np.int16),
+        ('move', np.uint16),
+        ('score', np.int16),
+        ('is_mate', np.bool_),
+    ])
     # 特徴量用のデータ型定義
     hand_dtype = np.dtype([(f'hand_{p}', np.int8) for p in ['P', 'L', 'N', 'S', 'G', 'B', 'R']])
     feature_dtype = np.dtype([
@@ -2285,6 +2324,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
     position_dtype = np.dtype([
         ('ply', np.uint16),
         ('psv', cshogi.PackedSfenValue),
+        ('actual_move', np.uint16),
         ('is_check', np.bool_),
         ('features', feature_dtype),
         ('candidates', h5py.vlen_dtype(candidate_dtype))
@@ -2305,21 +2345,28 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     sfen = board.sfen()
                     feat_dict = make_feature_dict(board)
                     
-                    d, n, m = get_search_params(args, ply)
-                    
-                    # キャッシュ確認 (MultiPVの場合は現状エンジンを叩く必要があるが、
-                    # 将来的にはMultiPVの結果も保存するように拡張可能。今回は単一評価値のみDB化)
-                    # ※ build-h5はMultiPV前提なので、DBに候補手リストを保存するロジックが必要。
-                    # ここでは簡略化のため、build-h5のキャッシュはスキップするか、
-                    # MultiPV用の別のキャッシュテーブルを検討する。
-                    # 今回はMultiPVの結果をまるごと保存する仕組みがないため、そのまま実行。
-                    
-                    candidates_info = engine.get_multipv(sfen, depth=d, nodes=n, movetime=m, num_pv=args.num_pv)
-                    candidates_list = [(cand['move'], cand['score'], cand['is_mate']) for cand in candidates_info]
+                    search_param_sets = get_candidate_search_params(args, ply)
+                    candidates_list = []
+                    for d, n, m in search_param_sets:
+                        candidates_info = engine.get_multipv(sfen, depth=d, nodes=n, movetime=m, num_pv=args.num_pv)
+                        depth_value = -1 if d is None else d
+                        nodes_value = -1 if n is None else n
+                        movetime_value = -1 if m is None else m
+                        for cand in candidates_info:
+                            candidates_list.append((
+                                depth_value,
+                                nodes_value,
+                                movetime_value,
+                                cand['multipv'],
+                                cand['move'],
+                                cand['score'],
+                                cand['is_mate'],
+                            ))
                     
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
                     board.to_psfen(pos_struct[0]['psv'])
+                    pos_struct[0]['actual_move'] = np.uint16(move)
                     pos_struct[0]['is_check'] = board.is_check()
                     
                     f = pos_struct[0]['features']
@@ -2516,6 +2563,8 @@ def main() -> None:
     build_h5_parser.add_argument("--early-movetime", type=int, default=None)
     build_h5_parser.add_argument("--early-ply-threshold", type=int, default=0)
     build_h5_parser.add_argument("--num-pv", type=int, default=5)
+    build_h5_parser.add_argument("--candidate-depths", help="中終盤で保存する候補探索深さのカンマ区切り。指定時は depth/nodes/movetime の単一条件指定より優先。")
+    build_h5_parser.add_argument("--early-candidate-depths", help="序盤で保存する候補探索深さのカンマ区切り。指定時は early-depth/early-nodes/early-movetime より優先。")
     build_h5_parser.set_defaults(func=run_build_h5)
 
     temp_args, _ = parser.parse_known_args()
