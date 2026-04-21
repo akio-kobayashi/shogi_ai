@@ -2316,7 +2316,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
         ('search_nodes', np.int32),
         ('search_movetime', np.int32),
         ('multipv', np.int16),
-        ('move', np.uint16),
+        ('move', np.uint32),
         ('score', np.int16),
         ('is_mate', np.bool_),
     ])
@@ -2334,7 +2334,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
     position_dtype = np.dtype([
         ('ply', np.uint16),
         ('psv', cshogi.PackedSfenValue),
-        ('actual_move', np.uint16),
+        ('actual_move', np.uint32),
         ('is_check', np.bool_),
         ('features', feature_dtype),
         ('candidates', h5py.vlen_dtype(candidate_dtype))
@@ -2376,7 +2376,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
                     board.to_psfen(packed_sfen_field_view(pos_struct[0]))
-                    pos_struct[0]['actual_move'] = np.uint16(move)
+                    pos_struct[0]['actual_move'] = np.uint32(move)
                     pos_struct[0]['is_check'] = board.is_check()
                     
                     f = pos_struct[0]['features']
