@@ -2317,7 +2317,7 @@ def run_build_h5(args: argparse.Namespace) -> None:
         ('search_movetime', np.int32),
         ('multipv', np.int16),
         ('move', np.uint32),
-        ('score', np.int16),
+        ('score', np.int32),
         ('is_mate', np.bool_),
     ])
     # 特徴量用のデータ型定義
