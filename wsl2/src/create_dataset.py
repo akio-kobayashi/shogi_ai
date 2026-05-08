@@ -635,6 +635,15 @@ def packed_sfen_field_view(record: np.void) -> np.ndarray:
     return np.asarray(record["psv"], dtype=cshogi.PackedSfenValue).reshape(1)
 
 
+def sfen_position_key(sfen: str) -> str:
+    """Compare SFEN positions without the move-number field.
+
+    PackedSfen roundtrips may restore the final move number as `1`, so
+    validation should focus on board layout, side to move, and hands.
+    """
+    return " ".join(sfen.split(" ")[:3])
+
+
 def _partition_file_tasks(kifs_by_file: dict, num_workers: int) -> list:
     """評価対象を局面数ベースで大まかに均等分割する。"""
     buckets = [[] for _ in range(num_workers)]
@@ -2383,10 +2392,11 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     pos_struct[0]['is_check'] = board.is_check()
 
                     verify_board.set_psfen(packed_sfen_field_view(pos_struct[0]))
-                    if verify_board.sfen() != sfen:
+                    restored_sfen = verify_board.sfen()
+                    if sfen_position_key(restored_sfen) != sfen_position_key(sfen):
                         raise ValueError(
                             "psv roundtrip mismatch: "
-                            f"original={sfen} restored={verify_board.sfen()}"
+                            f"original={sfen} restored={restored_sfen}"
                         )
                     if not board.is_legal(move):
                         raise ValueError(f"actual_move is illegal before save: ply={ply} move={move} sfen={sfen}")
