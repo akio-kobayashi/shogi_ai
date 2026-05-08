@@ -2350,6 +2350,8 @@ def run_build_h5(args: argparse.Namespace) -> None:
                 if list_of_games is None: continue
                 game = list_of_games[int(game_meta['kif_index'])]
                 board = cshogi.Board(game.sfen)
+                psv_tmp = np.zeros(1, dtype=cshogi.PackedSfenValue)
+                verify_board = cshogi.Board()
                 game_positions_data = []
                 for ply, move in enumerate(game.moves, 1):
                     sfen = board.sfen()
@@ -2375,9 +2377,26 @@ def run_build_h5(args: argparse.Namespace) -> None:
                     
                     pos_struct = np.zeros(1, dtype=position_dtype)
                     pos_struct[0]['ply'] = ply
-                    board.to_psfen(packed_sfen_field_view(pos_struct[0]))
+                    board.to_psfen(psv_tmp)
+                    pos_struct[0]['psv'] = psv_tmp[0]
                     pos_struct[0]['actual_move'] = np.uint32(move)
                     pos_struct[0]['is_check'] = board.is_check()
+
+                    verify_board.set_psfen(packed_sfen_field_view(pos_struct[0]))
+                    if verify_board.sfen() != sfen:
+                        raise ValueError(
+                            "psv roundtrip mismatch: "
+                            f"original={sfen} restored={verify_board.sfen()}"
+                        )
+                    if not board.is_legal(move):
+                        raise ValueError(f"actual_move is illegal before save: ply={ply} move={move} sfen={sfen}")
+                    for cand in candidates_list:
+                        cand_move = int(cand[4])
+                        if not board.is_legal(cand_move):
+                            raise ValueError(
+                                "candidate move is illegal before save: "
+                                f"ply={ply} move={cand_move} sfen={sfen}"
+                            )
                     
                     f = pos_struct[0]['features']
                     f['in_check'] = feat_dict['in_check']
