@@ -1,89 +1,149 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-build-h5 で生成した HDF5 ファイルを train / val にゲーム単位で分割するスクリプト。
+build-h5 で生成した HDF5 データセットを game group 単位で train/val に分割する。
 
-Usage:
-    python split_h5_dataset.py --input-h5 data.h5 --output-dir split --val-ratio 0.2 --seed 42
+使い方:
+  python src/split_h5_dataset.py input.h5 train.h5 val.h5
+  python src/split_h5_dataset.py input.h5 train.h5 val.h5 --val-ratio 0.05 --seed 123
 """
+
+from __future__ import annotations
+
 import argparse
+import random
 import sys
 from pathlib import Path
 
-try:
-    import h5py
-except ImportError:
-    sys.exit("エラー: h5pyがインストールされていません。'pip install h5py' を実行してください。")
+import h5py
 
 
-def split_h5(input_h5: str, output_dir: str, val_ratio: float, seed: int) -> None:
-    input_path = Path(input_h5)
-    if not input_path.exists():
-        sys.exit(f"エラー: 入力ファイル '{input_path}' が見つかりません。")
+def _copy_root_attrs(src: h5py.File, dst: h5py.File) -> None:
+    for key, value in src.attrs.items():
+        dst.attrs[key] = value
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ゲームグループ名を収集
-    with h5py.File(input_path, "r") as f:
-        game_names = sorted(
-            name for name in f.keys()
-            if isinstance(f[name], h5py.Group) and "positions" in f[name]
-        )
+def _group_position_count(group: h5py.Group) -> int:
+    positions = group.get("positions")
+    return int(len(positions)) if positions is not None else 0
 
-    if not game_names:
-        sys.exit("エラー: 入力HDF5に有効な game group が見つかりません。")
 
-    # シード付きシャッフル → train / val 分割
-    import random
-    random.seed(seed)
+def _choose_val_groups(
+    src: h5py.File,
+    game_names: list[str],
+    val_ratio: float,
+    seed: int,
+) -> set[str]:
     shuffled = list(game_names)
-    random.shuffle(shuffled)
+    random.Random(seed).shuffle(shuffled)
 
-    split_idx = int(len(shuffled) * (1.0 - val_ratio))
-    # 片方が空になるのを避ける
-    split_idx = max(1, min(split_idx, len(shuffled) - 1))
+    total_positions = sum(_group_position_count(src[name]) for name in shuffled)
+    target_val_positions = total_positions * val_ratio
 
-    train_names = shuffled[:split_idx]
-    val_names = shuffled[split_idx:]
+    if target_val_positions <= 0:
+        return set()
 
-    # train.h5 出力
-    train_path = out_dir / "train.h5"
-    with h5py.File(input_path, "r") as f_src, h5py.File(train_path, "w") as f_dst:
-        f_dst.attrs["split"] = "train"
-        f_dst.attrs["num_games"] = len(train_names)
-        f_dst.attrs["num_total_games"] = len(game_names)
-        for name in train_names:
-            f_src.copy(name, f_dst, name)
-    print(f"train: {len(train_names)} games -> {train_path}")
+    val_groups: set[str] = set()
+    val_positions = 0
+    for game_name in shuffled:
+        if val_positions >= target_val_positions and val_groups:
+            break
+        val_groups.add(game_name)
+        val_positions += _group_position_count(src[game_name])
+    return val_groups
 
-    # val.h5 出力
-    val_path = out_dir / "val.h5"
-    with h5py.File(input_path, "r") as f_src, h5py.File(val_path, "w") as f_dst:
-        f_dst.attrs["split"] = "val"
-        f_dst.attrs["num_games"] = len(val_names)
-        f_dst.attrs["num_total_games"] = len(game_names)
-        for name in val_names:
-            f_src.copy(name, f_dst, name)
-    print(f"val:   {len(val_names)} games -> {val_path}")
 
-    print(f"\n分割完了 ({len(game_names)} games total, seed={seed})")
+def _copy_selected_groups(
+    src: h5py.File,
+    dst: h5py.File,
+    game_names: list[str],
+) -> tuple[int, int]:
+    copied_games = 0
+    copied_positions = 0
+    for game_name in game_names:
+        src.copy(src[game_name], dst, name=game_name)
+        copied_games += 1
+        copied_positions += _group_position_count(src[game_name])
+    return copied_games, copied_positions
+
+
+def split_h5_dataset(
+    input_h5: Path,
+    train_h5: Path,
+    val_h5: Path,
+    val_ratio: float,
+    seed: int,
+) -> None:
+    if input_h5.resolve() == train_h5.resolve():
+        raise ValueError("input_h5 and train_h5 must be different paths")
+    if input_h5.resolve() == val_h5.resolve():
+        raise ValueError("input_h5 and val_h5 must be different paths")
+    if train_h5.resolve() == val_h5.resolve():
+        raise ValueError("train_h5 and val_h5 must be different paths")
+    if not (0.0 <= val_ratio < 1.0):
+        raise ValueError("val_ratio must satisfy 0.0 <= val_ratio < 1.0")
+
+    with h5py.File(input_h5, "r") as src:
+        game_names = sorted(src.keys())
+        if not game_names:
+            raise ValueError(f"input HDF5 has no game groups: {input_h5}")
+
+        val_groups = _choose_val_groups(src, game_names, val_ratio, seed)
+        train_groups = [name for name in game_names if name not in val_groups]
+        val_groups_sorted = [name for name in game_names if name in val_groups]
+
+        if not train_groups:
+            raise ValueError("train split is empty; reduce --val-ratio")
+
+        train_h5.parent.mkdir(parents=True, exist_ok=True)
+        val_h5.parent.mkdir(parents=True, exist_ok=True)
+
+        with h5py.File(train_h5, "w") as train_out, h5py.File(val_h5, "w") as val_out:
+            _copy_root_attrs(src, train_out)
+            _copy_root_attrs(src, val_out)
+
+            train_games, train_positions = _copy_selected_groups(src, train_out, train_groups)
+            val_games, val_positions = _copy_selected_groups(src, val_out, val_groups_sorted)
+
+    print(f"input: {input_h5}")
+    print(f"train: {train_h5} games={train_games} positions={train_positions}")
+    print(f"val:   {val_h5} games={val_games} positions={val_positions}")
+    total_games = train_games + val_games
+    total_positions = train_positions + val_positions
+    if total_games > 0:
+        print(f"val game ratio: {val_games / total_games:.4f}")
+    if total_positions > 0:
+        print(f"val position ratio: {val_positions / total_positions:.4f}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="build-h5 で生成した HDF5 ファイルを train / val にゲーム単位で分割する。",
+        description="Split a build-h5 dataset into train/val HDF5 files by game group.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--input-h5", required=True, help="入力となる HDF5 ファイルのパス。")
-    parser.add_argument("--output-dir", required=True, help="分割結果を出力するディレクトリ。train.h5, val.h5 が作成されます。")
-    parser.add_argument("--val-ratio", type=float, default=0.2, help="検証セットの比率 (0.0-1.0)。")
-    parser.add_argument("--seed", type=int, default=42, help="シャッフルの乱数シード。同じ値で再現性あり。")
+    parser.add_argument("input_h5", help="Input HDF5 generated by build-h5")
+    parser.add_argument("train_h5", help="Output train HDF5 path")
+    parser.add_argument("val_h5", help="Output validation HDF5 path")
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="Target validation ratio by positions")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for game shuffle")
     args = parser.parse_args()
 
-    if not 0.0 < args.val_ratio < 1.0:
-        sys.exit("エラー: --val-ratio は 0.0 以上 1.0 未満の値を指定してください。")
+    input_h5 = Path(args.input_h5)
+    train_h5 = Path(args.train_h5)
+    val_h5 = Path(args.val_h5)
+    if not input_h5.exists():
+        sys.exit(f"エラー: 入力HDF5が見つかりません: {input_h5}")
 
-    split_h5(args.input_h5, args.output_dir, args.val_ratio, args.seed)
+    try:
+        split_h5_dataset(
+            input_h5=input_h5,
+            train_h5=train_h5,
+            val_h5=val_h5,
+            val_ratio=args.val_ratio,
+            seed=args.seed,
+        )
+    except Exception as exc:
+        sys.exit(f"エラー: {exc}")
 
 
 if __name__ == "__main__":

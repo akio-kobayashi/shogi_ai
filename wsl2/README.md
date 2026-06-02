@@ -358,6 +358,15 @@ python src/create_dataset.py build-h5 --input-csv <フィルタ済みCSV> --outp
 python src/check_h5_dataset.py output.h5 --check-moves
 ```
 
+### `split_h5_dataset.py`
+`build-h5` で生成した HDF5 データセットを、`game_*` group 単位で train / val に分割します。
+```bash
+python src/split_h5_dataset.py <input.h5> <train.h5> <val.h5> [--val-ratio 0.1] [--seed 0]
+```
+**注意:**
+*   分割単位は局面ではなく対局です。
+*   `--val-ratio` は局面数ベースの目標比率です。実際の比率は game ごとの局面数により多少ずれます。
+
 ---
 ## 設定ファイル (`wsl2/config.yaml`)
 各コマンドのオプションは`wsl2/config.yaml`にまとめて記述することで、コマンドライン入力を簡略化できます。
