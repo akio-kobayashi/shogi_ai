@@ -50,28 +50,49 @@ CoT用特殊tokenを含まないschema version 2を使っている場合は、
 ### uvによる環境構築
 
 実行対象はLinux／WSL2である。Apple Siliconを含むmacOSは実験実行環境に含めない。
-Python環境は`uv.lock`から再現する。Python 3.10以上3.14未満を対象とし、PyTorchと
-cshogiをプロジェクト専用の`.venv`へ導入する。
+Python 3.10以上3.14未満を対象とし、cshogiなどの共通依存は`uv.lock`から、
+PyTorchは選択したaccelerator用の公式indexからプロジェクト専用の`.venv`へ導入する。
 ここで使用するcshogiはPyPI公開版ではなく、データ作成・評価に必要な変更を加えた
 forkのcommit `c447085`へ固定している。
 
+CPU、CUDA 13.0、ROCm 7.2のいずれかを明示して構築する。引数を省略した場合は、
+大容量のNVIDIA/AMD packageを取得しないCPU版になる。
+
 ```bash
 cd /path/to/shogi_ai/shogi_state_tracking
-./setup_env.sh
+./setup_env.sh cpu
+./setup_env.sh cuda
+./setup_env.sh rocm
 ```
 
-`setup_env.sh`は`uv sync --frozen`を実行するため、ロックファイルと
-`pyproject.toml`が一致しない場合は停止する。依存関係を変更した場合だけ、開発者が
-次を実行して`uv.lock`を更新する。
+同じ`.venv`のままbackendを変更することはできない。CPU、CUDA、ROCmを切り替える
+場合は`.venv`を削除してから再構築する。異なるCUDA/ROCm版が必要な場合は、
+例えば次のように明示する。
 
 ```bash
-UV_CACHE_DIR=.uv-cache uv lock
-./setup_env.sh
+CUDA_BACKEND=cu128 ./setup_env.sh cuda
+ROCM_BACKEND=rocm6.4 ./setup_env.sh rocm
 ```
 
+既定のPyTorchは2.13.0であり、`TORCH_VERSION`で上書きできる。GPU版は展開時に
+大きな空き容量を必要とするため、setupはcache側とproject側の双方に15 GiB以上の
+空きを要求する。cacheを別の大容量filesystemへ置く場合は次のように指定する。
+
+```bash
+UV_CACHE_DIR=/large-volume/uv-cache ./setup_env.sh cuda
+```
+
+旧設定でproject直下の`.uv-cache`が容量を消費している場合は、他のuv処理が動いて
+いないことを確認してから`UV_CACHE_DIR=.uv-cache uv cache clean`で削除できる。
+
+`setup_env.sh`は共通依存について`uv sync --frozen --inexact`を実行するため、
+ロックファイルと`pyproject.toml`が一致しない場合は停止する。PyTorchについては
+uv公式の`--torch-backend`を用い、選択したbackendだけを取得する。依存関係を
+変更した場合に限り、開発者が`uv lock`で`uv.lock`を更新する。
+
 環境構築後、各シェルスクリプトは既定で`.venv/bin/python`を使用する。別のPythonを
-使う場合は`PYTHON_BIN=/path/to/python`で上書きできる。`requirements.txt`はuvを
-利用できない環境向けの互換用であり、再現実験では`uv.lock`を優先する。
+使う場合は`PYTHON_BIN=/path/to/python`で上書きできる。`requirements.txt`には
+backend非依存のcshogiだけを記載しており、再現実験では`setup_env.sh`を使用する。
 
 ### データセット作成
 
