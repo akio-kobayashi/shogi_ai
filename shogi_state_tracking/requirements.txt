@@ -1,0 +1,2 @@
+cshogi @ git+https://github.com/akio-kobayashi/cshogi.git@c44708550d2dcd569179846a1ac35ad889d5ebb9
+torch>=2.2

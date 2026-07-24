@@ -1,0 +1,17 @@
+data/
+.venv*/
+.uv-cache/
+__pycache__/
+*.py[cod]
+results/
+checkpoints/
+.env
+.env.*
+*.pt
+*.bin
+*.h5
+metadata.csv
+player_summary.csv
+COT_EXPERIMENT.md
+FUTURE_EXPERIMENTS.md
+PROBE_DESIGN.md
