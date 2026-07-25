@@ -55,8 +55,9 @@ PyTorchは選択したaccelerator用の公式indexからプロジェクト専用
 ここで使用するcshogiはPyPI公開版ではなく、データ作成・評価に必要な変更を加えた
 forkのcommit `c447085`へ固定している。
 
-CPU、CUDA 13.0、ROCm 7.1のいずれかを明示して構築する。引数を省略した場合は、
-大容量のNVIDIA/AMD packageを取得しないCPU版になる。
+CPU、CUDA 13.0、ROCmのいずれかを明示して構築する。ROCmは実行環境を判定し、
+native LinuxではROCm 7.1、WSL2ではAMDが検証したROCm 7.2向けwheelを使用する。
+引数を省略した場合は、大容量のNVIDIA/AMD packageを取得しないCPU版になる。
 
 ```bash
 cd /path/to/shogi_ai/shogi_state_tracking
@@ -85,15 +86,23 @@ UV_CACHE_DIR=/large-volume/uv-cache ./setup_env.sh cuda
 旧設定でproject直下の`.uv-cache`が容量を消費している場合は、他のuv処理が動いて
 いないことを確認してから`UV_CACHE_DIR=.uv-cache uv cache clean`で削除できる。
 
-ROCm条件では、PyTorch 2.13.0が要求する`triton-rocm==3.7.1`をPyTorch公式の
-aggregate wheel indexから先に導入する。別のTorch版を指定し、要求されるTriton版が
-異なる場合は`ROCM_TRITON_VERSION`も同時に指定する。
+native LinuxのROCm条件では、PyTorch 2.13.0が要求する
+`triton-rocm==3.7.1`をPyTorch公式のaggregate wheel indexから先に導入する。
+別のTorch版を指定し、要求されるTriton版が異なる場合は
+`ROCM_TRITON_VERSION`も同時に指定する。
 
 ```bash
 TORCH_VERSION=2.12.1 \
 ROCM_TRITON_VERSION=3.6.0 \
   ./setup_env.sh rocm
 ```
+
+WSL2ではnative Linux用wheelを使用しない。native LinuxのROCm wheelは
+`/sys/class/kfd/kfd/topology/nodes`を参照するが、WSL2のGPU経路は`/dev/dxg`を
+使用するためである。WSL2ではAMD公式の検証済み構成であるPyTorch 2.9.1、
+ROCm 7.2、Triton 3.5.1、NumPy 1.26.4を導入し、wheel内のHSA runtimeを除いて
+`/opt/rocm/lib/libhsa-runtime64.so.1`を使用する。`/dev/dxg`またはこのruntimeが
+存在しない場合、Windows側AMD WSL driver／WSL側ROCmの準備不足として停止する。
 
 `setup_env.sh`は共通依存について`uv sync --frozen --inexact`を実行するため、
 ロックファイルと`pyproject.toml`が一致しない場合は停止する。PyTorchについては
