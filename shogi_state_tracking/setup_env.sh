@@ -23,7 +23,7 @@ case "${BACKEND}" in
     ;;
   rocm)
     MIN_FREE_GB="${MIN_FREE_GB:-15}"
-    TORCH_BACKEND="${ROCM_BACKEND:-rocm7.2}"
+    TORCH_BACKEND="${ROCM_BACKEND:-rocm7.1}"
     ;;
   *)
     echo "unknown backend: ${BACKEND}; use cpu, cuda, or rocm" >&2

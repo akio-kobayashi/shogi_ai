@@ -55,7 +55,7 @@ PyTorchは選択したaccelerator用の公式indexからプロジェクト専用
 ここで使用するcshogiはPyPI公開版ではなく、データ作成・評価に必要な変更を加えた
 forkのcommit `c447085`へ固定している。
 
-CPU、CUDA 13.0、ROCm 7.2のいずれかを明示して構築する。引数を省略した場合は、
+CPU、CUDA 13.0、ROCm 7.1のいずれかを明示して構築する。引数を省略した場合は、
 大容量のNVIDIA/AMD packageを取得しないCPU版になる。
 
 ```bash
