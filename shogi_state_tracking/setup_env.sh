@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UV_BIN="${UV_BIN:-uv}"
 BACKEND="${1:-cpu}"
 TORCH_VERSION="${TORCH_VERSION:-2.13.0}"
+ROCM_TRITON_VERSION="${ROCM_TRITON_VERSION:-3.7.1}"
 if [[ $# -gt 0 ]]; then shift; fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -54,6 +55,9 @@ fi
 
 backend_marker="${SCRIPT_DIR}/.venv/.torch-backend"
 environment_id="${BACKEND}:${TORCH_BACKEND}:${TORCH_VERSION}"
+if [[ "${BACKEND}" == "rocm" ]]; then
+  environment_id="${environment_id}:triton-${ROCM_TRITON_VERSION}"
+fi
 if [[ -f "${backend_marker}" ]]; then
   installed_environment="$(<"${backend_marker}")"
   if [[ "${installed_environment}" != "${environment_id}" ]]; then
@@ -67,6 +71,16 @@ fi
   --frozen \
   --inexact \
   "$@"
+
+if [[ "${BACKEND}" == "rocm" ]]; then
+  # torch 2.13.0+rocm7.1 requires triton-rocm 3.7.1, but that wheel is
+  # currently discoverable from PyTorch's aggregate index rather than
+  # through uv's rocm7.1 backend index.
+  "${UV_BIN}" pip install \
+    --python "${SCRIPT_DIR}/.venv/bin/python" \
+    "triton-rocm==${ROCM_TRITON_VERSION}" \
+    --index "https://download.pytorch.org/whl"
+fi
 
 "${UV_BIN}" pip install \
   --python "${SCRIPT_DIR}/.venv/bin/python" \

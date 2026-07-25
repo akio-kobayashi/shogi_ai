@@ -85,6 +85,16 @@ UV_CACHE_DIR=/large-volume/uv-cache ./setup_env.sh cuda
 旧設定でproject直下の`.uv-cache`が容量を消費している場合は、他のuv処理が動いて
 いないことを確認してから`UV_CACHE_DIR=.uv-cache uv cache clean`で削除できる。
 
+ROCm条件では、PyTorch 2.13.0が要求する`triton-rocm==3.7.1`をPyTorch公式の
+aggregate wheel indexから先に導入する。別のTorch版を指定し、要求されるTriton版が
+異なる場合は`ROCM_TRITON_VERSION`も同時に指定する。
+
+```bash
+TORCH_VERSION=2.12.1 \
+ROCM_TRITON_VERSION=3.6.0 \
+  ./setup_env.sh rocm
+```
+
 `setup_env.sh`は共通依存について`uv sync --frozen --inexact`を実行するため、
 ロックファイルと`pyproject.toml`が一致しない場合は停止する。PyTorchについては
 uv公式の`--torch-backend`を用い、選択したbackendだけを取得する。依存関係を
