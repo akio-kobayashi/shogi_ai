@@ -105,7 +105,8 @@ setup末尾では、`cshogi`単体、`torch`単体、実プログラムと同じ
 `[verify 1/4]`から`[verify 3/4]`まで成功して`[verify 4/4]`でabortする場合は、
 Python packageの解決ではなく、ホストのGPU、ROCm/CUDA driver、デバイス権限の
 組合せを確認する。失敗した環境は`.torch-backend`へ確定記録されないため、
-原因を修正した後に同じsetupコマンドを再実行できる。
+原因を修正した後に同じsetupコマンドを再実行できる。GPU版ではacceleratorが
+利用可能でない場合もsetup失敗とする。
 
 環境構築後、各シェルスクリプトは既定で`.venv/bin/python`を使用する。別のPythonを
 使う場合は`PYTHON_BIN=/path/to/python`で上書きできる。`requirements.txt`には

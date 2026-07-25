@@ -102,8 +102,13 @@ echo "[verify 3/4] joint import (application order: torch, then cshogi)"
   "import torch, cshogi; print('joint import: ok', flush=True)"
 
 echo "[verify 4/4] accelerator runtime"
-"${python_bin}" -u -c \
-  "import torch; print('accelerator available:', torch.cuda.is_available(), flush=True)"
+if [[ "${BACKEND}" == "cpu" ]]; then
+  "${python_bin}" -u -c \
+    "import torch; print('accelerator available:', torch.cuda.is_available(), flush=True)"
+else
+  "${python_bin}" -u -c \
+    "import torch; available = torch.cuda.is_available(); print('accelerator available:', available, flush=True); raise SystemExit(0 if available else 1)"
+fi
 
 # Record the environment only after both extension modules and the accelerator
 # runtime have passed verification. A failed setup can then be rerun safely.
