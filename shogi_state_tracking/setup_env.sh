@@ -87,9 +87,26 @@ fi
   "torch==${TORCH_VERSION}" \
   --torch-backend "${TORCH_BACKEND}"
 
-printf "%s\n" "${environment_id}" > "${backend_marker}"
+python_bin="${SCRIPT_DIR}/.venv/bin/python"
 
-"${SCRIPT_DIR}/.venv/bin/python" -c \
-  "import cshogi, importlib.metadata as m, torch; print('cshogi:', m.version('cshogi')); print('torch:', torch.__version__); print('cuda:', torch.version.cuda); print('hip:', torch.version.hip); print('accelerator available:', torch.cuda.is_available())"
+echo "[verify 1/4] cshogi import"
+"${python_bin}" -u -c \
+  "import cshogi, importlib.metadata as m; print('cshogi:', m.version('cshogi'), flush=True)"
+
+echo "[verify 2/4] torch import"
+"${python_bin}" -u -c \
+  "import torch; print('torch:', torch.__version__, flush=True); print('cuda:', torch.version.cuda, flush=True); print('hip:', torch.version.hip, flush=True)"
+
+echo "[verify 3/4] joint import (application order: torch, then cshogi)"
+"${python_bin}" -u -c \
+  "import torch, cshogi; print('joint import: ok', flush=True)"
+
+echo "[verify 4/4] accelerator runtime"
+"${python_bin}" -u -c \
+  "import torch; print('accelerator available:', torch.cuda.is_available(), flush=True)"
+
+# Record the environment only after both extension modules and the accelerator
+# runtime have passed verification. A failed setup can then be rerun safely.
+printf "%s\n" "${environment_id}" > "${backend_marker}"
 
 echo "environment ready: ${SCRIPT_DIR}/.venv (${environment_id})"

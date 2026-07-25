@@ -100,6 +100,13 @@ ROCM_TRITON_VERSION=3.6.0 \
 uv公式の`--torch-backend`を用い、選択したbackendだけを取得する。依存関係を
 変更した場合に限り、開発者が`uv lock`で`uv.lock`を更新する。
 
+setup末尾では、`cshogi`単体、`torch`単体、実プログラムと同じ
+`torch`→`cshogi`順の同時import、accelerator runtimeの順に検証する。
+`[verify 1/4]`から`[verify 3/4]`まで成功して`[verify 4/4]`でabortする場合は、
+Python packageの解決ではなく、ホストのGPU、ROCm/CUDA driver、デバイス権限の
+組合せを確認する。失敗した環境は`.torch-backend`へ確定記録されないため、
+原因を修正した後に同じsetupコマンドを再実行できる。
+
 環境構築後、各シェルスクリプトは既定で`.venv/bin/python`を使用する。別のPythonを
 使う場合は`PYTHON_BIN=/path/to/python`で上書きできる。`requirements.txt`には
 backend非依存のcshogiだけを記載しており、再現実験では`setup_env.sh`を使用する。
