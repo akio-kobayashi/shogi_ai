@@ -288,10 +288,47 @@ python evaluate_probes.py \
 
 既定では最終層、T²MLRの再帰状態、現在指手のtoken embedding対照を評価する。全層を
 評価する場合は`--sources layers,recurrent,token_embedding`を指定する。出力は
-`probe_metrics.json`と`linear_probes.pt`であり、前者には盤面・持ち駒・手番の指標、
+`probe_metrics.json`、`linear_probes.pt`、`probe_predictions.pt`であり、前者には盤面・持ち駒・手番の指標、
 履歴長別・open/mixed/closed別指標、次手予測lossとtop-k accuracyが含まれる。また、
 各次手予測位置についてtop-1合法手率、top-5内の合法手有無、合法手への確率質量、
 合法手の語彙収録率をcshogiで計算する。`<EOS>`予測位置は合法手評価から除外する。
+同時に`probe_predictions.pt`へ評価位置ごとの盤面・持ち駒・手番の正解と予測、盤面の
+正解クラス確率、距離、対局IDを保存する。このファイルは可視化専用であり、モデルの
+学習には使用しない。
+
+### プローブ結果の可視化
+
+`visualize_probes.py`は外部描画ライブラリを必要とせず、SVGを生成する。盤面上の数値は
+各マスの復元精度である。`occupied-accuracy`では空マスを除いて集計する。
+
+```bash
+python visualize_probes.py aggregate \
+  --predictions results/probes/vanilla.pt/standard/seed_20260724/probe_predictions.pt \
+  --source final \
+  --metric occupied-accuracy \
+  --output results/figures/vanilla-occupied.svg
+```
+
+個別局面では、背景色が正解クラス確率、緑枠が正解、赤枠と矢印が誤予測を表す。
+
+```bash
+python visualize_probes.py position \
+  --predictions results/probes/vanilla.pt/standard/seed_20260724/probe_predictions.pt \
+  --source final \
+  --index 0 \
+  --output results/figures/vanilla-position-0.svg
+```
+
+VanillaとT²MLRなど、同じ評価順で作成した2つのアーティファクトの差分も表示できる。
+正値は第1ファイルの方が復元精度が高いマスである。
+
+```bash
+python visualize_probes.py difference \
+  --predictions results/probes/vanilla/probe_predictions.pt \
+  --predictions-b results/probes/t2mlr/probe_predictions.pt \
+  --source final \
+  --output results/figures/vanilla-minus-t2mlr.svg
+```
 
 ### シェルからの評価
 

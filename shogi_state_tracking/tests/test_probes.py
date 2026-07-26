@@ -159,6 +159,7 @@ class ProbeReplayTest(unittest.TestCase):
             metrics_path = output_dir / "probe_metrics.json"
             self.assertTrue(metrics_path.exists())
             self.assertTrue((output_dir / "linear_probes.pt").exists())
+            self.assertTrue((output_dir / "probe_predictions.pt").exists())
             report = json.loads(metrics_path.read_text(encoding="utf-8"))
             self.assertIn("layer_1", report["probe_results"])
             self.assertIn("token_embedding", report["probe_results"])

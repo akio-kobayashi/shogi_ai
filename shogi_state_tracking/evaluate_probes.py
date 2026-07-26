@@ -488,12 +488,15 @@ def train_probe(
 def predict_probe(
     probe: LinearStateProbe,
     features: torch.Tensor,
+    targets: ProbeTargets,
     batch_size: int,
     device: torch.device,
 ):
     boards = []
     hands = []
     turns = []
+    board_target_probabilities = []
+    board_prediction_probabilities = []
     probe.eval()
     with torch.inference_mode():
         for start in range(0, features.shape[0], batch_size):
@@ -503,7 +506,23 @@ def predict_probe(
             boards.append(board.cpu())
             hands.append(hand.cpu())
             turns.append(turn.cpu())
-    return torch.cat(boards), torch.cat(hands), torch.cat(turns)
+            board_probabilities = logits.board.softmax(dim=-1)
+            target = targets.board[start:stop].to(device)
+            board_target_probabilities.append(
+                board_probabilities.gather(
+                    -1, target.unsqueeze(-1)
+                ).squeeze(-1).cpu()
+            )
+            board_prediction_probabilities.append(
+                board_probabilities.max(dim=-1).values.cpu()
+            )
+    return (
+        torch.cat(boards),
+        torch.cat(hands),
+        torch.cat(turns),
+        torch.cat(board_target_probabilities),
+        torch.cat(board_prediction_probabilities),
+    )
 
 
 def evaluate_source(
@@ -512,9 +531,19 @@ def evaluate_source(
     split_data,
     batch_size: int,
     device: torch.device,
-) -> Mapping[str, object]:
-    board, hands, turn = predict_probe(
-        probe, split_data["features"][source], batch_size, device
+) -> Tuple[Mapping[str, object], Mapping[str, object]]:
+    (
+        board,
+        hands,
+        turn,
+        board_target_probability,
+        board_prediction_probability,
+    ) = predict_probe(
+        probe,
+        split_data["features"][source],
+        split_data["targets"],
+        batch_size,
+        device,
     )
     metrics = state_metrics(split_data["targets"], board, hands, turn)
     metrics["strata"] = stratified_metrics(
@@ -525,7 +554,19 @@ def evaluate_source(
         split_data["distances"],
         split_data["scopes"],
     )
-    return metrics
+    return metrics, {
+        "board_target": split_data["targets"].board,
+        "board_prediction": board,
+        "board_target_probability": board_target_probability,
+        "board_prediction_probability": board_prediction_probability,
+        "hand_target": split_data["targets"].hands,
+        "hand_prediction": hands,
+        "turn_target": split_data["targets"].turn,
+        "turn_prediction": turn,
+        "distances": split_data["distances"],
+        "scopes": list(split_data["scopes"]),
+        "game_ids": list(split_data["game_ids"]),
+    }
 
 
 def main() -> None:
@@ -625,6 +666,14 @@ def main() -> None:
     )
     report["majority_baseline"] = majority_metrics
 
+    prediction_payload = {
+        "format_version": 1,
+        "checkpoint": str(args.checkpoint),
+        "model_type": model_type,
+        "sources": sources,
+        "evaluation": {},
+    }
+
     for source in sources:
         probe, training = train_probe(
             extracted["train"]["features"][source],
@@ -634,15 +683,18 @@ def main() -> None:
             args,
             device,
         )
+        validation_metrics, _ = evaluate_source(
+            source, probe, extracted["validation"], args.batch_size, device
+        )
+        evaluation_metrics, evaluation_predictions = evaluate_source(
+            source, probe, extracted["evaluation"], args.batch_size, device
+        )
         report["probe_results"][source] = {
             "training": training,
-            "validation": evaluate_source(
-                source, probe, extracted["validation"], args.batch_size, device
-            ),
-            "evaluation": evaluate_source(
-                source, probe, extracted["evaluation"], args.batch_size, device
-            ),
+            "validation": validation_metrics,
+            "evaluation": evaluation_metrics,
         }
+        prediction_payload["evaluation"][source] = evaluation_predictions
         saved_probes[source] = {
             key: value.detach().cpu() for key, value in probe.state_dict().items()
         }
@@ -659,6 +711,7 @@ def main() -> None:
         },
         output_dir / "linear_probes.pt",
     )
+    torch.save(prediction_payload, output_dir / "probe_predictions.pt")
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
