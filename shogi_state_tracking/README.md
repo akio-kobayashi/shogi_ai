@@ -424,3 +424,40 @@ trace合法率、候補内正解recall、answer-trace整合率を測り、answer
 `create_dataset.py export`から再生成・再学習すること。
 
 現行実装では、T²MLRのbranch stateを`<SEP>`ごとにrootへ戻さない。
+
+## 別計算機への実験環境移行
+
+実験コード、`uv.lock`、生成済み`data/`を、チェックサム付きアーカイブへまとめられる。
+`.venv`と`.uv-cache`はCUDA/ROCmやホストOSに依存するため、アーカイブには含めない。
+移行先では、展開後に移行先のアクセラレータに合わせて環境を再構築する。
+
+```bash
+cd /path/to/shogi_ai/shogi_state_tracking
+scripts/package_experiment.sh /mnt/transfer/shogi-state-tracking.tar.gz
+```
+
+結果やcheckpointも含める場合は、容量とデータの取り扱いを確認してから指定する。
+
+```bash
+scripts/package_experiment.sh \
+  --include-results \
+  --include-checkpoints \
+  /mnt/transfer/shogi-state-tracking-with-artifacts.tar.gz
+```
+
+アーカイブには`MIGRATION_MANIFEST.json`が入り、コード・データ・成果物のSHA-256を
+記録する。移行先では、既存の空でないディレクトリを上書きせずに展開・検証する。
+
+```bash
+scripts/restore_experiment.sh \
+  /mnt/transfer/shogi-state-tracking.tar.gz \
+  /work/shogi_state_tracking
+
+cd /work/shogi_state_tracking
+./setup_env.sh cpu       # 移行先がNVIDIAならcuda、AMDならrocm
+```
+
+生成データには対局者名や入力CSAのパスが含まれる場合がある。アーカイブを公開・共有
+する前に、`data/`および`--include-results`、`--include-checkpoints`の内容を確認する。
+入力CSAや`metadata.csv`は自動的には同梱しないため、再度CSAからexportする場合は、
+移行先のパスに合わせて`--path-prefix-from`と`--path-prefix-to`を指定する。
