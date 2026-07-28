@@ -4,6 +4,7 @@
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 from typing import List, Mapping, Sequence
 
@@ -29,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-games", type=int, default=0)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="この局数ごとに進捗を表示する。0なら表示しない",
+    )
     parser.add_argument("--seed", type=int, default=20260724)
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
@@ -69,20 +76,22 @@ def sample_token(
     return int(torch.multinomial(probabilities, 1))
 
 
-def generate_line(
+def advance_prefix(
     model,
     prompt_ids: Sequence[int],
     moves_marker: int,
-    id_to_token: Mapping[int, str],
-    syntactic_moves,
-    line_length: int,
-    temperature: float,
-    top_p: float,
+    decision_plies: Sequence[int],
     device: torch.device,
-) -> List[str]:
+):
+    """1局のprefixを一度だけ再生し、指定局面のKV状態を保存する。
+
+    旧実装は、同じprefixを読み筋ごとに再生していた。ここでは局面ごとの
+    状態を共有し、各読み筋は保存済み状態から分岐させる。
+    """
+    requested = set(decision_plies)
+    states = {}
     past_key_values = None
     recurrent_state = None
-    next_logits = None
     with torch.inference_mode():
         for position, token_id in enumerate(prompt_ids):
             token = torch.tensor([[token_id]], dtype=torch.long, device=device)
@@ -90,7 +99,7 @@ def generate_line(
                 [position > moves_marker], dtype=torch.bool, device=device
             )
             (
-                logits,
+                next_logits,
                 past_key_values,
                 recurrent_state,
                 _,
@@ -102,12 +111,33 @@ def generate_line(
                 recurrent_state,
                 recurrent_active,
             )
-            next_logits = logits[0, 0]
+            decision_ply = position - moves_marker
+            if position >= moves_marker and decision_ply in requested:
+                states[decision_ply] = (
+                    next_logits[0, 0],
+                    past_key_values,
+                    recurrent_state,
+                )
+    missing = requested.difference(states)
+    if missing:
+        raise ValueError("prefix did not reach decision plies: {}".format(sorted(missing)))
+    return states
 
-        if next_logits is None:
-            raise ValueError("empty generation prompt")
+
+def generate_line(
+    model,
+    initial_state,
+    id_to_token: Mapping[int, str],
+    syntactic_moves,
+    line_length: int,
+    temperature: float,
+    top_p: float,
+    device: torch.device,
+) -> List[str]:
+    next_logits, past_key_values, recurrent_state = initial_state
+    with torch.inference_mode():
         generated: List[str] = []
-        position = len(prompt_ids)
+        position = past_key_values[0][0].shape[2] if past_key_values else 0
         for _ in range(line_length):
             token_id = sample_token(next_logits, temperature, top_p)
             token_text = id_to_token[token_id]
@@ -160,6 +190,27 @@ def main() -> None:
     written = 0
     skipped_empty = 0
     processed_games = 0
+    started_at = time.perf_counter()
+
+    def report_progress() -> None:
+        if args.progress_every <= 0:
+            return
+        if processed_games == 1 or processed_games % args.progress_every != 0:
+            return
+        elapsed = time.perf_counter() - started_at
+        print(
+            "[progress] games={} traces={} elapsed={:.1f}s".format(
+                processed_games, written, elapsed
+            ),
+            flush=True,
+        )
+
+    maximum_trace_tokens = (
+        1
+        + args.lines * args.line_length
+        + max(args.lines - 1, 0)
+        + 4
+    )
 
     with output_path.open("w", encoding="utf-8") as output:
         for record in load_records(args.input_jsonl):
@@ -170,29 +221,37 @@ def main() -> None:
             decision_count = (
                 len(moves) if args.positions_per_game < 0 else args.positions_per_game
             )
-            for decision_ply in select_decision_plies(len(moves), decision_count):
+            decision_plies = select_decision_plies(len(moves), decision_count)
+            decision_plies = [
+                decision_ply
+                for decision_ply in decision_plies
+                if 98 + decision_ply + maximum_trace_tokens <= config.max_seq_len
+            ]
+            if not decision_plies:
+                report_progress()
+                continue
+            max_decision_ply = max(decision_plies)
+            prompt_tokens = (
+                ["<BOS>"]
+                + list(record["initial_state_tokens"])
+                + ["<MOVES>"]
+                + moves[:max_decision_ply]
+            )
+            prompt_ids = [vocabulary[token] for token in prompt_tokens]
+            prefix_states = advance_prefix(
+                model,
+                prompt_ids,
+                moves_marker,
+                decision_plies,
+                device,
+            )
+            for decision_ply in decision_plies:
                 history = moves[:decision_ply]
-                prompt_tokens = (
-                    ["<BOS>"]
-                    + list(record["initial_state_tokens"])
-                    + ["<MOVES>"]
-                    + history
-                )
-                maximum_trace_tokens = (
-                    1
-                    + args.lines * args.line_length
-                    + max(args.lines - 1, 0)
-                    + 4
-                )
-                if len(prompt_tokens) + maximum_trace_tokens > config.max_seq_len:
-                    continue
-                prompt_ids = [vocabulary[token] for token in prompt_tokens]
                 reasoning_lines = []
                 for _ in range(args.lines):
                     line = generate_line(
                         model,
-                        prompt_ids,
-                        moves_marker,
+                        prefix_states[decision_ply],
                         id_to_token,
                         syntactic_moves,
                         args.line_length,
@@ -228,6 +287,8 @@ def main() -> None:
                 }
                 output.write(json.dumps(trace_record, ensure_ascii=False) + "\n")
                 written += 1
+
+            report_progress()
 
     summary = {
         "input": args.input_jsonl,
