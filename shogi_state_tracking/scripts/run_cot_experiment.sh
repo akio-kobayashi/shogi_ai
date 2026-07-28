@@ -16,11 +16,25 @@ TRACE_DIR="${TRACE_DIR:-${PROJECT_DIR}/data/traces/${MODEL_TYPE}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_DIR}/results/cot/${MODEL_TYPE}}"
 SEED="${SEED:-20260724}"
 DEVICE="${DEVICE:-auto}"
+RUN_EVALUATION="${RUN_EVALUATION:-0}"
 RUN_PROBES="${RUN_PROBES:-1}"
+GENERATE_EVALUATION_TRACE="${GENERATE_EVALUATION_TRACE:-0}"
+POSITIONS_PER_GAME="${POSITIONS_PER_GAME:-4}"
+LINES="${LINES:-3}"
+LINE_LENGTH="${LINE_LENGTH:-4}"
+TEMPERATURE="${TEMPERATURE:-0.8}"
+TOP_P="${TOP_P:-0.95}"
+MAX_GAMES="${MAX_GAMES:-0}"
+PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
 
 mkdir -p "${TRACE_DIR}" "${OUTPUT_DIR}"
 
-for split in train validation evaluation
+SPLITS=(train validation)
+if [[ "${GENERATE_EVALUATION_TRACE}" -eq 1 ]]; then
+  SPLITS+=(evaluation)
+fi
+
+for split in "${SPLITS[@]}"
 do
   case "${split}" in
     train) INPUT="${TRAIN_GAMES}" ;;
@@ -32,6 +46,13 @@ do
     --vocab "${VOCAB_PATH}" \
     --input-jsonl "${INPUT}" \
     --output-jsonl "${TRACE_DIR}/${split}.jsonl" \
+    --positions-per-game "${POSITIONS_PER_GAME}" \
+    --lines "${LINES}" \
+    --line-length "${LINE_LENGTH}" \
+    --temperature "${TEMPERATURE}" \
+    --top-p "${TOP_P}" \
+    --max-games "${MAX_GAMES}" \
+    --progress-every "${PROGRESS_EVERY}" \
     --seed "${SEED}" \
     --device "${DEVICE}"
 done
@@ -43,34 +64,28 @@ VALIDATION_JSONL="${TRACE_DIR}/validation.jsonl" \
 OUTPUT_DIR="${OUTPUT_DIR}/training" \
 SEED="${SEED}" \
 DEVICE="${DEVICE}" \
-  "${PROJECT_DIR}/scripts/run_training.sh" cot "${MODEL_TYPE}" "$@"
+    "${PROJECT_DIR}/scripts/run_training.sh" cot "${MODEL_TYPE}" "$@"
 
-"${PYTHON_BIN}" "${PROJECT_DIR}/evaluate_reasoning.py" \
-  --checkpoint "${OUTPUT_DIR}/training/best.pt" \
-  --vocab "${VOCAB_PATH}" \
-  --trace-jsonl "${TRACE_DIR}/evaluation.jsonl" \
-  --output-dir "${OUTPUT_DIR}/evaluation" \
-  --seed "${SEED}" \
-  --device "${DEVICE}"
-
-if [[ "${RUN_PROBES}" -eq 1 ]]; then
-  CHECKPOINT="${BASE_CHECKPOINT}" \
+if [[ "${RUN_EVALUATION}" -eq 1 ]]; then
+  BASE_CHECKPOINT="${BASE_CHECKPOINT}" \
   VOCAB_PATH="${VOCAB_PATH}" \
-  TRAIN_JSONL="${TRAIN_GAMES}" \
-  VALIDATION_JSONL="${VALIDATION_GAMES}" \
-  EVALUATION_JSONL="${EVALUATION_GAMES}" \
-  OUTPUT_DIR="${OUTPUT_DIR}/probes-answer-only" \
+  TRAIN_GAMES="${TRAIN_GAMES}" \
+  VALIDATION_GAMES="${VALIDATION_GAMES}" \
+  EVALUATION_GAMES="${EVALUATION_GAMES}" \
+  TRACE_DIR="${TRACE_DIR}" \
+  OUTPUT_DIR="${OUTPUT_DIR}" \
+  RUN_PROBES="${RUN_PROBES}" \
+  POSITIONS_PER_GAME="${POSITIONS_PER_GAME}" \
+  LINES="${LINES}" \
+  LINE_LENGTH="${LINE_LENGTH}" \
+  TEMPERATURE="${TEMPERATURE}" \
+  TOP_P="${TOP_P}" \
+  MAX_GAMES="${MAX_GAMES}" \
+  PROGRESS_EVERY="${PROGRESS_EVERY}" \
   SEED="${SEED}" \
   DEVICE="${DEVICE}" \
-    "${PROJECT_DIR}/scripts/run_probe_evaluation.sh" standard
-
-  CHECKPOINT="${OUTPUT_DIR}/training/best.pt" \
-  VOCAB_PATH="${VOCAB_PATH}" \
-  TRAIN_JSONL="${TRAIN_GAMES}" \
-  VALIDATION_JSONL="${VALIDATION_GAMES}" \
-  EVALUATION_JSONL="${EVALUATION_GAMES}" \
-  OUTPUT_DIR="${OUTPUT_DIR}/probes-cot" \
-  SEED="${SEED}" \
-  DEVICE="${DEVICE}" \
-    "${PROJECT_DIR}/scripts/run_probe_evaluation.sh" standard
+    "${PROJECT_DIR}/scripts/run_cot_evaluation.sh" "${MODEL_TYPE}"
+else
+  echo "trace generation and CoT training completed"
+  echo "evaluation trace generation and evaluation are deferred; run scripts/run_cot_evaluation.sh ${MODEL_TYPE} when ready"
 fi

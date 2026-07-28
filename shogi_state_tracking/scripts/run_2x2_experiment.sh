@@ -12,6 +12,8 @@ EVALUATION_GAMES="${EVALUATION_GAMES:-${PROJECT_DIR}/data/datasets/evaluation.js
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-${PROJECT_DIR}/results/2x2}"
 SEED="${SEED:-20260724}"
 DEVICE="${DEVICE:-auto}"
+RUN_EVALUATION="${RUN_EVALUATION:-0}"
+RUN_PROBES="${RUN_PROBES:-1}"
 
 for model_type in vanilla t2mlr
 do
@@ -39,11 +41,18 @@ do
   EVALUATION_GAMES="${EVALUATION_GAMES}" \
   TRACE_DIR="${EXPERIMENT_DIR}/seed_${SEED}/${model_type}/traces" \
   OUTPUT_DIR="${EXPERIMENT_DIR}/seed_${SEED}/${model_type}/cot" \
+  RUN_EVALUATION="${RUN_EVALUATION}" \
+  RUN_PROBES="${RUN_PROBES}" \
   SEED="${SEED}" \
   DEVICE="${DEVICE}" \
     "${PROJECT_DIR}/scripts/run_cot_experiment.sh" "${model_type}" "$@"
 done
 
-"${PYTHON_BIN}" "${PROJECT_DIR}/summarize_2x2.py" \
-  --experiment-dir "${EXPERIMENT_DIR}" \
-  --seed "${SEED}"
+if [[ "${RUN_EVALUATION}" -eq 1 ]]; then
+  "${PYTHON_BIN}" "${PROJECT_DIR}/summarize_2x2.py" \
+    --experiment-dir "${EXPERIMENT_DIR}" \
+    --seed "${SEED}"
+else
+  echo "training and trace generation completed"
+  echo "evaluation is deferred; run scripts/run_2x2_evaluation.sh when ready"
+fi

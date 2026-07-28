@@ -415,6 +415,33 @@ checkpointにはモデル種別、設定、重み、stage、epoch、step、seed�
 scripts/run_2x2_experiment.sh --epochs 10 --batch-size 32
 ```
 
+trace生成を短く試す場合は，生成条件を環境変数で指定できる．
+
+```bash
+MAX_GAMES=10 POSITIONS_PER_GAME=1 LINES=1 LINE_LENGTH=2 \
+  scripts/run_2x2_experiment.sh --epochs 1 --max-steps 10
+```
+
+`run_2x2_experiment.sh`は，既定では学習用・検証用traceの生成とCoT学習までを行い，
+時間のかかる評価用trace生成，推論評価，probe評価を実行しない．評価は学習完了後に
+別プロセスとして実行する．
+
+```bash
+scripts/run_2x2_evaluation.sh
+```
+
+1モデルだけを評価する場合は，次を使う．
+
+```bash
+scripts/run_cot_evaluation.sh vanilla
+```
+
+従来どおり一連の処理を連続して実行する場合は，環境変数で有効化できる．
+
+```bash
+RUN_EVALUATION=1 scripts/run_2x2_experiment.sh --epochs 10 --batch-size 32
+```
+
 trace生成では合法手mask、ルールによる補正、エンジン探索を使わない。cshogiは
 教師棋譜の再生と学習後の合法性評価だけに使う。CoT条件では自由生成の最終指手精度、
 trace合法率、候補内正解recall、answer-trace整合率を測り、answer-only/CoTの両方へ
