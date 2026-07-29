@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -13,6 +14,11 @@ PYTHON_BIN="${PYTHON_BIN:-${PROJECT_DIR}/.venv/bin/python}"
 VOCAB_PATH="${VOCAB_PATH:-${PROJECT_DIR}/data/vocab.json}"
 SEED="${SEED:-20260724}"
 DEVICE="${DEVICE:-auto}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+# metadataのtrain p95（固定prefix 99 + 221手）に対応する既定値。
+# GPUメモリに余裕がなければ256、coverageを優先する場合は352へ上書きする。
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-320}"
+PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
 
 case "${STAGE}" in
   pretrain)
@@ -47,6 +53,9 @@ COMMAND=(
   --output-dir "${OUTPUT_DIR}"
   --seed "${SEED}"
   --device "${DEVICE}"
+  --batch-size "${BATCH_SIZE}"
+  --max-seq-len "${MAX_SEQ_LEN}"
+  --progress-every "${PROGRESS_EVERY}"
   "${INIT_ARGUMENTS[@]}"
   "$@"
 )

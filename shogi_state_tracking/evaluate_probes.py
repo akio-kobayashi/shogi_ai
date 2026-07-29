@@ -6,6 +6,7 @@ import copy
 import json
 import math
 import random
+import time
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence, Tuple
 
@@ -13,6 +14,7 @@ import torch
 
 from create_dataset import all_usi_move_tokens, import_cshogi
 from data import (
+    FIXED_SEQUENCE_OVERHEAD,
     IGNORE_INDEX,
     RandomStartSequenceDataset,
     load_vocabulary,
@@ -73,7 +75,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--probe-epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="probe学習・評価のbatch size。GPUメモリに応じて調整する",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="特徴抽出・probe学習の進捗表示間隔。0なら詳細表示をしない",
+    )
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=20260724)
@@ -134,8 +147,16 @@ def fixed_dataset(
     min_suffix_moves: int,
     samples_per_game: int,
     seed: int,
+    max_seq_len: int | None = None,
 ):
     # RandomStartSequenceDatasetはepoch=0固定で、同じゲームから常に同じ開始点を返す。
+    max_suffix_moves = None
+    if max_seq_len is not None:
+        max_suffix_moves = max_seq_len - FIXED_SEQUENCE_OVERHEAD
+        if max_suffix_moves <= 0:
+            raise ValueError(
+                "checkpoint max_seq_len is too short for the fixed state prefix"
+            )
     return RandomStartSequenceDataset(
         path,
         vocabulary,
@@ -144,6 +165,7 @@ def fixed_dataset(
         samples_per_game=samples_per_game,
         seed=seed,
         randomize_each_epoch=False,
+        max_suffix_moves=max_suffix_moves,
     )
 
 
@@ -214,6 +236,8 @@ def extract_split(
     positions_per_game: int,
     include_initial: bool,
     device: torch.device,
+    progress_label: str = "split",
+    progress_every: int = 10,
 ):
     feature_chunks: Dict[str, List[torch.Tensor]] = {
         source: [] for source in sources
@@ -235,6 +259,13 @@ def extract_split(
     token_to_id = {token: index for index, token in id_to_token.items()}
     syntactic_moves = set(all_usi_move_tokens())
     cshogi = import_cshogi()
+    started_at = time.perf_counter()
+    print(
+        "feature_extract_start split={} examples={} sources={}".format(
+            progress_label, len(dataset), ",".join(sources)
+        ),
+        flush=True,
+    )
 
     with torch.inference_mode():
         for example_index in range(len(dataset)):
@@ -355,9 +386,32 @@ def extract_split(
             distances_all.extend(distances)
             scopes_all.extend([str(example["engine_scope"])] * len(distances))
             games_all.extend([str(example["game_id"])] * len(distances))
+            processed = example_index + 1
+            if progress_every > 0 and (
+                processed == 1 or processed % progress_every == 0
+            ):
+                elapsed = time.perf_counter() - started_at
+                print(
+                    "feature_extract_progress split={} examples={}/{} elapsed_sec={:.1f} examples_per_sec={:.3f}".format(
+                        progress_label,
+                        processed,
+                        len(dataset),
+                        elapsed,
+                        processed / max(elapsed, 1e-9),
+                    ),
+                    flush=True,
+                )
 
     if not target_chunks:
         raise ValueError("probe dataset produced no examples")
+    print(
+        "feature_extract_complete split={} examples={} elapsed_sec={:.1f}".format(
+            progress_label,
+            len(dataset),
+            time.perf_counter() - started_at,
+        ),
+        flush=True,
+    )
     return {
         "features": {
             source: torch.cat(chunks, dim=0)
@@ -442,6 +496,7 @@ def train_probe(
     best_epoch = 0
     stale_epochs = 0
     history = []
+    started_at = time.perf_counter()
 
     for epoch in range(1, args.probe_epochs + 1):
         probe.train()
@@ -464,6 +519,20 @@ def train_probe(
             device,
         )
         history.append({"epoch": epoch, "validation_loss": current_loss})
+        if args.progress_every > 0 and (
+            epoch == 1
+            or epoch % args.progress_every == 0
+            or epoch == args.probe_epochs
+        ):
+            print(
+                "probe_progress epoch={}/{} validation_loss={:.6f} elapsed_sec={:.1f}".format(
+                    epoch,
+                    args.probe_epochs,
+                    current_loss,
+                    time.perf_counter() - started_at,
+                ),
+                flush=True,
+            )
         if current_loss < best_loss - 1e-7:
             best_loss = current_loss
             best_epoch = epoch
@@ -571,6 +640,13 @@ def evaluate_source(
 
 def main() -> None:
     args = parse_args()
+    run_started_at = time.perf_counter()
+    print(
+        "run_start checkpoint={} device={} sources={} probe_epochs={}".format(
+            args.checkpoint, args.device, args.sources, args.probe_epochs
+        ),
+        flush=True,
+    )
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = resolve_device(args.device)
@@ -593,6 +669,7 @@ def main() -> None:
             args.min_suffix_moves,
             args.samples_per_game,
             args.seed,
+            config.max_seq_len,
         ),
         "validation": fixed_dataset(
             args.validation_jsonl,
@@ -601,6 +678,7 @@ def main() -> None:
             args.min_suffix_moves,
             args.samples_per_game,
             args.seed + 1,
+            config.max_seq_len,
         ),
         "evaluation": fixed_dataset(
             args.evaluation_jsonl,
@@ -609,10 +687,21 @@ def main() -> None:
             args.min_suffix_moves,
             args.samples_per_game,
             args.seed + 2,
+            config.max_seq_len,
         ),
     }
-    extracted = {
-        name: extract_split(
+    print(
+        "data_ready train_examples={} validation_examples={} evaluation_examples={} device={}".format(
+            len(datasets["train"]),
+            len(datasets["validation"]),
+            len(datasets["evaluation"]),
+            device,
+        ),
+        flush=True,
+    )
+    extracted = {}
+    for name, dataset in datasets.items():
+        extracted[name] = extract_split(
             model,
             model_type,
             dataset,
@@ -621,9 +710,9 @@ def main() -> None:
             args.positions_per_game,
             args.include_initial_state,
             device,
+            progress_label=name,
+            progress_every=args.progress_every,
         )
-        for name, dataset in datasets.items()
-    }
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -675,6 +764,15 @@ def main() -> None:
     }
 
     for source in sources:
+        print(
+            "probe_start source={} train_features={} validation_features={} evaluation_features={}".format(
+                source,
+                extracted["train"]["features"][source].shape[0],
+                extracted["validation"]["features"][source].shape[0],
+                extracted["evaluation"]["features"][source].shape[0],
+            ),
+            flush=True,
+        )
         probe, training = train_probe(
             extracted["train"]["features"][source],
             extracted["train"]["targets"],
@@ -698,6 +796,14 @@ def main() -> None:
         saved_probes[source] = {
             key: value.detach().cpu() for key, value in probe.state_dict().items()
         }
+        print(
+            "probe_complete source={} best_epoch={} evaluation_full_state_exact_match={:.6f}".format(
+                source,
+                training["best_epoch"],
+                evaluation_metrics["full_state_exact_match"],
+            ),
+            flush=True,
+        )
 
     with (output_dir / "probe_metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
@@ -712,7 +818,13 @@ def main() -> None:
         output_dir / "linear_probes.pt",
     )
     torch.save(prediction_payload, output_dir / "probe_predictions.pt")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(
+        "run_complete output_dir={} elapsed_sec={:.1f}".format(
+            output_dir, time.perf_counter() - run_started_at
+        ),
+        flush=True,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":

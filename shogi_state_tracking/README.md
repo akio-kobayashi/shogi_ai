@@ -1,5 +1,40 @@
 # 将棋状態追跡Transformer用データセット
 
+学生向けのColab実験は
+[`notebooks/shogi_state_tracking_colab.ipynb`](notebooks/shogi_state_tracking_colab.ipynb)から開始できる．
+実データがない場合はtoy棋譜を自動生成し，次手予測，線形probe，盤面SVG可視化までを
+小規模に実行する．
+
+ノートブックから再利用する処理は[`colab_utils.py`](colab_utils.py)にまとめている．
+`prepare_dataset`，`train_small_model`，`evaluate_next_move`，
+`run_probe_evaluation`，`render_probe_svg`を呼び出せば，Colab側でCLIの引数列を
+組み立てなくても同じ実験を実行できる．
+
+## 学習中の進捗とGPUメモリ
+
+`train_model.py`は開始時，データ読み込み後，指定間隔ごとの学習step，検証開始，
+checkpoint保存，終了時に進捗を標準出力へ出す．`scripts/run_training.sh`からは
+Pythonの出力を非バッファで実行する．
+
+ROCmの`HIPCachingAllocator`が出す`memory allocation failed with OOM`は，
+内部の解放・再試行後に処理が継続する警告の場合がある．`RuntimeError`や
+`torch.OutOfMemoryError`のtracebackと終了コードが出なければ，致命的なOOMとは限らない．
+ただし，割り当て余力が少ない状態なので，警告を正常とはみなさず，次のように新しい実行を
+小さくして確認する．既に起動しているプロセスのbatch sizeは途中では変わらない．
+
+```bash
+BATCH_SIZE=4 MAX_SEQ_LEN=320 PROGRESS_EVERY=1 \
+  scripts/run_training.sh pretrain vanilla
+```
+
+`PROGRESS_EVERY`はシェルから渡す追加引数として，例えば
+`scripts/run_training.sh pretrain vanilla --progress-every 1`のように指定できる．
+
+学習用のランダム開始系列は，開始局面の固定99トークン（`<BOS>`，局面96，
+`<MOVES>`，`<EOS>`）を除いた範囲で`--max-seq-len`までに切り詰める．したがって，
+極端に長い対局のsuffixがbatch全体を長くすることはない．`start_ply`は保持されるため，
+後段の局面進展別評価では元棋譜上の位置も利用できる．
+
 CSA棋譜から、Transformerデコーダの潜在状態追跡を調べるためのデータセットを作成する。
 モデルへ途中局面は与えず、各対局を次の系列として扱う。
 
@@ -153,6 +188,35 @@ python create_dataset.py build \
   --metadata-csv ../wsl2/metadata.csv \
   --output-dir data
 ```
+
+### 系列長の決定
+
+`metadata.csv`の最大対局長をそのまま`max_seq_len`にすると、少数の長い対局が
+causal attentionのメモリを支配する。先に対局長の分位点を調べ、学習用対局の
+95パーセンタイルを目安に系列長を決める。
+
+```bash
+python analyze_metadata_lengths.py \
+  --metadata-csv ../wsl2/metadata.csv
+```
+
+このスクリプトは`create_dataset.py split`と同じ既定条件（2022年1月以降、両者
+レート3000以上、80手以上、引き分けを除外）で、train／validation／evaluation
+eligibleごとの`total_moves`と、固定局面prefix 99トークンを含む候補系列長の
+coverageをJSONで出力する。`total_moves`はCSAの指し手数であり、千日手の有無は
+metadataだけでは判定できない。
+
+例えば、trainのp95が221手なら、
+
+```text
+99（固定prefix）+221（手数）=320トークン
+```
+
+となる。したがって現在の既定値`MAX_SEQ_LEN=320`は、trainの約95%を1つの
+windowに収める値として説明できる。残りの長い対局はrandom-start windowingで
+切り出す。validationやevaluationの完全対局を一つの系列に保持する必要はなく、
+同じwindow長で評価する。全splitのp95を一つの値で覆うなら352になるが、学習時の
+メモリを優先し、まずはtrain基準の320を採用する。
 
 最初は `--limit 10` を付けて、各splitの先頭10局でCSA変換を確認する。
 `--strict`を指定すると、CSAの欠落や不整合が1件でもあれば処理を停止する。

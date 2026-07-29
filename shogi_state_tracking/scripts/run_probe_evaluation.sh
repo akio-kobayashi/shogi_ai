@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -22,7 +23,7 @@ POSITIONS_PER_GAME="${POSITIONS_PER_GAME:-16}"
 SAMPLES_PER_GAME="${SAMPLES_PER_GAME:-1}"
 PROBE_EPOCHS="${PROBE_EPOCHS:-30}"
 PATIENCE="${PATIENCE:-5}"
-BATCH_SIZE="${BATCH_SIZE:-1024}"
+BATCH_SIZE="${BATCH_SIZE:-128}"
 
 UNTRAINED=0
 case "${MODE}" in

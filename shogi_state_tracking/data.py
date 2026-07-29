@@ -19,6 +19,9 @@ from preprocess import (
 
 
 IGNORE_INDEX = -100
+# <BOS> + 96 state tokens + <MOVES> + <EOS>。
+# move tokenに使える上限は、model max_seq_lenからこの値を引いたものになる。
+FIXED_SEQUENCE_OVERHEAD = 99
 
 
 def load_vocabulary(path: str) -> Dict[str, int]:
@@ -93,6 +96,7 @@ class RandomStartSequenceDataset(ShogiSequenceDataset):
 
     `set_epoch()`の値はmultiprocessing.Valueでworker間共有する。DistributedSamplerの
     `set_epoch()`と同じepochを設定すれば、再現可能でworker数にも依存しない。
+    `max_suffix_moves`を指定した場合は、長い対局でも開始局面以降を固定長windowにする。
     """
 
     def __init__(
@@ -104,6 +108,7 @@ class RandomStartSequenceDataset(ShogiSequenceDataset):
         seed: int = 20260724,
         samples_per_game: int = 1,
         randomize_each_epoch: bool = True,
+        max_suffix_moves: int | None = None,
     ):
         super().__init__(jsonl_path, token_to_id)
         if candidate_count <= 0:
@@ -115,6 +120,9 @@ class RandomStartSequenceDataset(ShogiSequenceDataset):
         self.seed = seed
         self.samples_per_game = samples_per_game
         self.randomize_each_epoch = randomize_each_epoch
+        if max_suffix_moves is not None and max_suffix_moves <= 0:
+            raise ValueError("max_suffix_moves must be positive when specified")
+        self.max_suffix_moves = max_suffix_moves
         self._epoch = multiprocessing.Value("q", 0)
 
         for record in self.records:
@@ -147,7 +155,11 @@ class RandomStartSequenceDataset(ShogiSequenceDataset):
             epoch=epoch,
             replica=replica,
         )
-        segment = materialize_segment(record, start_ply)
+        segment = materialize_segment(
+            record,
+            start_ply,
+            max_suffix_moves=self.max_suffix_moves,
+        )
         return self._encode_record(segment)
 
 

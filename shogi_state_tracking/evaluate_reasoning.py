@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import List, Sequence
 
@@ -27,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--max-examples", type=int, default=0)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="この例数ごとに進捗を表示する。0なら表示しない",
+    )
     parser.add_argument("--seed", type=int, default=20260724)
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
@@ -173,6 +180,13 @@ def gold_trace_prefix(record):
 
 def main() -> None:
     args = parse_args()
+    started_at = time.perf_counter()
+    print(
+        "run_start checkpoint={} trace={} device={} max_examples={}".format(
+            args.checkpoint, args.trace_jsonl, args.device, args.max_examples
+        ),
+        flush=True,
+    )
     torch.manual_seed(args.seed)
     device = resolve_device(args.device)
     vocabulary = load_vocabulary(args.vocab)
@@ -268,6 +282,23 @@ def main() -> None:
             counters["trace_moves"] += total
             counters["trace_legal_moves"] += legal
             counters["fully_legal_lines"] += fully_legal
+            if args.progress_every > 0 and (
+                counters["examples"] == 1
+                or counters["examples"] % args.progress_every == 0
+            ):
+                elapsed = time.perf_counter() - started_at
+                print(
+                    "progress examples={} trace_lines={} answer_exact_rate={:.4f} "
+                    "answer_legal_rate={:.4f} elapsed_sec={:.1f} examples_per_sec={:.3f}".format(
+                        counters["examples"],
+                        counters["trace_lines"],
+                        counters["answer_exact"] / counters["examples"],
+                        counters["answer_legal"] / counters["examples"],
+                        elapsed,
+                        counters["examples"] / max(elapsed, 1e-9),
+                    ),
+                    flush=True,
+                )
             details.write(
                 json.dumps(
                     {
@@ -322,7 +353,13 @@ def main() -> None:
     ) as handle:
         json.dump(metrics, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+    print(
+        "run_complete examples={} elapsed_sec={:.1f}".format(
+            counters["examples"], time.perf_counter() - started_at
+        ),
+        flush=True,
+    )
+    print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":

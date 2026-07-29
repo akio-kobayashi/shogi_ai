@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import random
+import time
 from functools import partial
 from pathlib import Path
 from typing import Mapping
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from cot_data import ReasoningTraceDataset, collate_reasoning_traces
 from data import (
+    FIXED_SEQUENCE_OVERHEAD,
     RandomStartSequenceDataset,
     causal_lm_loss,
     collate_sequences,
@@ -40,7 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-jsonl", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--init-checkpoint")
-    parser.add_argument("--max-seq-len", type=int, default=640)
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=320,
+        help="固定局面99トークンを含む系列長。長い系列はwindowingする",
+    )
     parser.add_argument("--d-model", type=int, default=256)
     parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--n-heads", type=int, default=8)
@@ -55,12 +62,23 @@ def parse_args() -> argparse.Namespace:
         help="VanillaのFFN幅を同じ設定のT²MLRとparameter-matchedにする",
     )
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="GPUメモリに応じて調整する。語彙が大きいため小さめの値を既定にする",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=0)
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="この学習stepごとに進捗を表示する。0ならstep表示をしない",
+    )
     parser.add_argument("--candidate-count", type=int, default=40)
     parser.add_argument("--min-suffix-moves", type=int, default=40)
     parser.add_argument("--answer-weight", type=float, default=1.0)
@@ -152,6 +170,13 @@ def load_initial_model(
 
 
 def build_datasets(args: argparse.Namespace, vocabulary):
+    max_suffix_moves = args.max_seq_len - FIXED_SEQUENCE_OVERHEAD
+    if max_suffix_moves <= 0:
+        raise ValueError(
+            "max-seq-len must be greater than {} for the fixed state prefix".format(
+                FIXED_SEQUENCE_OVERHEAD
+            )
+        )
     if args.stage == "cot":
         train = ReasoningTraceDataset(
             args.train_jsonl, vocabulary, answer_weight=args.answer_weight
@@ -172,6 +197,7 @@ def build_datasets(args: argparse.Namespace, vocabulary):
             min_suffix_moves=args.min_suffix_moves,
             seed=args.seed,
             randomize_each_epoch=True,
+            max_suffix_moves=max_suffix_moves,
         )
         validation = RandomStartSequenceDataset(
             args.validation_jsonl,
@@ -180,6 +206,7 @@ def build_datasets(args: argparse.Namespace, vocabulary):
             min_suffix_moves=args.min_suffix_moves,
             seed=args.seed + 1,
             randomize_each_epoch=False,
+            max_suffix_moves=max_suffix_moves,
         )
         collate = partial(
             collate_sequences,
@@ -208,13 +235,29 @@ def batch_loss(model, batch, stage: str, device: torch.device):
     return causal_lm_loss(output.logits, labels)
 
 
+def is_out_of_memory_error(error: RuntimeError) -> bool:
+    message = str(error).lower()
+    return "out of memory" in message or "hip out of memory" in message
+
+
 def evaluate(model, loader, stage: str, device: torch.device) -> float:
     model.eval()
     loss_sum = 0.0
     batches = 0
     with torch.inference_mode():
-        for batch in loader:
-            loss_sum += float(batch_loss(model, batch, stage, device))
+        for batch_index, batch in enumerate(loader, 1):
+            try:
+                loss_sum += float(batch_loss(model, batch, stage, device))
+            except RuntimeError as exc:
+                if not is_out_of_memory_error(exc):
+                    raise
+                sequence_length = int(batch["input_ids"].shape[1])
+                raise RuntimeError(
+                    "GPU OOM during validation at batch {} (seq_len={}); "
+                    "reduce --batch-size or --max-seq-len".format(
+                        batch_index, sequence_length
+                    )
+                ) from exc
             batches += 1
     if not batches:
         raise ValueError("validation loader is empty")
@@ -238,6 +281,18 @@ def save_checkpoint(path: Path, model, args: argparse.Namespace, epoch: int, ste
 
 def main() -> None:
     args = parse_args()
+    run_started_at = time.perf_counter()
+    print(
+        "run_start stage={} model_type={} device={} epochs={} batch_size={} max_steps={}".format(
+            args.stage,
+            args.model_type,
+            args.device,
+            args.epochs,
+            args.batch_size,
+            args.max_steps,
+        ),
+        flush=True,
+    )
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = resolve_device(args.device)
@@ -245,7 +300,19 @@ def main() -> None:
     model = load_initial_model(args, len(vocabulary), device)
     # checkpointの設定を優先した場合、collateの上限も実モデルへ合わせる。
     args.max_seq_len = model.config.max_seq_len
+    segment_move_limit = "n/a"
+    train_max_game_moves = "n/a"
+    validation_max_game_moves = "n/a"
+    if args.stage == "pretrain":
+        segment_move_limit = args.max_seq_len - FIXED_SEQUENCE_OVERHEAD
     train_dataset, validation_dataset, collate = build_datasets(args, vocabulary)
+    if args.stage == "pretrain":
+        train_max_game_moves = max(
+            len(record["move_tokens"]) for record in train_dataset.records
+        )
+        validation_max_game_moves = max(
+            len(record["move_tokens"]) for record in validation_dataset.records
+        )
     generator = torch.Generator().manual_seed(args.seed)
     train_loader = DataLoader(
         train_dataset,
@@ -262,6 +329,21 @@ def main() -> None:
         num_workers=args.num_workers,
         collate_fn=collate,
     )
+    print(
+        "data_ready train_examples={} validation_examples={} train_batches={} "
+        "validation_batches={} seq_len_limit={} train_max_game_moves={} "
+        "validation_max_game_moves={} segment_move_limit={}".format(
+            len(train_dataset),
+            len(validation_dataset),
+            len(train_loader),
+            len(validation_loader),
+            args.max_seq_len,
+            train_max_game_moves,
+            validation_max_game_moves,
+            segment_move_limit,
+        ),
+        flush=True,
+    )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -274,6 +356,7 @@ def main() -> None:
     global_step = 0
     history = []
     stop = False
+    training_started_at = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
         if hasattr(train_dataset, "set_epoch"):
@@ -281,22 +364,83 @@ def main() -> None:
         model.train()
         training_sum = 0.0
         training_batches = 0
-        for batch in train_loader:
-            optimizer.zero_grad(set_to_none=True)
-            loss = batch_loss(model, batch, args.stage, device)
-            loss.backward()
-            if args.gradient_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.gradient_clip
+        epoch_started_at = time.perf_counter()
+        for epoch_step, batch in enumerate(train_loader, 1):
+            batch_seq_len = int(batch["input_ids"].shape[1])
+            batch_active_tokens = int(batch["attention_mask"].sum())
+            if batch_seq_len >= max(1, int(args.max_seq_len * 0.9)):
+                print(
+                    "batch_length_warning epoch={} step={} seq_len={} limit={} active_tokens={}".format(
+                        epoch,
+                        global_step + 1,
+                        batch_seq_len,
+                        args.max_seq_len,
+                        batch_active_tokens,
+                    ),
+                    flush=True,
                 )
-            optimizer.step()
+            try:
+                optimizer.zero_grad(set_to_none=True)
+                loss = batch_loss(model, batch, args.stage, device)
+                loss.backward()
+                if args.gradient_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.gradient_clip
+                    )
+                optimizer.step()
+            except RuntimeError as exc:
+                if not is_out_of_memory_error(exc):
+                    raise
+                raise RuntimeError(
+                    "GPU OOM during training at epoch {} step {} "
+                    "(seq_len={}, batch_size={}); reduce --batch-size or "
+                    "--max-seq-len".format(
+                        epoch,
+                        global_step + 1,
+                        batch_seq_len,
+                        args.batch_size,
+                    )
+                ) from exc
             global_step += 1
             training_sum += float(loss.detach())
             training_batches += 1
+            if args.progress_every > 0 and (
+                global_step == 1 or global_step % args.progress_every == 0
+            ):
+                elapsed = time.perf_counter() - training_started_at
+                steps_per_sec = global_step / max(elapsed, 1e-9)
+                remaining_steps = max(
+                    len(train_loader) * args.epochs - global_step, 0
+                )
+                print(
+                    json.dumps(
+                        {
+                            "progress": "train",
+                            "epoch": epoch,
+                            "epoch_step": epoch_step,
+                            "epoch_steps": len(train_loader),
+                            "step": global_step,
+                            "loss": float(loss.detach()),
+                            "batch_seq_len": batch_seq_len,
+                            "batch_active_tokens": batch_active_tokens,
+                            "elapsed_sec": round(elapsed, 1),
+                            "steps_per_sec": round(steps_per_sec, 3),
+                            "remaining_steps_estimate": remaining_steps,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
             if args.max_steps > 0 and global_step >= args.max_steps:
                 stop = True
                 break
 
+        print(
+            "validation_start epoch={} step={} train_elapsed_sec={:.1f}".format(
+                epoch, global_step, time.perf_counter() - epoch_started_at
+            ),
+            flush=True,
+        )
         validation_loss = evaluate(
             model, validation_loader, args.stage, device
         )
@@ -309,11 +453,18 @@ def main() -> None:
             "validation_perplexity": math.exp(min(validation_loss, 20.0)),
         }
         history.append(row)
-        print(json.dumps(row, ensure_ascii=False))
+        row["elapsed_sec"] = round(time.perf_counter() - run_started_at, 1)
+        print(json.dumps(row, ensure_ascii=False), flush=True)
         save_checkpoint(output_dir / "last.pt", model, args, epoch, global_step)
         if validation_loss < best_loss:
             best_loss = validation_loss
             save_checkpoint(output_dir / "best.pt", model, args, epoch, global_step)
+            print(
+                "checkpoint_best epoch={} step={} validation_loss={:.6f}".format(
+                    epoch, global_step, validation_loss
+                ),
+                flush=True,
+            )
         if stop:
             break
 
@@ -332,6 +483,15 @@ def main() -> None:
             indent=2,
         )
         handle.write("\n")
+    print(
+        "run_complete stage={} model_type={} steps={} elapsed_sec={:.1f}".format(
+            args.stage,
+            args.model_type,
+            global_step,
+            time.perf_counter() - run_started_at,
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

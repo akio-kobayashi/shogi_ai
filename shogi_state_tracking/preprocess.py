@@ -5,7 +5,7 @@ cshogiで再生する。学習workerからも、固定評価データ作成か�
 """
 
 import hashlib
-from typing import Dict, List, Mapping
+from typing import Dict, List, Mapping, Optional
 
 from create_dataset import encode_initial_state, import_cshogi
 
@@ -62,12 +62,20 @@ def choose_start_ply(
 def materialize_segment(
     record: Mapping[str, object],
     start_ply: int,
+    max_suffix_moves: Optional[int] = None,
 ) -> Dict[str, object]:
-    """JSONLの1対局を、指定開始局面からの1系列へ変換する。"""
+    """JSONLの1対局を、指定開始局面からの1系列へ変換する。
+
+    ``max_suffix_moves``を指定すると、開始局面以降をその手数で切る。
+    Transformerの系列長を一定範囲へ収めるためのwindowingであり、局面の再生や
+    指手の合法性検証は切る前に行う開始prefixに対して従来どおり実施する。
+    """
     cshogi = import_cshogi()
     moves = list(record["move_tokens"])
     if not 0 <= start_ply <= len(moves):
         raise ValueError("start_ply is outside the game")
+    if max_suffix_moves is not None and max_suffix_moves <= 0:
+        raise ValueError("max_suffix_moves must be positive when specified")
 
     board = cshogi.Board(str(record["initial_sfen"]))
     for ply, move_usi in enumerate(moves[:start_ply], 1):
@@ -89,5 +97,10 @@ def materialize_segment(
         "start_ply": start_ply,
         "start_sfen": board.sfen(),
         "initial_state_tokens": encode_initial_state(board, cshogi),
-        "move_tokens": moves[start_ply:],
+        "move_tokens": moves[
+            start_ply:
+            None
+            if max_suffix_moves is None
+            else start_ply + max_suffix_moves
+        ],
     }
