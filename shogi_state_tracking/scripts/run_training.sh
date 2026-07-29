@@ -19,6 +19,9 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 # GPUメモリに余裕がなければ256、coverageを優先する場合は352へ上書きする。
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-320}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
+EPOCHS="${EPOCHS:-50}"
+EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-5}"
+EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0.0001}"
 
 case "${STAGE}" in
   pretrain)
@@ -56,6 +59,9 @@ COMMAND=(
   --batch-size "${BATCH_SIZE}"
   --max-seq-len "${MAX_SEQ_LEN}"
   --progress-every "${PROGRESS_EVERY}"
+  --epochs "${EPOCHS}"
+  --early-stopping-patience "${EARLY_STOPPING_PATIENCE}"
+  --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA}"
   "${INIT_ARGUMENTS[@]}"
   "$@"
 )

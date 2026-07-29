@@ -61,7 +61,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="VanillaのFFN幅を同じ設定のT²MLRとparameter-matchedにする",
     )
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=50,
+        help="最大epoch数。early stoppingが先に発火すれば途中で終了する",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=5,
+        help="validation lossが改善しないepoch数。0なら無効",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-4,
+        help="改善とみなすvalidation lossの最小差",
+    )
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -281,15 +298,24 @@ def save_checkpoint(path: Path, model, args: argparse.Namespace, epoch: int, ste
 
 def main() -> None:
     args = parse_args()
+    if args.epochs <= 0:
+        raise ValueError("--epochs must be positive")
+    if args.early_stopping_patience < 0:
+        raise ValueError("--early-stopping-patience must be non-negative")
+    if args.early_stopping_min_delta < 0:
+        raise ValueError("--early-stopping-min-delta must be non-negative")
     run_started_at = time.perf_counter()
     print(
-        "run_start stage={} model_type={} device={} epochs={} batch_size={} max_steps={}".format(
+        "run_start stage={} model_type={} device={} epochs={} batch_size={} "
+        "max_steps={} early_stopping_patience={} early_stopping_min_delta={}".format(
             args.stage,
             args.model_type,
             args.device,
             args.epochs,
             args.batch_size,
             args.max_steps,
+            args.early_stopping_patience,
+            args.early_stopping_min_delta,
         ),
         flush=True,
     )
@@ -353,9 +379,11 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     best_loss = float("inf")
+    epochs_without_improvement = 0
     global_step = 0
     history = []
     stop = False
+    stop_reason = "max_epochs"
     training_started_at = time.perf_counter()
 
     for epoch in range(1, args.epochs + 1):
@@ -452,12 +480,18 @@ def main() -> None:
             "validation_loss": validation_loss,
             "validation_perplexity": math.exp(min(validation_loss, 20.0)),
         }
+        improved = validation_loss < best_loss - args.early_stopping_min_delta
+        row["validation_improved"] = improved
+        row["early_stopping_wait"] = (
+            0 if improved else epochs_without_improvement + 1
+        )
         history.append(row)
         row["elapsed_sec"] = round(time.perf_counter() - run_started_at, 1)
         print(json.dumps(row, ensure_ascii=False), flush=True)
         save_checkpoint(output_dir / "last.pt", model, args, epoch, global_step)
-        if validation_loss < best_loss:
+        if improved:
             best_loss = validation_loss
+            epochs_without_improvement = 0
             save_checkpoint(output_dir / "best.pt", model, args, epoch, global_step)
             print(
                 "checkpoint_best epoch={} step={} validation_loss={:.6f}".format(
@@ -465,7 +499,39 @@ def main() -> None:
                 ),
                 flush=True,
             )
+        else:
+            epochs_without_improvement += 1
+            print(
+                "early_stopping_wait epoch={} step={} validation_loss={:.6f} "
+                "best_validation_loss={:.6f} wait={} patience={}".format(
+                    epoch,
+                    global_step,
+                    validation_loss,
+                    best_loss,
+                    epochs_without_improvement,
+                    args.early_stopping_patience,
+                ),
+                flush=True,
+            )
+            if (
+                args.early_stopping_patience > 0
+                and epochs_without_improvement >= args.early_stopping_patience
+            ):
+                stop = True
+                stop_reason = "early_stopping"
+                print(
+                    "early_stopping_stop epoch={} step={} "
+                    "best_validation_loss={:.6f} patience={}".format(
+                        epoch,
+                        global_step,
+                        best_loss,
+                        args.early_stopping_patience,
+                    ),
+                    flush=True,
+                )
         if stop:
+            if stop_reason == "max_epochs" and args.max_steps > 0:
+                stop_reason = "max_steps"
             break
 
     with (output_dir / "training_history.json").open(
@@ -476,6 +542,11 @@ def main() -> None:
                 "stage": args.stage,
                 "model_type": args.model_type,
                 "best_validation_loss": best_loss,
+                "epochs_requested": args.epochs,
+                "epochs_completed": len(history),
+                "early_stopping_patience": args.early_stopping_patience,
+                "early_stopping_min_delta": args.early_stopping_min_delta,
+                "stop_reason": stop_reason,
                 "history": history,
             },
             handle,

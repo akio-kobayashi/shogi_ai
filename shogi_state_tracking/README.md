@@ -469,6 +469,15 @@ scripts/run_training.sh pretrain t2mlr
 
 checkpointにはモデル種別、設定、重み、stage、epoch、step、seedを保存する。
 `best.pt`はvalidation loss最小、`last.pt`は最終epochの状態である。
+学習の既定値は最大50 epoch，validation lossが5 epoch連続で改善しなければ停止する
+early stoppingである。改善判定の最小差は`1e-4`とする。`training_history.json`には
+完了epoch数と`stop_reason`も保存される。確認用に短く実行する場合は，例えば次のように
+上書きできる。
+
+```bash
+scripts/run_training.sh pretrain vanilla \
+  --epochs 10 --early-stopping-patience 3
+```
 
 ## Synthetic reasoning trace
 
