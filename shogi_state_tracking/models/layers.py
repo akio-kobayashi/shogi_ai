@@ -63,6 +63,42 @@ class CausalSelfAttention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
         return self.resid_dropout(self.out_proj(output))
 
+    def forward_with_cache(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """full causal forwardと同時にprefix用K/Vを返す。
+
+        trace生成のVanilla prefill専用。通常のforward_stepをtokenごとに
+        呼ぶより速く、K/V projectionを後から再計算する必要もない。
+        """
+        batch, seq_len, _ = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = self._split_heads(q)
+        k = self._split_heads(k)
+        v = self._split_heads(v)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal = torch.ones(
+            seq_len, seq_len, dtype=torch.bool, device=x.device
+        ).triu(diagonal=1)
+        scores = scores.masked_fill(causal.view(1, 1, seq_len, seq_len), float("-inf"))
+        if attention_mask is not None:
+            if attention_mask.shape != (batch, seq_len):
+                raise ValueError("attention_mask must have shape [batch, seq_len]")
+            invalid_keys = ~attention_mask.to(dtype=torch.bool)
+            scores = scores.masked_fill(
+                invalid_keys[:, None, None, :], float("-inf")
+            )
+
+        weights = torch.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
+        weights = self.attn_dropout(weights)
+        output = torch.matmul(weights, v)
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
+        output = self.resid_dropout(self.out_proj(output))
+        return output, (k, v)
+
     def forward_step(
         self,
         x: torch.Tensor,
@@ -124,6 +160,18 @@ class DecoderBlock(nn.Module):
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         attention, key_value = self.attn.forward_step(
             self.attn_norm(x), past_key_value
+        )
+        x = x + attention
+        return x + self.ffn(self.ffn_norm(x)), key_value
+
+    def forward_with_cache(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Vanilla prefill用。block出力とattention K/Vを同時に返す。"""
+        attention, key_value = self.attn.forward_with_cache(
+            self.attn_norm(x), attention_mask
         )
         x = x + attention
         return x + self.ffn(self.ffn_norm(x)), key_value

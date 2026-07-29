@@ -422,9 +422,26 @@ MAX_GAMES=10 POSITIONS_PER_GAME=1 LINES=1 LINE_LENGTH=2 \
   scripts/run_2x2_experiment.sh --epochs 1 --max-steps 10
 ```
 
+同一局面からの複数読み筋は既定でまとめて生成する．GPUメモリを抑える場合は
+`LINE_BATCH_SIZE`で分割幅を指定できる．
+
+```bash
+LINE_BATCH_SIZE=1 scripts/run_cot_experiment.sh vanilla --epochs 1 --max-steps 10
+```
+
 `run_2x2_experiment.sh`は，既定では学習用・検証用traceの生成とCoT学習までを行い，
 時間のかかる評価用trace生成，推論評価，probe評価を実行しない．評価は学習完了後に
 別プロセスとして実行する．
+
+実行ログは各traceの隣の`.log`と，実験全体の`run.log`に保存される．ログレベルと保存先は
+環境変数で変更できる．
+
+```bash
+LOG_LEVEL=DEBUG LOG_FILE=results/debug.log scripts/run_2x2_experiment.sh
+```
+
+ログには設定値，モデル構成，対局ごとの処理時間，decision位置ごとのtrace数，累積速度，
+最終summaryが記録される．
 
 ```bash
 scripts/run_2x2_evaluation.sh

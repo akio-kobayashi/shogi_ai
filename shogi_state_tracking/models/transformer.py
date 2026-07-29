@@ -82,6 +82,7 @@ class VanillaTransformer(nn.Module):
         past_key_values: Optional[Sequence[Optional[KeyValue]]] = None,
         recurrent_state: Optional[torch.Tensor] = None,
         recurrent_active: Optional[torch.Tensor] = None,
+        return_logits: bool = True,
     ):
         del recurrent_state, recurrent_active
         if input_ids.shape[1] != 1:
@@ -95,7 +96,8 @@ class VanillaTransformer(nn.Module):
             x, key_value = layer.forward_step(x, past)
             next_key_values.append(key_value)
             layer_states.append(x)
-        logits = self.lm_head(self.final_norm(x))
+        # traceのprefix再生では指定位置以外のvocab projectionを省略できる。
+        logits = self.lm_head(self.final_norm(x)) if return_logits else None
         return logits, tuple(next_key_values), None, tuple(layer_states), None
 
     def forward_exact(

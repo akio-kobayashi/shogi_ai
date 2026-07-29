@@ -203,6 +203,7 @@ class T2MLRTransformer(VanillaTransformer):
         past_key_values: Optional[Sequence[Optional[KeyValue]]] = None,
         recurrent_state: Optional[torch.Tensor] = None,
         recurrent_active: Optional[torch.Tensor] = None,
+        return_logits: bool = True,
     ):
         """公式`simple_recurrent_forward()`に対応する厳密な1-token経路。"""
         if input_ids.shape[1] != 1:
@@ -245,7 +246,8 @@ class T2MLRTransformer(VanillaTransformer):
         else:
             next_recurrent = seed_state
 
-        logits = self.lm_head(self.final_norm(x))
+        # traceのprefix再生では指定位置以外のvocab projectionを省略できる。
+        logits = self.lm_head(self.final_norm(x)) if return_logits else None
         return (
             logits,
             tuple(next_key_values),
