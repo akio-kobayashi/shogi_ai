@@ -23,9 +23,37 @@ ROCmの`HIPCachingAllocator`が出す`memory allocation failed with OOM`は，
 小さくして確認する．既に起動しているプロセスのbatch sizeは途中では変わらない．
 
 ```bash
-BATCH_SIZE=4 MAX_SEQ_LEN=320 PROGRESS_EVERY=1 \
+BATCH_SIZE=4 MAX_SEQ_LEN=320 AMP=auto PROGRESS_EVERY=1 \
   scripts/run_training.sh pretrain vanilla
 ```
+
+small/base/largeを固定設定で比較する場合は次を使う．max_seq_lenは512固定で，
+`MAX_SEQ_LEN=512`下でサイズ比較を一括実行できる。
+
+```bash
+scripts/compare_transformer_sizes_maxseq512.sh
+```
+
+プローブ付き＋集計まで一括で行う場合は次を使う。
+
+```bash
+scripts/run_transformer_size_compare_512.sh
+```
+
+学習後に全サイズのprobeを同時に実行する場合は次を使う．
+
+```bash
+scripts/compare_transformer_sizes_maxseq512_with_probes.sh
+```
+
+`RUN_TRAIN=0`で既存checkpointを使ったprobe再実行，`RUN_PROBES=0`で学習のみで
+中断する設定もある．
+
+`AMP=auto`はCUDA／ROCmで自動混合精度を有効にする。BF16対応GPUではBF16を使い，
+対応していない場合はFP16と勾配スケーラを使う。無効化する場合は`AMP=off`とする。
+ROCmでもPyTorch上のデバイス名は通常`cuda`であり，この設定で利用できる。ただし，
+`torch.cuda.is_available()`や`torch.cuda.is_bf16_supported()`がランタイム異常で中断する
+環境では，AMP以前にROCm／PyTorchの組合せを修正する必要がある。
 
 `PROGRESS_EVERY`はシェルから渡す追加引数として，例えば
 `scripts/run_training.sh pretrain vanilla --progress-every 1`のように指定できる．

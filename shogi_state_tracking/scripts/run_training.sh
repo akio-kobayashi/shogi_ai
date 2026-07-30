@@ -15,6 +15,8 @@ VOCAB_PATH="${VOCAB_PATH:-${PROJECT_DIR}/data/vocab.json}"
 SEED="${SEED:-20260724}"
 DEVICE="${DEVICE:-auto}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
+# CUDA/ROCmではautoでAMPを有効化する。無効化はAMP=off。
+AMP="${AMP:-auto}"
 # metadataのtrain p95（固定prefix 99 + 221手）に対応する既定値。
 # GPUメモリに余裕がなければ256、coverageを優先する場合は352へ上書きする。
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-320}"
@@ -56,6 +58,7 @@ COMMAND=(
   --output-dir "${OUTPUT_DIR}"
   --seed "${SEED}"
   --device "${DEVICE}"
+  --amp "${AMP}"
   --batch-size "${BATCH_SIZE}"
   --max-seq-len "${MAX_SEQ_LEN}"
   --progress-every "${PROGRESS_EVERY}"

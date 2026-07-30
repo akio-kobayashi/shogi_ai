@@ -7,7 +7,9 @@ class ModelConfig:
     """VanillaとT²MLRで共有するbackbone設定。"""
 
     vocab_size: int
-    max_seq_len: int = 640
+    # 学習スクリプトの既定値と統一する。
+    # 固定局面prefix 99トークンを含み、指手系列は最大221手。
+    max_seq_len: int = 320
     d_model: int = 256
     n_layers: int = 8
     n_heads: int = 8

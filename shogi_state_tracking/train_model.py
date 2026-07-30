@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 from typing import Mapping
@@ -88,6 +89,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--amp",
+        choices=("auto", "off", "fp16", "bf16"),
+        default="auto",
+        help=(
+            "自動混合精度。autoはCUDA/ROCmで有効化し、BF16が使えなければFP16を使う。"
+            "CPU/MPSでは無効"
+        ),
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument(
@@ -112,6 +122,65 @@ def resolve_device(value: str) -> torch.device:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _bf16_supported(device: torch.device) -> bool:
+    """BF16対応を安全に確認する。
+
+    ROCm版PyTorchでもGPUは ``cuda`` デバイスとして公開される。
+    一方、古いPyTorchやGPUでは確認APIがない／例外を投げる場合があるため、
+    AMPの自動判定で実行を中断しない。
+    """
+    if device.type != "cuda":
+        return False
+    checker = getattr(torch.cuda, "is_bf16_supported", None)
+    if checker is None:
+        return False
+    try:
+        return bool(checker())
+    except (RuntimeError, AssertionError):
+        return False
+
+
+def resolve_amp(
+    value: str, device: torch.device
+) -> tuple[torch.dtype | None, object | None, str]:
+    """AMPのdtypeとGradScalerを解決する。
+
+    ROCmはCUDAと同じ ``torch.cuda``／``device_type="cuda"`` APIを使う。
+    BF16は通常scaler不要、FP16は勾配アンダーフロー対策にscalerを使う。
+    """
+    if value == "off" or device.type != "cuda":
+        return None, None, "off"
+    if value == "auto":
+        if device.type == "cuda":
+            dtype = torch.bfloat16 if _bf16_supported(device) else torch.float16
+    elif value == "bf16":
+        dtype = torch.bfloat16
+        if device.type == "cuda" and not _bf16_supported(device):
+            raise RuntimeError(
+                "--amp bf16 was requested, but this CUDA/ROCm device does not "
+                "report BF16 support; use --amp fp16 or --amp off"
+            )
+    else:
+        if device.type != "cuda":
+            raise ValueError("--amp fp16 is supported only on CUDA/ROCm devices")
+        dtype = torch.float16
+
+    if dtype != torch.float16:
+        return dtype, None, str(dtype).replace("torch.", "")
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=True)
+    except (AttributeError, TypeError):
+        # PyTorch旧版との互換性。ROCmでもtorch.cuda.ampを使用する。
+        scaler = torch.cuda.amp.GradScaler(enabled=True)
+    return dtype, scaler, "float16"
+
+
+def amp_context(device: torch.device, dtype: torch.dtype | None):
+    if dtype is None:
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=dtype)
 
 
 def config_from_args(args: argparse.Namespace, vocab_size: int):
@@ -257,14 +326,21 @@ def is_out_of_memory_error(error: RuntimeError) -> bool:
     return "out of memory" in message or "hip out of memory" in message
 
 
-def evaluate(model, loader, stage: str, device: torch.device) -> float:
+def evaluate(
+    model,
+    loader,
+    stage: str,
+    device: torch.device,
+    amp_dtype: torch.dtype | None,
+) -> float:
     model.eval()
     loss_sum = 0.0
     batches = 0
     with torch.inference_mode():
         for batch_index, batch in enumerate(loader, 1):
             try:
-                loss_sum += float(batch_loss(model, batch, stage, device))
+                with amp_context(device, amp_dtype):
+                    loss_sum += float(batch_loss(model, batch, stage, device))
             except RuntimeError as exc:
                 if not is_out_of_memory_error(exc):
                     raise
@@ -322,6 +398,18 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = resolve_device(args.device)
+    amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)
+    print(
+        "runtime device={} amp={} scaler={} torch={} cuda={} hip={}".format(
+            device,
+            amp_name,
+            scaler is not None,
+            torch.__version__,
+            getattr(torch.version, "cuda", None),
+            getattr(torch.version, "hip", None),
+        ),
+        flush=True,
+    )
     vocabulary = load_vocabulary(args.vocab)
     model = load_initial_model(args, len(vocabulary), device)
     # checkpointの設定を優先した場合、collateの上限も実モデルへ合わせる。
@@ -409,13 +497,22 @@ def main() -> None:
                 )
             try:
                 optimizer.zero_grad(set_to_none=True)
-                loss = batch_loss(model, batch, args.stage, device)
-                loss.backward()
+                with amp_context(device, amp_dtype):
+                    loss = batch_loss(model, batch, args.stage, device)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss.backward()
                 if args.gradient_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), args.gradient_clip
                     )
-                optimizer.step()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
             except RuntimeError as exc:
                 if not is_out_of_memory_error(exc):
                     raise
@@ -470,7 +567,7 @@ def main() -> None:
             flush=True,
         )
         validation_loss = evaluate(
-            model, validation_loader, args.stage, device
+            model, validation_loader, args.stage, device, amp_dtype
         )
         training_loss = training_sum / max(training_batches, 1)
         row = {
@@ -541,6 +638,12 @@ def main() -> None:
             {
                 "stage": args.stage,
                 "model_type": args.model_type,
+                "device": str(device),
+                "amp": amp_name,
+                "amp_scaler": scaler is not None,
+                "torch_version": torch.__version__,
+                "torch_cuda_version": getattr(torch.version, "cuda", None),
+                "torch_hip_version": getattr(torch.version, "hip", None),
                 "best_validation_loss": best_loss,
                 "epochs_requested": args.epochs,
                 "epochs_completed": len(history),
