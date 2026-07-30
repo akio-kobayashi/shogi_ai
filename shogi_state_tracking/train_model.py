@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""通常棋譜の次手予測とCoT-like SFTを同じdecoderで学習する。"""
+"""通常棋譜の指手予測とCoT-like SFTを同じdecoderで学習する。"""
 
 import argparse
 import json
@@ -32,7 +32,7 @@ from models import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="将棋decoderの次手予測pretrainingまたはCoT-like SFT",
+        description="将棋decoderの指手予測pretrainingまたはCoT-like SFT",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--stage", choices=("pretrain", "cot"), required=True)

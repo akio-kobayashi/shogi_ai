@@ -249,7 +249,7 @@ def aggregate_svg(
             (correct & occupied).sum(dim=0).float() / counts.clamp_min(1),
             torch.zeros(81),
         )
-        label = "occupied-square accuracy"
+        label = "occupied-square piece accuracy"
     else:
         values = correct.float().mean(dim=0)
         label = "all-square accuracy"

@@ -34,7 +34,9 @@ MANIFEST_FIELDS = [
     "game_id",
     "game_date",
     "split",
+    "player_scope",
     "engine_scope",
+    "position_scope",
     "file_path",
     "kif_index",
     "black_player",
@@ -97,6 +99,24 @@ def extract_game_date(row: Mapping[str, str]) -> dt.date:
 def make_game_id(file_path: str, kif_index: int) -> str:
     source_key = "{}#{}".format(file_path, kif_index)
     return hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:20]
+
+
+def normalize_position_sfen(sfen: str) -> str:
+    """盤面・持ち駒・手番だけを残した局面の正規化表現を返す。
+
+    SFEN第4フィールドの手数は局面の内容ではないため除外する。千日手履歴など、
+    SFENに表現されない履歴依存情報は本実験の状態追跡対象に含めない。
+    """
+    fields = str(sfen).split()
+    if len(fields) < 3:
+        raise ValueError("不正なSFENです: {}".format(sfen))
+    return " ".join(fields[:3])
+
+
+def make_position_hash(sfen: str) -> str:
+    """正規化局面SFENのSHA-256ハッシュを返す。"""
+    normalized = normalize_position_sfen(sfen)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def read_metadata(path: Path) -> List[Dict[str, str]]:
@@ -194,25 +214,30 @@ def assign_splits(
         row["split"] = split
         splits[split].append(row)
 
-    train_engines = {
-        engine
+    train_players = {
+        player
         for row in splits["train"]
-        for engine in (row["black_player"], row["white_player"])
+        for player in (row["black_player"], row["white_player"])
     }
     for split, split_rows in splits.items():
         for row in split_rows:
             if split == "train":
                 scope = "train"
             else:
-                seen_black = row["black_player"] in train_engines
-                seen_white = row["white_player"] in train_engines
+                seen_black = row["black_player"] in train_players
+                seen_white = row["white_player"] in train_players
                 if seen_black and seen_white:
                     scope = "open"
                 elif seen_black or seen_white:
                     scope = "mixed"
                 else:
                     scope = "closed"
+            # 旧名称engine_scopeは既存の学習・評価コードとの互換性のため残す。
+            # 新しい実験上の意味はplayer_scope（対局者名義の重複）で表す。
+            row["player_scope"] = scope
             row["engine_scope"] = scope
+            # 局面単位の判定はCSAを再生するexport段階で行う。
+            row["position_scope"] = "pending_export"
 
     return splits
 
@@ -222,7 +247,7 @@ def deterministic_scope_sample(
     total_games: int,
     seed: int,
 ) -> Tuple[List[Dict[str, str]], Dict[str, Dict[str, int]]]:
-    """open/mixed/closedを均等化した再現可能な評価標本を作る。
+    """旧名称。player_scopeのopen/mixed/closedを均等化する。
 
     0以下を指定した場合は上限を設けない。乱数ライブラリの実装差を避けるため、
     seedとgame_idのSHA-1値で並べる。
@@ -230,7 +255,7 @@ def deterministic_scope_sample(
     scopes = ("open", "mixed", "closed")
     grouped: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     for row in rows:
-        grouped[row["engine_scope"]].append(row)
+        grouped[row.get("player_scope", row.get("engine_scope", ""))].append(row)
 
     if total_games > 0:
         base, remainder = divmod(total_games, len(scopes))
@@ -265,6 +290,15 @@ def deterministic_scope_sample(
     return sampled, summary
 
 
+def deterministic_player_scope_sample(
+    rows: Sequence[Dict[str, str]],
+    total_games: int,
+    seed: int,
+) -> Tuple[List[Dict[str, str]], Dict[str, Dict[str, int]]]:
+    """player_scopeを均等化する評価標本抽出の明示的な名称。"""
+    return deterministic_scope_sample(rows, total_games=total_games, seed=seed)
+
+
 def write_manifest(path: Path, rows: Sequence[Mapping[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -283,10 +317,12 @@ def summarize_splits(
 ) -> Dict[str, object]:
     split_summary: Dict[str, object] = {}
     for split, rows in splits.items():
-        scopes = Counter(row["engine_scope"] for row in rows)
+        scopes = Counter(row.get("player_scope", row.get("engine_scope", "")) for row in rows)
         split_summary[split] = {
             "games": len(rows),
             "moves": sum(int(row["total_moves"]) for row in rows),
+            "player_scopes": dict(sorted(scopes.items())),
+            # 旧キーは既存の集計スクリプト向けに残す。
             "engine_scopes": dict(sorted(scopes.items())),
         }
     return {
@@ -329,7 +365,7 @@ def split_dataset(args: argparse.Namespace) -> Dict[str, object]:
     )
     eligible_count = sum(len(split_rows) for split_rows in splits.values())
     eligible_evaluation = list(splits["evaluation"])
-    sampled_evaluation, evaluation_sampling = deterministic_scope_sample(
+    sampled_evaluation, evaluation_sampling = deterministic_player_scope_sample(
         eligible_evaluation,
         total_games=args.evaluation_games,
         seed=args.sampling_seed,
@@ -342,7 +378,11 @@ def split_dataset(args: argparse.Namespace) -> Dict[str, object]:
         write_manifest(manifests_dir / "{}.csv".format(split), split_rows)
         if split != "train":
             for scope in ("open", "mixed", "closed"):
-                scope_rows = [row for row in split_rows if row["engine_scope"] == scope]
+                scope_rows = [
+                    row
+                    for row in split_rows
+                    if row.get("player_scope", row.get("engine_scope", "")) == scope
+                ]
                 write_manifest(
                     manifests_dir / "{}_{}.csv".format(split, scope),
                     scope_rows,
@@ -366,10 +406,35 @@ def split_dataset(args: argparse.Namespace) -> Dict[str, object]:
 def load_manifest(path: Path) -> List[Dict[str, str]]:
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        missing = set(MANIFEST_FIELDS) - set(reader.fieldnames or [])
+        # player_scope/position_scopeは後から追加された任意列であり、旧manifestも
+        # 読み込めるようにする。旧engine_scopeはplayer_scopeの別名として扱う。
+        required = {
+            "game_id",
+            "game_date",
+            "split",
+            "file_path",
+            "kif_index",
+            "black_player",
+            "white_player",
+            "rating_b",
+            "rating_w",
+            "game_result",
+            "total_moves",
+        }
+        missing = required - set(reader.fieldnames or [])
         if missing:
             raise ValueError("manifestに必要な列がありません: {}".format(", ".join(sorted(missing))))
-        return list(reader)
+        scope_fields = set(reader.fieldnames or []) & {"player_scope", "engine_scope"}
+        if not scope_fields:
+            raise ValueError("manifestにはplayer_scopeまたはengine_scopeが必要です")
+        rows: List[Dict[str, str]] = []
+        for source in reader:
+            row = dict(source)
+            row["player_scope"] = row.get("player_scope", "") or row.get("engine_scope", "")
+            row["engine_scope"] = row.get("engine_scope", "") or row["player_scope"]
+            row["position_scope"] = row.get("position_scope", "")
+            rows.append(row)
+        return rows
 
 
 def import_cshogi():
@@ -426,11 +491,14 @@ def build_record(row: Mapping[str, str], game, cshogi_module) -> Dict[str, objec
     board = cshogi_module.Board(game.sfen)
     initial_tokens = encode_initial_state(board, cshogi_module)
     moves: List[str] = []
+    # 状態ハッシュはexport中のposition_scope判定だけに使い、最終JSONLには残さない。
+    position_hashes = [make_position_hash(board.sfen())]
     for ply, move in enumerate(game.moves, 1):
         if not board.is_legal(move):
             raise ValueError("第{}手が開始局面から合法に再生できません".format(ply))
         moves.append(cshogi_module.move_to_usi(move))
         board.push(move)
+        position_hashes.append(make_position_hash(board.sfen()))
 
     expected_moves = int(row["total_moves"])
     if len(moves) != expected_moves:
@@ -439,20 +507,63 @@ def build_record(row: Mapping[str, str], game, cshogi_module) -> Dict[str, objec
         )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "game_id": row["game_id"],
         "split": row["split"],
-        "engine_scope": row["engine_scope"],
+        "player_scope": row.get("player_scope", row.get("engine_scope", "")),
+        # 旧フィールドは既存コードとの互換性のため維持する。
+        "engine_scope": row.get("engine_scope", row.get("player_scope", "")),
+        "position_scope": row.get("position_scope", "pending_export"),
         "game_date": row["game_date"],
         "initial_sfen": game.sfen,
         "initial_state_tokens": initial_tokens,
         "move_tokens": moves,
+        "position_hashes": position_hashes,
         "black_player": row["black_player"],
         "white_player": row["white_player"],
         "rating_b": float(row["rating_b"]),
         "rating_w": float(row["rating_w"]),
         "game_result": int(row["game_result"]),
     }
+
+
+def annotate_position_scopes(
+    record: Dict[str, object],
+    train_position_hashes: Optional[Set[str]],
+    is_training: bool = False,
+) -> Set[str]:
+    """レコードの各局面にseen/unseenラベルを付け、ハッシュ集合を返す。
+
+    ``position_scope_by_ply``は初期局面を0番目とし、指手後の局面を順に格納する。
+    strict_unseen_positionは、開始局面から系列末尾まで全局面が未見である場合の
+    系列単位ラベルであり、実際のランダム開始位置での判定はpreprocess側で行う。
+    """
+    hashes = [str(value) for value in record.get("position_hashes", [])]
+    if not hashes:
+        raise ValueError("position_hashesが空のレコードです")
+
+    if is_training:
+        scopes = ["seen_position"] * len(hashes)
+    elif train_position_hashes is None:
+        scopes = ["unknown_position_scope"] * len(hashes)
+    else:
+        scopes = [
+            "seen_position" if value in train_position_hashes else "unseen_position"
+            for value in hashes
+        ]
+
+    record["position_scope_by_ply"] = scopes
+    record["position_scope"] = scopes[0]
+    if all(scope == "seen_position" for scope in scopes):
+        trajectory_scope = "seen_position"
+    elif all(scope == "unseen_position" for scope in scopes):
+        trajectory_scope = "strict_unseen_position"
+    elif all(scope == "unknown_position_scope" for scope in scopes):
+        trajectory_scope = "unknown_position_scope"
+    else:
+        trajectory_scope = "mixed_position"
+    record["trajectory_scope"] = trajectory_scope
+    return set(hashes)
 
 
 def base_vocabulary() -> List[str]:
@@ -498,6 +609,8 @@ def export_manifest(
     prefix_to: Optional[str],
     strict: bool,
     limit: Optional[int],
+    train_position_hashes: Optional[Set[str]] = None,
+    is_training: Optional[bool] = None,
 ) -> Dict[str, object]:
     cshogi = import_cshogi()
     rows = load_manifest(manifest_path)
@@ -511,9 +624,14 @@ def export_manifest(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     errors_path.parent.mkdir(parents=True, exist_ok=True)
     move_vocabulary: Set[str] = set()
+    position_hashes: Set[str] = set()
+    position_scope_counts: Counter = Counter()
+    trajectory_scope_counts: Counter = Counter()
     written_games = 0
     written_moves = 0
     error_rows: List[Dict[str, str]] = []
+    if is_training is None:
+        is_training = manifest_path.stem == "train"
 
     with output_path.open("w", encoding="utf-8") as output_handle:
         for source_path, file_rows in grouped.items():
@@ -542,6 +660,17 @@ def export_manifest(
                     if index < 0 or index >= len(games):
                         raise IndexError("kif_index {} が範囲外です".format(index))
                     record = build_record(row, games[index], cshogi)
+                    position_hashes.update(
+                        annotate_position_scopes(
+                            record,
+                            train_position_hashes=train_position_hashes,
+                            is_training=is_training,
+                        )
+                    )
+                    position_scope_counts.update(record["position_scope_by_ply"])
+                    trajectory_scope_counts.update([record["trajectory_scope"]])
+                    # ハッシュ列はスコープ判定用の中間情報であり、学習入力には不要。
+                    record.pop("position_hashes", None)
                     json.dump(record, output_handle, ensure_ascii=False, separators=(",", ":"))
                     output_handle.write("\n")
                     move_vocabulary.update(record["move_tokens"])
@@ -574,6 +703,10 @@ def export_manifest(
         "written_moves": written_moves,
         "errors": len(error_rows),
         "move_vocabulary": sorted(move_vocabulary),
+        # export_datasetがsplit間のseen判定に使用する内部値。JSONには出さない。
+        "position_hashes": position_hashes,
+        "position_scope_counts": dict(sorted(position_scope_counts.items())),
+        "trajectory_scope_counts": dict(sorted(trajectory_scope_counts.items())),
     }
 
 
@@ -615,6 +748,7 @@ def export_dataset(args: argparse.Namespace) -> Dict[str, object]:
     errors_dir = output_dir / "errors"
     all_move_tokens: Set[str] = set()
     summaries: Dict[str, object] = {}
+    train_position_hashes: Set[str] = set()
 
     for split in ("train", "validation", "evaluation"):
         summary = export_manifest(
@@ -625,13 +759,19 @@ def export_dataset(args: argparse.Namespace) -> Dict[str, object]:
             prefix_to=args.path_prefix_to,
             strict=args.strict,
             limit=args.limit,
+            train_position_hashes=None if split == "train" else train_position_hashes,
+            is_training=split == "train",
         )
         all_move_tokens.update(summary.pop("move_vocabulary"))
+        split_position_hashes = summary.pop("position_hashes")
+        if split == "train":
+            train_position_hashes = set(split_position_hashes)
         summaries[split] = summary
 
     write_vocabulary(output_dir / "vocab.json", all_move_tokens)
     result = {
         "splits": summaries,
+        "train_position_count": len(train_position_hashes),
         "observed_move_vocabulary_size": len(all_move_tokens),
         "fixed_move_vocabulary_size": len(all_usi_move_tokens()),
     }

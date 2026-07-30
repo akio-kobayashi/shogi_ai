@@ -245,11 +245,17 @@ def extract_split(
     target_chunks: List[ProbeTargets] = []
     distances_all: List[int] = []
     scopes_all: List[str] = []
+    position_scopes_all: List[str] = []
+    trajectory_scopes_all: List[str] = []
     games_all: List[str] = []
-    lm_loss_sum = 0.0
-    lm_targets = 0
-    lm_top1 = 0
-    lm_top5 = 0
+    # 指手評価は<EOS>を除く指手位置だけで集計する。<EOS>は対局終了の
+    # 制御トークンであり，合法手の選択能力とは異なるためである。
+    move_loss_sum = 0.0
+    move_targets = 0
+    move_top1 = 0
+    move_top5 = 0
+    eos_loss_sum = 0.0
+    eos_targets = 0
     legal_positions = 0
     legal_top1 = 0
     legal_top5 = 0
@@ -283,29 +289,46 @@ def extract_split(
 
             labels = example["labels"].to(device)
             supervised = labels != IGNORE_INDEX
-            supervised_logits = output.logits[0, supervised]
-            supervised_labels = labels[supervised]
-            if supervised_labels.numel():
-                lm_loss_sum += float(
+            eos_id = token_to_id.get("<EOS>")
+            move_supervised = supervised
+            if eos_id is not None:
+                move_supervised = supervised & (labels != eos_id)
+            move_logits = output.logits[0, move_supervised]
+            move_labels = labels[move_supervised]
+            if move_labels.numel():
+                move_loss_sum += float(
                     torch.nn.functional.cross_entropy(
-                        supervised_logits,
-                        supervised_labels,
+                        move_logits,
+                        move_labels,
                         reduction="sum",
                     )
                 )
-                lm_targets += int(supervised_labels.numel())
-                lm_top1 += int(
-                    (supervised_logits.argmax(dim=-1) == supervised_labels).sum()
+                move_targets += int(move_labels.numel())
+                move_top1 += int(
+                    (move_logits.argmax(dim=-1) == move_labels).sum()
                 )
-                top_k = min(5, supervised_logits.shape[-1])
-                lm_top5 += int(
+                top_k = min(5, move_logits.shape[-1])
+                move_top5 += int(
                     (
-                        supervised_logits.topk(top_k, dim=-1).indices
-                        == supervised_labels[:, None]
+                        move_logits.topk(top_k, dim=-1).indices
+                        == move_labels[:, None]
                     )
                     .any(dim=1)
                     .sum()
                 )
+            if eos_id is not None:
+                eos_supervised = supervised & (labels == eos_id)
+                eos_logits = output.logits[0, eos_supervised]
+                eos_labels = labels[eos_supervised]
+                if eos_labels.numel():
+                    eos_loss_sum += float(
+                        torch.nn.functional.cross_entropy(
+                            eos_logits,
+                            eos_labels,
+                            reduction="sum",
+                        )
+                    )
+                    eos_targets += int(eos_labels.numel())
 
             moves_marker = 1 + 96
             move_ids = example["input_ids"][moves_marker + 1 : -1].tolist()
@@ -358,6 +381,17 @@ def extract_split(
             distances = select_distances(
                 len(move_tokens), positions_per_game, include_initial
             )
+            scope_by_ply = list(example.get("position_scope_by_ply", []))
+            if scope_by_ply and max(distances, default=0) >= len(scope_by_ply):
+                raise ValueError(
+                    "position_scope_by_ply is shorter than selected probe distances"
+                )
+            if scope_by_ply:
+                selected_position_scopes = [scope_by_ply[index] for index in distances]
+            else:
+                selected_position_scopes = [
+                    str(example.get("position_scope", "unknown_position_scope"))
+                ] * len(distances)
             selected = torch.tensor(distances, dtype=torch.long)
             target_chunks.append(
                 ProbeTargets(
@@ -385,6 +419,11 @@ def extract_split(
 
             distances_all.extend(distances)
             scopes_all.extend([str(example["engine_scope"])] * len(distances))
+            position_scopes_all.extend(selected_position_scopes)
+            trajectory_scopes_all.extend(
+                [str(example.get("trajectory_scope", "unknown_position_scope"))]
+                * len(distances)
+            )
             games_all.extend([str(example["game_id"])] * len(distances))
             processed = example_index + 1
             if progress_every > 0 and (
@@ -420,13 +459,17 @@ def extract_split(
         "targets": concatenate_targets(target_chunks),
         "distances": torch.tensor(distances_all, dtype=torch.long),
         "scopes": scopes_all,
+        "position_scopes": position_scopes_all,
+        "trajectory_scopes": trajectory_scopes_all,
         "game_ids": games_all,
         "lm": {
-            "targets": lm_targets,
-            "cross_entropy": lm_loss_sum / max(lm_targets, 1),
-            "perplexity": math.exp(min(lm_loss_sum / max(lm_targets, 1), 20.0)),
-            "top1_accuracy": lm_top1 / max(lm_targets, 1),
-            "top5_accuracy": lm_top5 / max(lm_targets, 1),
+            "targets": move_targets,
+            "cross_entropy": move_loss_sum / max(move_targets, 1),
+            "perplexity": math.exp(min(move_loss_sum / max(move_targets, 1), 20.0)),
+            "top1_accuracy": move_top1 / max(move_targets, 1),
+            "top5_accuracy": move_top5 / max(move_targets, 1),
+            "eos_targets": eos_targets,
+            "eos_cross_entropy": eos_loss_sum / max(eos_targets, 1),
             "legality": {
                 "move_positions": legal_positions,
                 "top1_legal_rate": legal_top1 / max(legal_positions, 1),
@@ -623,6 +666,14 @@ def evaluate_source(
         split_data["distances"],
         split_data["scopes"],
     )
+    metrics["position_strata"] = stratified_metrics(
+        split_data["targets"],
+        board,
+        hands,
+        turn,
+        split_data["distances"],
+        split_data["position_scopes"],
+    )
     return metrics, {
         "board_target": split_data["targets"].board,
         "board_prediction": board,
@@ -634,6 +685,8 @@ def evaluate_source(
         "turn_prediction": turn,
         "distances": split_data["distances"],
         "scopes": list(split_data["scopes"]),
+        "position_scopes": list(split_data["position_scopes"]),
+        "trajectory_scopes": list(split_data["trajectory_scopes"]),
         "game_ids": list(split_data["game_ids"]),
     }
 
@@ -752,6 +805,14 @@ def main() -> None:
         majority_turn,
         extracted["evaluation"]["distances"],
         extracted["evaluation"]["scopes"],
+    )
+    majority_metrics["position_strata"] = stratified_metrics(
+        extracted["evaluation"]["targets"],
+        majority_board,
+        majority_hands,
+        majority_turn,
+        extracted["evaluation"]["distances"],
+        extracted["evaluation"]["position_scopes"],
     )
     report["majority_baseline"] = majority_metrics
 

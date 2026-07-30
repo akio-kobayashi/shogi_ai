@@ -85,7 +85,22 @@ class ShogiSequenceDataset(Dataset):
             "labels": labels,
             "recurrent_mask": recurrent_mask,
             "game_id": record["game_id"],
-            "engine_scope": record["engine_scope"],
+            "player_scope": record.get(
+                "player_scope", record.get("engine_scope", "")
+            ),
+            # 旧キーは既存の評価コードとの互換性のため残す。
+            "engine_scope": record.get(
+                "engine_scope", record.get("player_scope", "")
+            ),
+            "position_scope": record.get(
+                "position_scope", "unknown_position_scope"
+            ),
+            "trajectory_scope": record.get(
+                "trajectory_scope", "unknown_position_scope"
+            ),
+            "position_scope_by_ply": list(
+                record.get("position_scope_by_ply", [])
+            ),
             "start_ply": int(record.get("start_ply", 0)),
             "start_sfen": str(record.get("start_sfen", record.get("initial_sfen", ""))),
         }
@@ -198,7 +213,14 @@ def collate_sequences(
         "attention_mask": attention_mask,
         "recurrent_mask": recurrent_mask,
         "game_ids": [str(example["game_id"]) for example in examples],
+        "player_scopes": [str(example["player_scope"]) for example in examples],
         "engine_scopes": [str(example["engine_scope"]) for example in examples],
+        "position_scopes": [
+            str(example["position_scope"]) for example in examples
+        ],
+        "trajectory_scopes": [
+            str(example["trajectory_scope"]) for example in examples
+        ],
         "start_plies": torch.tensor(
             [int(example["start_ply"]) for example in examples], dtype=torch.long
         ),

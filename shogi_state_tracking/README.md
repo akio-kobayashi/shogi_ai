@@ -2,7 +2,7 @@
 
 学生向けのColab実験は
 [`notebooks/shogi_state_tracking_colab.ipynb`](notebooks/shogi_state_tracking_colab.ipynb)から開始できる．
-実データがない場合はtoy棋譜を自動生成し，次手予測，線形probe，盤面SVG可視化までを
+実データがない場合はtoy棋譜を自動生成し，指手予測，線形probe，盤面SVG可視化までを
 小規模に実行する．
 
 ノートブックから再利用する処理は[`colab_utils.py`](colab_utils.py)にまとめている．
@@ -67,15 +67,30 @@ CoT用特殊tokenを含まないschema version 2を使っている場合は、
 - 2022年1月～2024年9月：学習
 - 2024年10月～12月：検証
 - 2025年1月以降：評価
-- 評価は合計5,000局（`open` 1,667、`mixed` 1,667、`closed` 1,666）
+- 評価は合計5,000局（`player_scope`の`open` 1,667、`mixed` 1,667、`closed` 1,666）
 
-評価・検証データには、学習期間中の対局者名義との関係から次のラベルを付ける。
+評価・検証データには、学習期間中の対局者名義との関係から`player_scope`を付ける。
 
 - `open`：両対局者名義が学習集合に存在
 - `mixed`：一方だけが学習集合に存在
 - `closed`：両対局者名義が学習集合に存在しない
 
 これはエンジンファミリーではなく、metadataの対局者名義による分類である。
+旧フィールド`engine_scope`は互換性のため残すが、今後は`player_scope`を使う。
+
+これとは別に、CSAを再生した各局面について`position_scope`を付ける。
+
+- `seen_position`：正規化したSFEN（盤面・持ち駒・手番）が学習集合に存在
+- `unseen_position`：学習集合に同一局面が存在しない
+- `strict_unseen_position`：入力系列中の全局面が`unseen_position`
+
+局面の正規化ではSFENの手数フィールドを除外し、残りの盤面・手番・持ち駒をSHA-256で
+ハッシュ化する。`position_scope_by_ply`は初期局面を0番目とする局面ごとのラベルであり、
+ランダム開始位置から作るサンプルの`position_scope`と`trajectory_scope`は前処理時に決まる。
+したがって、`player_scope`は対局者分布の重複、`position_scope`は局面の未見性を表し、
+両者を混同しない。
+なお，CSV manifestは対局単位なので，`position_scope`はexport前には
+`pending_export`である．実際の局面単位の判定はJSONLの`position_scope_by_ply`を参照する．
 評価候補全体を使う場合は `--evaluation-games 0` を指定する。
 抽出は `sampling_seed + game_id` のSHA-1値に基づくため、入力CSVの行順に依存せず
 再現可能である。
@@ -158,7 +173,8 @@ backend非依存のcshogiだけを記載しており、再現実験では`setup_
 
 ### データセット作成
 
-まず、CSA本体を読まずにmetadataを抽出・分割できる。
+まず、CSA本体を読まずにmetadataを抽出・時系列分割できる。ただし、局面の
+`position_scope`はCSAの再生が必要なため、後続の`export`で付与される。
 
 ```bash
 python create_dataset.py split \
@@ -188,6 +204,35 @@ python create_dataset.py build \
   --metadata-csv ../wsl2/metadata.csv \
   --output-dir data
 ```
+
+### 既存の学習済みモデルへ局面スコープを付ける
+
+すでに別計算機で学習を実行している場合，学習をやり直す必要はない．学習済み
+checkpointと，そのcheckpointの作成に使った`vocab.json`はそのまま保持する．
+CSAを再読込せず，変換済みJSONLに含まれる`initial_sfen`と`move_tokens`だけを再生して，
+局面スコープ付きJSONLを別ディレクトリへ作る．
+
+```bash
+DATA_DIR=/path/to/data \
+OUTPUT_DIR=/path/to/data/scoped_datasets \
+scripts/annotate_position_scopes.sh
+```
+
+この処理はモデルの入力トークン列を変更しない．したがって，評価時には元の語彙を指定したまま，
+出力された`scoped_datasets/{train,validation,evaluation}.jsonl`を使う．
+
+```bash
+python evaluate_probes.py \
+  --checkpoint results/training/vanilla/seed_20260724/best.pt \
+  --vocab data/vocab.json \
+  --train-jsonl data/scoped_datasets/train.jsonl \
+  --validation-jsonl data/scoped_datasets/validation.jsonl \
+  --evaluation-jsonl data/scoped_datasets/evaluation.jsonl \
+  --output-dir results/probes_scoped
+```
+
+checkpointと語彙の組合せを変えるとtoken idが一致しない可能性があるため，評価時に新しい
+`vocab.json`を再生成して置き換えてはならない．
 
 ### 系列長の決定
 
@@ -250,16 +295,20 @@ data/
 ```
 
 JSONLには対局者名やレートも分析用メタデータとして保存するが、モデル入力には
-使用しない。`engine_scope`によるopen/closed評価にも用いる。
+使用しない。`player_scope`（旧`engine_scope`）と、局面ごとの
+`position_scope_by_ply`を評価の層別に用いる。
 
 ## JSONLレコード
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "game_id": "...",
   "split": "evaluation",
+  "player_scope": "closed",
   "engine_scope": "closed",
+  "position_scope_by_ply": ["unseen_position", "unseen_position", "..."],
+  "trajectory_scope": "strict_unseen_position",
   "game_date": "2025-01-01",
   "initial_sfen": "...",
   "initial_state_tokens": ["SQ_W_L", "... 96 tokens ...", "TURN_BLACK"],
@@ -320,8 +369,11 @@ T²MLR移植の出典、公式実装との対応、簡略化点は
 
 各指し手直後の単一の隠れ表現から、盤面81マス、持ち駒14種類の枚数、手番を
 線形プローブで復号する。
-ここで測るのは「境界表現から局面情報が線形復号可能か」であり、Transformerの
-KV cache全体が明示的な盤面データ構造になっていると仮定しない。
+ここで確認したいのは、Transformerの中に将棋盤そのものが保存されているかどうかではない。
+開始局面と正しい指し手履歴を入力したとき、指し手の区切り位置にある隠れ表現から、その時点の
+盤面・持ち駒・手番を当てられるかを調べる。盤面・持ち駒・手番を当てられれば、それらの情報が
+隠れ表現から読み出せる形で含まれていると考える。実際には、隠れ表現に単純な線形プローブを
+取り付けて予測する。TransformerのKV cache全体が明示的な盤面データ構造になっているとは仮定しない。
 状態差分棋譜対、同一局面・異履歴、activation patchingによる因果的検証は
 将来実験として分離する。
 
@@ -353,17 +405,122 @@ python evaluate_probes.py \
 既定では最終層、T²MLRの再帰状態、現在指手のtoken embedding対照を評価する。全層を
 評価する場合は`--sources layers,recurrent,token_embedding`を指定する。出力は
 `probe_metrics.json`、`linear_probes.pt`、`probe_predictions.pt`であり、前者には盤面・持ち駒・手番の指標、
-履歴長別・open/mixed/closed別指標、次手予測lossとtop-k accuracyが含まれる。また、
-各次手予測位置についてtop-1合法手率、top-5内の合法手有無、合法手への確率質量、
+履歴長別・`player_scope`（open/mixed/closed）別指標と`position_scope`別指標、指手予測lossとtop-k accuracyが含まれる。また、
+各指手予測位置についてtop-1合法手率、top-5内の合法手有無、合法手への確率質量、
 合法手の語彙収録率をcshogiで計算する。`<EOS>`予測位置は合法手評価から除外する。
 同時に`probe_predictions.pt`へ評価位置ごとの盤面・持ち駒・手番の正解と予測、盤面の
 正解クラス確率、距離、対局IDを保存する。このファイルは可視化専用であり、モデルの
 学習には使用しない。
+`probe_metrics.json`では，対局者名義による層別は`strata`，未見局面による層別は
+`position_strata`に保存する．
+
+### 評価指標の読み方
+
+評価値は，指手をどれだけ予測できたかという**出力評価**と，隠れ表現から局面情報を
+どれだけ復号できたかという**状態評価**に分けて読む．両者は別の能力を測るため，一つの
+数値にまとめない．
+
+#### 1．指手予測の評価
+
+指手を1トークンとして扱い，教師指手を `m`，モデルの分布を `p(m)` とする．
+`<EOS>`は対局終了の制御トークンであり，指手の評価には含めない．`eos_cross_entropy`は
+補助的に別集計する．
+
+ここでの教師指手は棋譜に記録された手である．したがってtop-1率とtop-5内率は，エンジン最善手との
+一致率や棋力ではなく，棋譜の指手分布に対する模倣精度を表す．
+
+| 指標 | 計算 | 分かること |
+|---|---|---|
+| 指手予測loss（cross entropy） | `-1/N Σ log p(m_i)` | 教師指手へどれだけ確率を与えたか．低いほどよい |
+| 指手予測top-1率 | 1位の指手が教師指手と一致した割合 | 最有力手を一手で当てる能力 |
+| 指手予測top-5内率 | 上位5手に教師指手が含まれる割合 | 候補手として残せる能力 |
+| 合法手top-1率 | 1位の指手が，その局面の合法手集合に含まれる割合 | 最有力出力がルール上合法か |
+| 合法手top-5内率 | 上位5手のうち少なくとも1手が合法である割合 | 合法な候補を上位5手に含められるか |
+| 合法手への確率質量 | `Σ p(a | s)`（`a`が合法手）の平均 | 合法手全体にどれだけ確率を配分したか |
+
+ここで `L(s)` はcshogiが生成した局面 `s` の合法手集合である．合法手top-1率が高くても
+良い手を選べるとは限らない．例えば，合法だが教師指手ではない手を選んでいる可能性がある．
+一方，合法手への確率質量が高くtop-1率が低い場合は，合法手を広く候補にしているが，分布が
+十分に集中していないと解釈できる．
+
+合法手のUSI表現が語彙に含まれている割合は，`mean_legal_move_vocabulary_coverage`として
+別に記録する．語彙外の合法手は，モデルが確率を与えられないため，合法手確率質量とは分けて
+報告する．合法手集合やルール情報は学習には使わず，評価時の判定にだけ用いる．
+
+#### 2．局面状態の復元評価
+
+線形プローブが，凍結したTransformerの特徴から次の局面情報を復号する．これは「内部に明示的な
+盤面データ構造がある」ことの証明ではなく，その情報が線形に読み出せるかの評価である．
+
+| 指標 | 計算 | 分かること |
+|---|---|---|
+| 盤面81マスの復元精度 | 81マスの正解率の平均 | 各マスの駒種・所属・空マスを復元できるか |
+| 盤面occupancy精度 | 81マスについて，空マス／駒ありを二値で判定 | 駒の有無だけを復元できたか |
+| occupiedマスの駒精度 | 正解が駒ありのマスだけについて，駒種・所属まで一致した割合 | 空マスの多さを除き，駒の内容を復元できたか |
+| 盤面完全一致率 | 81マスすべてが一致した割合 | 局面の盤上配置を完全に復元できた割合 |
+| 持ち駒の復元精度 | 先後7種類ずつ，計14スロットの枚数正解率 | 持ち駒の種類と枚数を追跡できるか |
+| 持ち駒完全一致率 | 14スロットすべてが一致した割合 | 持ち駒全体を完全に復元できた割合 |
+| 持ち駒MAE | 14スロットの枚数誤差の平均 | 何枚ずれているか．0が完全一致 |
+| 手番の復元精度 | 先手・後手の正解率 | 現在の手番を復元できるか |
+| 局面完全一致率 | 盤面81マス，持ち駒14スロット，手番のすべてが一致した割合 | 局面全体を完全に復元できた割合 |
+
+盤面81マスの復元精度が高くても，空マスを多く当てているだけの場合がある．そのため，通常は
+`board_square_accuracy`，`board_occupancy_accuracy`，`board_piece_accuracy_on_occupied`を併記する．
+旧名`board_occupied_accuracy`は後者と同じ値で，互換性のため残している．最も厳しい指標は
+`full_state_exact_match`であり，部分的な正解は完全一致として数えない．
+
+#### 3．結果の解釈順序
+
+まず指手予測lossとtop-k率で，モデルが指手系列を学習できているかを確認する．次に合法手指標で，
+出力が将棋の形式・ルールに適合しているかを確認する．最後に線形プローブの盤面・持ち駒・手番の
+指標を見て，指手予測に必要な状態情報が隠れ表現から読み出せるかを調べる．
+
+モデル間の比較では，`top-1`だけでなく`top-5`と合法手確率質量を併記し，状態復元では盤面・
+持ち駒・手番を分けて報告する．これにより，「指手を当てられない」のか，「合法手を出せない」のか，
+「局面情報を保持できていない」のかを区別できる．
+
+#### 4．occupied指標とチェス研究の違い
+
+`occupied`という名前は，二つの異なる指標と混同しやすい．本実験では次の三つを分ける．
+
+```text
+全マス正解率
+  = 81マスの「空／駒種・所属」の一致率
+
+盤面occupancy精度
+  = 81マスの「空か／駒があるか」だけの一致率
+
+occupiedマスの駒精度
+  = 正解が駒ありのマスに限定した「駒種・所属」の一致率
+```
+
+例えば81マス中61マスが空いている局面で，モデルが全マスを空と予測すると，全マス正解率と
+occupancy精度は約75.3%になるが，occupiedマスの駒精度は0%である．このため，空マスの多さに
+よる見かけの高精度を避けるには，三つを併記する必要がある．
+
+チェスの状態追跡研究 [Toshniwal et al.](https://arxiv.org/abs/2102.13249) は，64マス全体を
+復元する課題ではない．棋譜の接頭辞とプロンプトから，特定駒の移動先を予測する．実際の移動先と
+一致する`ExM accuracy`と，その駒にとって合法な移動先なら正解とする`LgM accuracy`を分け，
+合法移動先の個数を `R` とした`R-Precision@R`も報告している．
+
+したがって，本実験の指標との対応は次のようになる．
+
+| 本実験 | チェス研究との関係 |
+|---|---|
+| 指手top-1率 | 実際の棋譜手を当てるExMに近いが，指手全体を直接評価する |
+| 合法手top-1率 | LgM@1に近い |
+| 合法手top-5内率 | 上位5候補に合法手が1つでもあるかというhit@5であり，R-Precisionではない |
+| 合法手への確率質量 | 確率分布全体の指標であり，Toshniwalらの主指標とは異なる |
+| 盤面81マス・持ち駒・手番 | チェスの移動先プローブを拡張した，将棋の状態復元指標 |
+
+つまり，盤面復元指標と合法手指標は目的が異なる．前者は「局面情報を読み出せるか」，後者は
+「合法な指手候補を出せるか」を測る．両者を同じ正解率として比較してはならない．
 
 ### プローブ結果の可視化
 
-`visualize_probes.py`は外部描画ライブラリを必要とせず、SVGを生成する。盤面上の数値は
-各マスの復元精度である。`occupied-accuracy`では空マスを除いて集計する。
+`visualize_probes.py`は外部描画ライブラリを必要とせず，SVGを生成する．盤面上の数値は
+各マスの復元精度である．`occupied-accuracy`では，正解が駒ありのマスだけを対象に，駒種・所属まで
+一致した割合を集計する．これは「駒があるか」だけの二値occupancy精度とは異なる．
 
 ```bash
 python visualize_probes.py aggregate \
@@ -460,7 +617,7 @@ for epoch in range(num_epochs):
 
 ## 学習
 
-answer-onlyの棋譜次手予測は次のように実行する。
+answer-onlyの棋譜指手予測は次のように実行する。
 
 ```bash
 scripts/run_training.sh pretrain vanilla --match-t2mlr

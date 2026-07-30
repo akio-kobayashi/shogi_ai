@@ -38,6 +38,8 @@ class ProbeMetricTest(unittest.TestCase):
             targets.turn.clone(),
         )
         self.assertEqual(metrics["board_exact_match"], 1.0)
+        self.assertEqual(metrics["board_occupancy_accuracy"], 1.0)
+        self.assertEqual(metrics["board_piece_accuracy_on_occupied"], 1.0)
         self.assertEqual(metrics["board_occupied_accuracy"], 1.0)
         self.assertEqual(metrics["hand_exact_match"], 1.0)
         self.assertEqual(metrics["full_state_exact_match"], 1.0)

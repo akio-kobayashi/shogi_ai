@@ -94,7 +94,16 @@ class ReasoningTraceDataset(Dataset):
             "loss_weights": loss_weights,
             "recurrent_mask": recurrent_mask,
             "game_id": str(record["game_id"]),
+            "player_scope": str(
+                record.get("player_scope", record.get("engine_scope", ""))
+            ),
             "engine_scope": str(record.get("engine_scope", "")),
+            "position_scope": str(
+                record.get("position_scope", "unknown_position_scope")
+            ),
+            "trajectory_scope": str(
+                record.get("trajectory_scope", "unknown_position_scope")
+            ),
         }
 
 
@@ -136,5 +145,12 @@ def collate_reasoning_traces(
         "attention_mask": attention_mask,
         "recurrent_mask": recurrent_mask,
         "game_ids": [str(example["game_id"]) for example in examples],
+        "player_scopes": [str(example["player_scope"]) for example in examples],
         "engine_scopes": [str(example["engine_scope"]) for example in examples],
+        "position_scopes": [
+            str(example["position_scope"]) for example in examples
+        ],
+        "trajectory_scopes": [
+            str(example["trajectory_scope"]) for example in examples
+        ],
     }

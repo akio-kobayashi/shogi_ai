@@ -204,6 +204,8 @@ def state_metrics(
     hand_exact = hand_correct.all(dim=1)
     turn_correct = turn_prediction == targets.turn
     full_exact = board_exact & hand_exact & turn_correct
+    predicted_occupied = board_prediction != 0
+    occupancy_correct = predicted_occupied == occupied
 
     per_hand = {
         name: float(hand_correct[:, index].float().mean())
@@ -220,6 +222,15 @@ def state_metrics(
         "samples": int(targets.board.shape[0]),
         "board_exact_match": float(board_exact.float().mean()),
         "board_square_accuracy": float(board_correct.float().mean()),
+        # 全81マスについて，空／非空だけを判定する二値指標。
+        "board_occupancy_accuracy": float(occupancy_correct.float().mean()),
+        # 正解が駒のあるマスに限定し，駒種・所属まで一致した割合。
+        # 旧名 board_occupied_accuracy は互換性のため残す。
+        "board_piece_accuracy_on_occupied": (
+            float(board_correct[occupied].float().mean())
+            if occupied_total
+            else None
+        ),
         "board_occupied_accuracy": (
             float(board_correct[occupied].float().mean())
             if occupied_total
@@ -314,7 +325,9 @@ def stratified_metrics(
                 turn_prediction[mask],
             )
 
-    for scope in ("open", "mixed", "closed"):
+    # player_scopeだけでなくposition_scope（seen/unseen/strict）も同じ集計器で
+    # 扱えるよう、入力に実際に現れたラベルを層別化する。
+    for scope in sorted(set(str(value) for value in scopes)):
         mask = torch.tensor([value == scope for value in scopes], dtype=torch.bool)
         if bool(mask.any()):
             result["scope_{}".format(scope)] = state_metrics(

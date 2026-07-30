@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""次手予測backbone自身からCoT-likeな複数読み筋を生成する。"""
+"""指手予測backbone自身からCoT-likeな複数読み筋を生成する。"""
 
 import argparse
 import json
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def select_decision_plies(total_moves: int, count: int) -> List[int]:
-    """次手が存在するdecision plyを0..total_moves-1から等間隔に選ぶ。"""
+    """指手が存在するdecision plyを0..total_moves-1から等間隔に選ぶ。"""
     if total_moves <= 0:
         return []
     if count <= 0 or count >= total_moves:
@@ -604,7 +604,16 @@ def main() -> None:
                     "schema_version": 1,
                     "game_id": "{}:{}".format(record["game_id"], decision_ply),
                     "source_game_id": str(record["game_id"]),
+                    "player_scope": str(
+                        record.get("player_scope", record.get("engine_scope", ""))
+                    ),
                     "engine_scope": str(record.get("engine_scope", "")),
+                    "position_scope": str(
+                        record.get("position_scope", "unknown_position_scope")
+                    ),
+                    "trajectory_scope": str(
+                        record.get("trajectory_scope", "unknown_position_scope")
+                    ),
                     "start_sfen": str(record["initial_sfen"]),
                     "initial_state_tokens": list(record["initial_state_tokens"]),
                     "history_moves": history,

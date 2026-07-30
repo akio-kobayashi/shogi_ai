@@ -5,7 +5,7 @@
 
 * toy棋譜または既存JSONLの準備
 * answer-only decoderの学習
-* 次手予測token accuracyの測定
+* 指手予測token accuracyの測定
 * 線形probeの実行と要約
 * probe結果のSVG化
 * 短いChain of Movesの生成

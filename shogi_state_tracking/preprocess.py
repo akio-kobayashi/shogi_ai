@@ -91,16 +91,45 @@ def materialize_segment(
                 )
             ) from exc
 
+    position_scopes = list(record.get("position_scope_by_ply", []))
+    if position_scopes and len(position_scopes) != len(moves) + 1:
+        raise ValueError(
+            "game {} position_scope_by_ply length mismatch".format(
+                record.get("game_id", "?")
+            )
+        )
+    if position_scopes:
+        position_scope = str(position_scopes[start_ply])
+        end_ply = len(moves)
+        if max_suffix_moves is not None:
+            end_ply = min(end_ply, start_ply + max_suffix_moves)
+        suffix_scopes = position_scopes[start_ply : end_ply + 1]
+        if all(scope == "unseen_position" for scope in suffix_scopes):
+            trajectory_scope = "strict_unseen_position"
+        elif all(scope == "seen_position" for scope in suffix_scopes):
+            trajectory_scope = "seen_position"
+        else:
+            trajectory_scope = "mixed_position"
+    else:
+        position_scope = str(record.get("position_scope", "unknown_position_scope"))
+        trajectory_scope = str(record.get("trajectory_scope", position_scope))
+
+    player_scope = str(record.get("player_scope", record.get("engine_scope", "")))
+    engine_scope = str(record.get("engine_scope", player_scope))
+    end_ply = len(moves)
+    if max_suffix_moves is not None:
+        end_ply = min(end_ply, start_ply + max_suffix_moves)
     return {
         "game_id": record["game_id"],
-        "engine_scope": record["engine_scope"],
+        "player_scope": player_scope,
+        "engine_scope": engine_scope,
+        "position_scope": position_scope,
+        "trajectory_scope": trajectory_scope,
+        "position_scope_by_ply": (
+            position_scopes[start_ply : end_ply + 1] if position_scopes else []
+        ),
         "start_ply": start_ply,
         "start_sfen": board.sfen(),
         "initial_state_tokens": encode_initial_state(board, cshogi),
-        "move_tokens": moves[
-            start_ply:
-            None
-            if max_suffix_moves is None
-            else start_ply + max_suffix_moves
-        ],
+        "move_tokens": moves[start_ply:end_ply],
     }

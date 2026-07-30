@@ -41,6 +41,31 @@ def metadata_row(
 
 
 class DatasetSplitTest(unittest.TestCase):
+    def test_position_hash_ignores_sfen_move_number(self):
+        first = "9/9/9/9/9/9/9/9/9 b - 1"
+        second = "9/9/9/9/9/9/9/9/9 b - 99"
+        self.assertEqual(
+            create_dataset.normalize_position_sfen(first),
+            create_dataset.normalize_position_sfen(second),
+        )
+        self.assertEqual(
+            create_dataset.make_position_hash(first),
+            create_dataset.make_position_hash(second),
+        )
+
+    def test_position_scope_annotation_is_per_ply(self):
+        record = {"position_hashes": ["a", "b", "c"]}
+        create_dataset.annotate_position_scopes(record, {"a", "c"})
+        self.assertEqual(
+            record["position_scope_by_ply"],
+            ["seen_position", "unseen_position", "seen_position"],
+        )
+        self.assertEqual(record["trajectory_scope"], "mixed_position")
+
+        strict_record = {"position_hashes": ["x", "y"]}
+        create_dataset.annotate_position_scopes(strict_record, {"a"})
+        self.assertEqual(strict_record["trajectory_scope"], "strict_unseen_position")
+
     def test_date_is_extracted_from_directory(self):
         row = metadata_row("/csa/2025/03/04/game.csa", "a", "b")
         self.assertEqual(create_dataset.extract_game_date(row), dt.date(2025, 3, 4))
