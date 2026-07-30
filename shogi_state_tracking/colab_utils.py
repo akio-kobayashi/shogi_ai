@@ -103,12 +103,14 @@ def prepare_dataset(
     use_real_data: bool = False,
     toy_games: int = 24,
     toy_moves: int = 32,
+    include_mask_tokens: bool = False,
 ) -> DatasetPaths:
     """実データを検証するか，Colab用toy datasetを作成する。
 
     ``use_real_data=False``では，標準初期局面から合法手を決定的に選び，
     train/validation/evaluationへ分割する。研究用の棋譜品質を表すデータではなく，
-    パイプライン確認用である。
+    パイプライン確認用である。``include_mask_tokens=True``では，マスク実験用の
+    v4語彙を作る。ただし，マスクされた入力例の生成は別の前処理で行う。
     """
     data_path = Path(data_dir)
     paths = _dataset_paths(data_path)
@@ -132,7 +134,7 @@ def prepare_dataset(
         raise ValueError("toy_games must be >= 3 and toy_moves must be positive")
 
     import cshogi
-    from create_dataset import all_usi_move_tokens, base_vocabulary
+    from create_dataset import write_vocabulary
 
     records = [_make_toy_record(index, toy_moves, cshogi) for index in range(toy_games)]
     train_count = max(1, round(toy_games * 2 / 3))
@@ -148,22 +150,15 @@ def prepare_dataset(
     for split, split_records in splits.items():
         _write_jsonl(getattr(paths, "{}_jsonl".format(split)), split_records)
 
-    vocabulary_tokens = list(
-        dict.fromkeys(base_vocabulary() + all_usi_move_tokens())
-    )
-    paths.vocab_json.write_text(
-        json.dumps(
-            {
-                "schema_version": 3,
-                "token_to_id": {
-                    token: index for index, token in enumerate(vocabulary_tokens)
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    observed_moves = {
+        move
+        for record in records
+        for move in record["move_tokens"]
+    }
+    write_vocabulary(
+        paths.vocab_json,
+        observed_moves,
+        include_mask_tokens=include_mask_tokens,
     )
     return paths
 

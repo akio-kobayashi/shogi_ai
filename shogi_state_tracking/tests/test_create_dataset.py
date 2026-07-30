@@ -175,6 +175,40 @@ class StateEncodingTest(unittest.TestCase):
         tokens = create_dataset.base_vocabulary() + ["7g7f", "3c3d"]
         self.assertEqual(len(tokens), len(set(tokens)))
 
+    def test_mask_tokens_are_optional_and_appended(self):
+        regular = create_dataset.vocabulary_tokens(["7g7f"])
+        masked = create_dataset.vocabulary_tokens(
+            ["7g7f"], include_mask_tokens=True
+        )
+        self.assertEqual(masked[: len(regular)], regular)
+        self.assertEqual(
+            len(masked), len(regular) + len(create_dataset.MASK_TOKENS)
+        )
+        for token in create_dataset.MASK_TOKENS:
+            self.assertIn(token, masked)
+
+    def test_mask_vocabulary_metadata_is_schema4(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "vocab.json"
+            create_dataset.write_vocabulary(
+                path, ["7g7f"], include_mask_tokens=True
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(
+            payload["mask_tokens"],
+            {
+                "move": "<MASK_MOVE>",
+                "square": "<MASK_SQUARE>",
+                "hand": "<MASK_HAND>",
+                "turn": "<MASK_TURN>",
+            },
+        )
+        self.assertEqual(
+            payload["masking"]["square"],
+            "replace one of the 81 board-state tokens",
+        )
+
     def test_fixed_move_vocabulary_covers_move_promotion_and_drop(self):
         moves = create_dataset.all_usi_move_tokens()
         self.assertEqual(len(moves), len(set(moves)))

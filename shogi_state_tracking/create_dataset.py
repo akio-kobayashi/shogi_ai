@@ -57,6 +57,15 @@ SPECIAL_TOKENS = [
     "</THINK>",
     "<ANSWER>",
 ]
+# マスク実験で使用する予約トークン。通常のanswer-only学習では入力へ現れない。
+# 盤面・持ち駒・手番は固定位置で表現されるため，位置ごとのマスク語彙は作らず，
+# 種別ごとに1トークンだけ用意する。
+MASK_TOKENS = [
+    "<MASK_MOVE>",
+    "<MASK_SQUARE>",
+    "<MASK_HAND>",
+    "<MASK_TURN>",
+]
 PIECE_NAMES = {
     1: "P",
     2: "L",
@@ -710,7 +719,14 @@ def export_manifest(
     }
 
 
-def write_vocabulary(path: Path, move_tokens: Iterable[str]) -> None:
+def vocabulary_tokens(
+    move_tokens: Iterable[str], include_mask_tokens: bool = False
+) -> List[str]:
+    """語彙順を一元管理して返す。
+
+    マスク語彙は既存checkpointのtoken idを変えないよう，通常語彙の末尾へ
+    追加する。``include_mask_tokens=False``は旧schema v3と同じ語彙を返す。
+    """
     fixed_moves = all_usi_move_tokens()
     observed_moves = set(move_tokens)
     unsupported = observed_moves - set(fixed_moves)
@@ -720,11 +736,38 @@ def write_vocabulary(path: Path, move_tokens: Iterable[str]) -> None:
                 ", ".join(sorted(unsupported)[:10])
             )
         )
-    tokens = base_vocabulary() + fixed_moves
+    tokens = list(dict.fromkeys(base_vocabulary() + fixed_moves))
+    if include_mask_tokens:
+        tokens.extend(token for token in MASK_TOKENS if token not in tokens)
+    return tokens
+
+
+def write_vocabulary(
+    path: Path,
+    move_tokens: Iterable[str],
+    include_mask_tokens: bool = False,
+) -> None:
+    """学習用語彙を書き出す。
+
+    ``include_mask_tokens``を有効にした語彙はschema v4として保存する。マスク語彙を
+    追加したcheckpointは語彙サイズが異なるため，schema v3のcheckpointとは別実験
+    として扱う。
+    """
+    observed_moves = set(move_tokens)
+    tokens = vocabulary_tokens(
+        observed_moves, include_mask_tokens=include_mask_tokens
+    )
+    mask_mapping = {
+        "move": "<MASK_MOVE>",
+        "square": "<MASK_SQUARE>",
+        "hand": "<MASK_HAND>",
+        "turn": "<MASK_TURN>",
+    }
     vocabulary = {
-        "schema_version": 3,
+        "schema_version": 4 if include_mask_tokens else 3,
         "token_to_id": {token: index for index, token in enumerate(tokens)},
-        "special_tokens": SPECIAL_TOKENS,
+        "special_tokens": SPECIAL_TOKENS + (MASK_TOKENS if include_mask_tokens else []),
+        "mask_tokens": mask_mapping if include_mask_tokens else {},
         "state_token_count": 96,
         "board_order": "1a,1b,...,1i,2a,...,9i",
         "hand_order": [
@@ -735,6 +778,16 @@ def write_vocabulary(path: Path, move_tokens: Iterable[str]) -> None:
         "move_encoding": "one USI move per token",
         "move_vocabulary": "fixed syntactic superset of all legal USI moves",
         "observed_move_count": len(observed_moves),
+        "masking": (
+            {
+                "move": "replace one atomic move token",
+                "square": "replace one of the 81 board-state tokens",
+                "hand": "replace one of the 14 hand-count tokens",
+                "turn": "replace the single turn token",
+            }
+            if include_mask_tokens
+            else None
+        ),
     }
     with path.open("w", encoding="utf-8") as handle:
         json.dump(vocabulary, handle, ensure_ascii=False, indent=2)
@@ -768,7 +821,11 @@ def export_dataset(args: argparse.Namespace) -> Dict[str, object]:
             train_position_hashes = set(split_position_hashes)
         summaries[split] = summary
 
-    write_vocabulary(output_dir / "vocab.json", all_move_tokens)
+    write_vocabulary(
+        output_dir / "vocab.json",
+        all_move_tokens,
+        include_mask_tokens=getattr(args, "include_mask_tokens", False),
+    )
     result = {
         "splits": summaries,
         "train_position_count": len(train_position_hashes),
@@ -819,6 +876,11 @@ def add_export_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--path-prefix-to", default=None, help="実環境でのCSAルート")
     parser.add_argument("--strict", action="store_true", help="1件でも変換失敗したら停止する")
     parser.add_argument("--limit", type=int, default=None, help="各splitの先頭N局だけ変換する")
+    parser.add_argument(
+        "--include-mask-tokens",
+        action="store_true",
+        help="マスク実験用のv4語彙（MASK_MOVE等）を追加する",
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -840,6 +902,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     build_parser.add_argument("--path-prefix-to", default=None)
     build_parser.add_argument("--strict", action="store_true")
     build_parser.add_argument("--limit", type=int, default=None)
+    build_parser.add_argument(
+        "--include-mask-tokens",
+        action="store_true",
+        help="マスク実験用のv4語彙（MASK_MOVE等）を追加する",
+    )
 
     args = parser.parse_args(argv)
     try:

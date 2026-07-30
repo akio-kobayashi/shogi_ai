@@ -86,6 +86,17 @@ CSA棋譜から、Transformerデコーダの潜在状態追跡を調べるため
 CoT用特殊tokenを含まないschema version 2を使っている場合は、
 `create_dataset.py export`を再実行してschema version 3の語彙を生成する。
 
+マスク実験では，次の4種類の予約tokenを末尾へ追加したschema version 4を使う。
+
+- `<MASK_MOVE>`：1手tokenの置換
+- `<MASK_SQUARE>`：盤面81マスの状態tokenの置換
+- `<MASK_HAND>`：持ち駒14要素の置換
+- `<MASK_TURN>`：手番tokenの置換
+
+通常の語彙はv3のtoken idを維持したまま，マスクtokenだけを末尾へ追加する。
+ただし語彙サイズは変わるため，v3 checkpointへv4語彙をそのまま読み込むことはできない。
+マスクtokenは予約されるだけであり，実際のマスク系列の生成とマスク復元損失は別実験で実装する。
+
 ## 既定の抽出条件
 
 - 2022年1月1日以降
@@ -232,6 +243,16 @@ python create_dataset.py build \
   --metadata-csv ../wsl2/metadata.csv \
   --output-dir data
 ```
+
+マスク実験用語彙を生成する場合は，次のように指定する。
+
+```bash
+python create_dataset.py export \
+  --output-dir data \
+  --include-mask-tokens
+```
+
+`build`でも同じ`--include-mask-tokens`を指定できる。指定しない場合は従来のv3語彙を生成する。
 
 ### 既存の学習済みモデルへ局面スコープを付ける
 
