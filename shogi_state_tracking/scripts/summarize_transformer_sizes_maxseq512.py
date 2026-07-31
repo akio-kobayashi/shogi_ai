@@ -35,6 +35,18 @@ def parse_args() -> argparse.Namespace:
         default="probes",
         help="比較時に使うprobe出力ディレクトリ名",
     )
+    parser.add_argument("--move-suffix", default="moves")
+    parser.add_argument("--check-probe-suffix", default="check_probes")
+    parser.add_argument(
+        "--include-moves",
+        action="store_true",
+        help="指手・合法手評価を集約対象へ加え，欠損時はエラーにする",
+    )
+    parser.add_argument(
+        "--include-check-probes",
+        action="store_true",
+        help="王手probeを集約対象へ加え，欠損時はエラーにする",
+    )
     parser.add_argument(
         "--allow-missing",
         action="store_true",
@@ -73,6 +85,10 @@ def collect_size_rows(
     seed: int,
     size: str,
     probe_suffix: str,
+    move_suffix: str,
+    check_probe_suffix: str,
+    include_moves: bool,
+    include_check_probes: bool,
     include_non_number: bool,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
@@ -80,6 +96,8 @@ def collect_size_rows(
 
     training_path = size_dir / "training_history.json"
     probe_path = size_dir / probe_suffix / "probe_metrics.json"
+    move_path = size_dir / move_suffix / "move_metrics.json"
+    check_probe_path = size_dir / check_probe_suffix / "check_probe_metrics.json"
 
     if training_path.exists():
         training_payload = load_json(training_path)
@@ -109,10 +127,30 @@ def collect_size_rows(
                 }
             )
 
+    for artifact_type, path, enabled in (
+        ("moves", move_path, include_moves),
+        ("check_probes", check_probe_path, include_check_probes),
+    ):
+        if enabled and path.exists():
+            payload = load_json(path)
+            for metric, value in flatten_numbers(payload):
+                rows.append(
+                    {
+                        "seed": seed,
+                        "size": size,
+                        "artifact": str(path),
+                        "artifact_type": artifact_type,
+                        "metric": metric,
+                        "value": value,
+                    }
+                )
+
     if include_non_number:
         for artifact_type, path in (
             ("training", training_path),
             ("probes", probe_path),
+            ("moves", move_path),
+            ("check_probes", check_probe_path),
         ):
             if not path.exists():
                 continue
@@ -147,11 +185,17 @@ def main() -> None:
         size_dir = experiment_dir / f"seed_{args.seed}" / size
         training_path = size_dir / "training_history.json"
         probe_path = size_dir / args.probe_suffix / "probe_metrics.json"
+        move_path = size_dir / args.move_suffix / "move_metrics.json"
+        check_probe_path = size_dir / args.check_probe_suffix / "check_probe_metrics.json"
 
         if not training_path.exists():
             missing.append(str(training_path))
         if not probe_path.exists():
             missing.append(str(probe_path))
+        if args.include_moves and not move_path.exists():
+            missing.append(str(move_path))
+        if args.include_check_probes and not check_probe_path.exists():
+            missing.append(str(check_probe_path))
 
         rows.extend(
             collect_size_rows(
@@ -159,6 +203,10 @@ def main() -> None:
                 args.seed,
                 size,
                 args.probe_suffix,
+                args.move_suffix,
+                args.check_probe_suffix,
+                args.include_moves,
+                args.include_check_probes,
                 args.include_non_number,
             )
         )
@@ -192,6 +240,10 @@ def main() -> None:
         "seed": args.seed,
         "sizes": list(args.sizes),
         "probe_suffix": args.probe_suffix,
+        "move_suffix": args.move_suffix,
+        "check_probe_suffix": args.check_probe_suffix,
+        "include_moves": args.include_moves,
+        "include_check_probes": args.include_check_probes,
         "rows": rows,
         "missing_files": sorted(set(missing)),
     }

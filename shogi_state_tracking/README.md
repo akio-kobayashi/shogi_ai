@@ -36,20 +36,26 @@ small/base/largeを固定設定で比較する場合は次を使う．max_seq_le
 scripts/compare_transformer_sizes_maxseq512.sh
 ```
 
-プローブ付き＋集計まで一括で行う場合は次を使う。
+指手・合法手評価，盤面・持ち駒・手番の全層probe，王手probe，集計まで一括で行う場合は次を使う。
 
 ```bash
 scripts/run_transformer_size_compare_512.sh
 ```
 
-学習後に全サイズのprobeを同時に実行する場合は次を使う．
+学習後に全サイズの数値評価だけを再実行する場合は次を使う．
 
 ```bash
 scripts/compare_transformer_sizes_maxseq512_with_probes.sh
 ```
 
-`RUN_TRAIN=0`で既存checkpointを使ったprobe再実行，`RUN_PROBES=0`で学習のみで
-中断する設定もある．
+既定では数値評価を全て実行する．`RUN_TRAIN=0`で既存checkpointを使い，
+`RUN_MOVE_EVALUATION=0`，`RUN_PROBES=0`，`RUN_CHECK_PROBES=0`で各評価を個別に省略できる．
+王手probe用の均衡化データは既定で再作成するが，既存の`data/check_probe/`を使う場合は
+`PREPARE_CHECK_PROBE_DATA=0`とする．
+
+大駒・玉のヒートマップは自動選択しない．数値評価後に対局・手数・駒種を選び，
+`visualize_major_piece_probe.py`を別途実行する．`RUN_VISUALIZATIONS=1`はこの判断を促すだけで，
+恣意的な局面選択による図の自動生成は行わない．
 
 `AMP=auto`はCUDA／ROCmで自動混合精度を有効にする。BF16対応GPUではBF16を使い，
 対応していない場合はFP16と勾配スケーラを使う。無効化する場合は`AMP=off`とする。
