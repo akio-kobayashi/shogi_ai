@@ -470,6 +470,58 @@ python evaluate_probes.py \
 `probe_metrics_detail.json`では，対局者名義による層別は`strata`，未見局面による層別は
 `position_strata`に保存する．
 
+### 大駒・玉位置プローブ
+
+大駒（飛車・角・龍・馬）と玉の位置には，別の専用headを増やさない。既存の盤面復元
+線形probeが出力する81マス×29クラスの分布から，各クラスの位置復元精度を
+`probe_metrics_detail.json`の`board_accuracy_by_class`で読む。これは，同じ特徴量・同じ
+線形復号器で全駒種を比べるためである。評価時には`board_samples_by_class`も併記し，
+希少な成駒の精度を過大解釈しない。
+
+個別局面について飛車・角・龍・馬・玉の位置分布を盤面上に描く場合は，保存済みの
+`linear_probes.pt`から必要な局面だけを再計算する。使用例は「大駒・玉の可視化」を参照する。
+
+### 王手プローブ用データセットと評価
+
+王手状態は少数なので，評価JSONLをそのまま使わず，cshogiで再生した正例・負例を同数にした
+状態単位の集合を作る。各行には開始局面，当該plyまでの教師指手列，その直後の`in_check`ラベルを
+保存する。これはモデル学習用データではなく，後段の抽象状態probe専用である。
+
+```bash
+scripts/create_check_probe_datasets.sh
+```
+
+既定では各splitを混ぜずに，モデルの最大系列長320に対応する221手以内の状態を使う。学習・検証・
+評価集合からそれぞれ王手と非王手を最大20,000・5,000・10,000件ずつ抽出する。正例が少ない場合は，
+利用可能な正例数に合わせて両クラスを同数へ縮小する。別のcheckpoint長や件数は環境変数で指定する。
+
+```bash
+MAX_PREFIX_MOVES=413 \
+EVALUATION_SAMPLES_PER_CLASS=5000 \
+scripts/create_check_probe_datasets.sh
+```
+
+単一splitだけを作る場合は，従来どおり次を用いる。
+
+```bash
+INPUT_JSONL=data/datasets/evaluation.jsonl \
+OUTPUT_JSONL=data/check_probe/evaluation.jsonl \
+scripts/create_check_probe_dataset.sh
+```
+
+作成後は，decoderを凍結したまま，末尾指手トークンの隠れ表現から「その手の直後に手番側の玉が
+王手されているか」を二値線形分類する。`accuracy`だけでなく，均衡集合での`balanced_accuracy`，
+`precision`，`recall`，`F1`を多数派ベースラインとの差とともに保存する。
+
+```bash
+CHECKPOINT=checkpoints/model.pt \
+scripts/run_check_probe_evaluation.sh all-layers
+```
+
+出力は`results/check-probes/.../check_probe_metrics.json`と`check_linear_probes.pt`である。
+この結果は，王手情報が線形に読み出せることを示す操作的な指標であり，モデルが明示的なルール表や
+盤面変数を保持していることの証明ではない。
+
 ### 指手予測・合法手評価
 
 指手予測loss，top-k，合法手率，合法手への確率質量は，プローブ学習を伴わない独立評価として

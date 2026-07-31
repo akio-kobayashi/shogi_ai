@@ -134,6 +134,11 @@ copy_relative "scripts/restore_experiment.sh"
 copy_relative "evaluate_move_metrics.py"
 copy_relative "scripts/run_move_evaluation.sh"
 copy_relative "visualize_major_piece_probe.py"
+copy_relative "create_check_probe_dataset.py"
+copy_relative "scripts/create_check_probe_dataset.sh"
+copy_relative "scripts/create_check_probe_datasets.sh"
+copy_relative "evaluate_check_probe.py"
+copy_relative "scripts/run_check_probe_evaluation.sh"
 
 source_commit="$(git -C "${PROJECT_DIR}" rev-parse --short=12 HEAD 2>/dev/null || printf '%s' unknown)"
 "${PYTHON_BIN}" "${PROJECT_DIR}/scripts/migration_manifest.py" write \
