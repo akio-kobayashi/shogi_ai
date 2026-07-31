@@ -160,20 +160,24 @@ class ProbeReplayTest(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             metrics_path = output_dir / "probe_metrics.json"
+            detail_path = output_dir / "probe_metrics_detail.json"
             self.assertTrue(metrics_path.exists())
+            self.assertTrue(detail_path.exists())
             self.assertTrue((output_dir / "linear_probes.pt").exists())
             self.assertTrue((output_dir / "probe_predictions.pt").exists())
             report = json.loads(metrics_path.read_text(encoding="utf-8"))
             self.assertIn("layer_1", report["probe_results"])
             self.assertIn("token_embedding", report["probe_results"])
-            legality = report["language_model"]["evaluation"]["legality"]
+            self.assertEqual(report["detail_artifact"], "probe_metrics_detail.json")
+            detail_report = json.loads(detail_path.read_text(encoding="utf-8"))
+            legality = detail_report["language_model"]["evaluation"]["legality"]
             self.assertEqual(legality["move_positions"], 2)
             self.assertGreater(
                 legality["mean_legal_move_vocabulary_coverage"], 0.0
             )
             self.assertIn(
                 "state_tracking_1_plus",
-                report["probe_results"]["layer_1"]["evaluation"]["strata"],
+                detail_report["probe_results"]["layer_1"]["evaluation"]["strata"],
             )
 
             shell_output = temp_dir / "shell-results"

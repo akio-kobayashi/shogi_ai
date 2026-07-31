@@ -34,6 +34,57 @@ from probes import (
 )
 
 
+# ``probe_metrics_detail.json``には層別・距離別・局面スコープ別の全指標を残す。
+# これらを毎回読む必要はないため，入口となるprobe_metrics.jsonはこの共通指標だけに絞る。
+HEADLINE_STATE_METRICS = (
+    "samples",
+    "board_exact_match",
+    "board_square_accuracy",
+    "board_occupancy_accuracy",
+    "board_piece_accuracy_on_occupied",
+    "hand_exact_match",
+    "hand_nonzero_accuracy",
+    "turn_accuracy",
+    "full_state_exact_match",
+)
+
+
+def headline_state_metrics(metrics: Mapping[str, object]) -> Dict[str, object]:
+    """大局的な比較に使う局面復号指標だけを取り出す。"""
+    return {
+        name: metrics[name]
+        for name in HEADLINE_STATE_METRICS
+        if name in metrics
+    }
+
+
+def summarize_probe_report(report: Mapping[str, object]) -> Dict[str, object]:
+    """詳細reportから小さく安定した比較用サマリーを作る。"""
+    summary: Dict[str, object] = {
+        "format_version": 1,
+        "detail_artifact": "probe_metrics_detail.json",
+        "checkpoint": report["checkpoint"],
+        "model_type": report["model_type"],
+        "untrained": report["untrained"],
+        "sources": report["sources"],
+        "settings": report["settings"],
+        "majority_baseline": headline_state_metrics(report["majority_baseline"]),
+        "probe_results": {},
+    }
+    for source, result in report["probe_results"].items():
+        summary["probe_results"][source] = {
+            "training": {
+                name: result["training"][name]
+                for name in ("best_epoch", "best_validation_loss")
+            },
+            "validation": headline_state_metrics(result["validation"]),
+            "evaluation": headline_state_metrics(result["evaluation"]),
+        }
+    if "language_model" in report:
+        summary["language_model"] = report["language_model"]
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="指し手境界表現から盤面・持ち駒・手番を線形復号する",
@@ -908,8 +959,14 @@ def main() -> None:
             flush=True,
         )
 
-    with (output_dir / "probe_metrics.json").open("w", encoding="utf-8") as handle:
+    # 詳細指標は大きくなり得る。通常の比較や発表資料には小さなsummaryを使い，
+    # 距離別・局面スコープ別の分析が必要なときだけ詳細ファイルを開く。
+    summary = summarize_probe_report(report)
+    with (output_dir / "probe_metrics_detail.json").open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    with (output_dir / "probe_metrics.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
     torch.save(
         {
@@ -927,7 +984,7 @@ def main() -> None:
         ),
         flush=True,
     )
-    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":

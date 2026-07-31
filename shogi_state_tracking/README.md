@@ -453,14 +453,16 @@ python evaluate_probes.py \
 
 既定では最終層、T²MLRの再帰状態、現在指手のtoken embedding対照を評価する。全層を
 評価する場合は`--sources layers,recurrent,token_embedding`を指定する。出力は
-`probe_metrics.json`、`linear_probes.pt`、`probe_predictions.pt`であり、前者には盤面・持ち駒・手番の指標、
-履歴長別・`player_scope`（open/mixed/closed）別指標と`position_scope`別指標が含まれる。
+`probe_metrics.json`、`probe_metrics_detail.json`、`linear_probes.pt`、`probe_predictions.pt`である。
+`probe_metrics.json`はモデル間比較・発表資料向けの主要指標だけを含む小さなサマリーである。
+履歴長別・`player_scope`（open/mixed/closed）別・`position_scope`別の全指標，および各probe epochの
+履歴は`probe_metrics_detail.json`に保存する。
 プローブ評価では，計算負荷の低い指手予測・合法手指標を既定で実行しない。
 旧形式の一括出力が必要な場合だけ，`--include-language-model`を追加する。
 同時に`probe_predictions.pt`へ評価位置ごとの盤面・持ち駒・手番の正解と予測、盤面の
 正解クラス確率、距離、対局IDを保存する。このファイルは可視化専用であり、モデルの
 学習には使用しない。
-`probe_metrics.json`では，対局者名義による層別は`strata`，未見局面による層別は
+`probe_metrics_detail.json`では，対局者名義による層別は`strata`，未見局面による層別は
 `position_strata`に保存する．
 
 ### 指手予測・合法手評価
@@ -475,6 +477,8 @@ CHECKPOINT=checkpoints/model.pt \
 
 結果は`results/moves/<checkpoint>/seed_<seed>/move_metrics.json`へ保存する．この評価も
 元JSONLの開始局面から固定的に再生し，評価時のランダム開始を行わない．
+ただし，これは正解棋譜履歴を毎回入力するteacher-forced評価である．したがって，
+自己回帰ロールアウト，対局勝率，探索の代替性能を直接測るものではない．
 
 学習・検証ではランダム開始系列を使うが，評価では元JSONLの開始局面（`start_ply=0`）から
 固定的に再生する．したがって評価局面はseedによって変化しない．既定の

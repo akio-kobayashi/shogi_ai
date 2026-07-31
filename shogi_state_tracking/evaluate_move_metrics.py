@@ -177,6 +177,13 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     mean_loss = move_loss_sum / max(move_targets, 1)
     return {
         "format_version": 1,
+        "protocol": {
+            "name": "teacher_forced_next_move",
+            "history": "gold_move_history",
+            "legality_state": "gold_history_state",
+            "policy_rollout": False,
+            "search": False,
+        },
         "checkpoint": str(args.checkpoint),
         "model_type": model_type,
         "evaluation_jsonl": str(args.evaluation_jsonl),
