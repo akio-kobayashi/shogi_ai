@@ -211,10 +211,14 @@ def state_metrics(
         name: float(hand_correct[:, index].float().mean())
         for index, name in enumerate(HAND_NAMES)
     }
+    # 駒種別の値は「正解がその駒であるマス」に条件付けた完全一致率である。
+    # 大駒のように出現数が少ないクラスも比較できるよう，分母も併記する。
     per_board_class = {}
+    per_board_class_samples = {}
     for class_index, name in enumerate(BOARD_NAMES):
         class_mask = targets.board == class_index
         if bool(class_mask.any()):
+            per_board_class_samples[name] = int(class_mask.sum())
             per_board_class[name] = float(
                 board_correct[class_mask].float().mean()
             )
@@ -254,6 +258,7 @@ def state_metrics(
         "turn_accuracy": float(turn_correct.float().mean()),
         "full_state_exact_match": float(full_exact.float().mean()),
         "board_accuracy_by_class": per_board_class,
+        "board_samples_by_class": per_board_class_samples,
         "hand_accuracy_by_slot": per_hand,
     }
 

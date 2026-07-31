@@ -29,7 +29,9 @@ __all__ = [
     "evaluate_next_move",
     "generate_short_cot",
     "plot_training_history",
+    "prepare_csa_visualization_dataset",
     "prepare_dataset",
+    "render_piece_probability_svg",
     "render_probe_svg",
     "run_probe_evaluation",
     "summarize_probe",
@@ -96,6 +98,53 @@ def _write_jsonl(path: Path, records) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def prepare_csa_visualization_dataset(
+    csa_path: str | Path,
+    output_jsonl: str | Path,
+    game_index: int = 0,
+) -> tuple[Path, str]:
+    """CSAの1対局を大駒・玉プローブ可視化用JSONLへ変換する。
+
+    これは学習データ作成ではない。既存checkpointとlinear probeに対して，任意の
+    CSA対局を再生・可視化するだけの最小レコードを作る。
+    """
+    from create_dataset import encode_initial_state, import_cshogi
+
+    source = Path(csa_path)
+    cshogi = import_cshogi()
+    games = cshogi.Parser.parse_file(str(source))
+    if not 0 <= int(game_index) < len(games):
+        raise IndexError(
+            "game_index {} is outside CSA game count {}".format(game_index, len(games))
+        )
+    game = games[int(game_index)]
+    board = cshogi.Board(game.sfen)
+    initial_sfen = board.sfen()
+    move_tokens = []
+    for ply, move in enumerate(game.moves, 1):
+        if not board.is_legal(move):
+            raise ValueError("illegal CSA move at ply {}".format(ply))
+        move_tokens.append(cshogi.move_to_usi(move))
+        board.push(move)
+
+    game_id = "csa:{}:{}".format(source.stem, int(game_index))
+    record = {
+        "schema_version": 2,
+        "game_id": game_id,
+        "split": "visualization",
+        "player_scope": "external_csa",
+        "engine_scope": "external_csa",
+        "position_scope": "external_position",
+        "trajectory_scope": "external_position",
+        "initial_sfen": initial_sfen,
+        "initial_state_tokens": encode_initial_state(cshogi.Board(initial_sfen), cshogi),
+        "move_tokens": move_tokens,
+    }
+    output = Path(output_jsonl)
+    _write_jsonl(output, [record])
+    return output, game_id
 
 
 def prepare_dataset(
@@ -423,6 +472,56 @@ def render_probe_svg(
         str(probe_path / "probe_predictions.pt"),
         "--source",
         source,
+        "--output",
+        str(output_path),
+    ]
+    subprocess.run(command, cwd=Path(project_dir), check=True)
+    return output_path
+
+
+def render_piece_probability_svg(
+    project_dir: str | Path,
+    checkpoint: str | Path,
+    vocab: str | Path,
+    evaluation_jsonl: str | Path,
+    probe_path: str | Path,
+    game_id: str,
+    ply: int,
+    piece: str,
+    source: str = "final",
+    device: str = "cpu",
+    output: str | Path | None = None,
+) -> Path:
+    """指定局面の大駒・玉について，probe確率を盤面SVGとして出力する。"""
+    output_path = (
+        Path(output)
+        if output is not None
+        else Path(probe_path).parent / "{}-ply{:03d}-{}.svg".format(
+            str(game_id).replace(":", "-"), int(ply), piece
+        )
+    )
+    command = [
+        sys.executable,
+        "-u",
+        "visualize_major_piece_probe.py",
+        "--checkpoint",
+        str(checkpoint),
+        "--vocab",
+        str(vocab),
+        "--evaluation-jsonl",
+        str(evaluation_jsonl),
+        "--probes",
+        str(probe_path),
+        "--game-id",
+        str(game_id),
+        "--ply",
+        str(int(ply)),
+        "--piece",
+        str(piece),
+        "--source",
+        str(source),
+        "--device",
+        str(device),
         "--output",
         str(output_path),
     ]

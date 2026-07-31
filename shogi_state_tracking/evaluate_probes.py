@@ -58,6 +58,39 @@ def headline_state_metrics(metrics: Mapping[str, object]) -> Dict[str, object]:
     }
 
 
+def metric_deltas(
+    measured: Mapping[str, object], baseline: Mapping[str, object]
+) -> Dict[str, object]:
+    """同じ評価集合に対する復号指標の差分を作る。"""
+    state_delta = {}
+    for name in HEADLINE_STATE_METRICS:
+        if name == "samples":
+            continue
+        value = measured.get(name)
+        reference = baseline.get(name)
+        if isinstance(value, (int, float)) and isinstance(reference, (int, float)):
+            state_delta[name] = float(value) - float(reference)
+
+    def nested_delta(name: str) -> Dict[str, float]:
+        values = measured.get(name, {})
+        references = baseline.get(name, {})
+        if not isinstance(values, Mapping) or not isinstance(references, Mapping):
+            return {}
+        return {
+            str(key): float(value) - float(references[key])
+            for key, value in values.items()
+            if isinstance(value, (int, float))
+            and isinstance(references.get(key), (int, float))
+        }
+
+    return {
+        "baseline": "positionwise_train_majority",
+        "state_metrics": state_delta,
+        "board_accuracy_by_class": nested_delta("board_accuracy_by_class"),
+        "hand_accuracy_by_slot": nested_delta("hand_accuracy_by_slot"),
+    }
+
+
 def summarize_probe_report(report: Mapping[str, object]) -> Dict[str, object]:
     """詳細reportから小さく安定した比較用サマリーを作る。"""
     summary: Dict[str, object] = {
@@ -79,6 +112,9 @@ def summarize_probe_report(report: Mapping[str, object]) -> Dict[str, object]:
             },
             "validation": headline_state_metrics(result["validation"]),
             "evaluation": headline_state_metrics(result["evaluation"]),
+            "evaluation_minus_majority": result["evaluation_minus_majority"][
+                "state_metrics"
+            ],
         }
     if "language_model" in report:
         summary["language_model"] = report["language_model"]
@@ -945,6 +981,9 @@ def main() -> None:
             "training": training,
             "validation": validation_metrics,
             "evaluation": evaluation_metrics,
+            "evaluation_minus_majority": metric_deltas(
+                evaluation_metrics, majority_metrics
+            ),
         }
         prediction_payload["evaluation"][source] = evaluation_predictions
         saved_probes[source] = {

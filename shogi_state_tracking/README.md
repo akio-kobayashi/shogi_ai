@@ -2,6 +2,8 @@
 
 学生向けのColab実験は
 [`notebooks/shogi_state_tracking_colab.ipynb`](notebooks/shogi_state_tracking_colab.ipynb)から開始できる．
+任意CSA対局における飛・角・竜・馬・玉の推定確率を追う場合は，
+[`notebooks/csa_piece_trajectory.ipynb`](notebooks/csa_piece_trajectory.ipynb)を使う．
 実データがない場合はtoy棋譜を自動生成し，指手予測，線形probe，盤面SVG可視化までを
 小規模に実行する．
 
@@ -457,6 +459,9 @@ python evaluate_probes.py \
 `probe_metrics.json`はモデル間比較・発表資料向けの主要指標だけを含む小さなサマリーである。
 履歴長別・`player_scope`（open/mixed/closed）別・`position_scope`別の全指標，および各probe epochの
 履歴は`probe_metrics_detail.json`に保存する。
+評価JSONLの各マス・各持ち駒slot・手番について，学習用probe集合の最頻値を常に出す
+`positionwise_train_majority`ベースラインも計算する。各sourceの`evaluation_minus_majority`は，
+このベースラインとの差であり，詳細ファイルには駒種別の`board_accuracy_by_class`差分も含まれる。
 プローブ評価では，計算負荷の低い指手予測・合法手指標を既定で実行しない。
 旧形式の一括出力が必要な場合だけ，`--include-language-model`を追加する。
 同時に`probe_predictions.pt`へ評価位置ごとの盤面・持ち駒・手番の正解と予測、盤面の
@@ -610,6 +615,27 @@ python visualize_probes.py position \
   --index 0 \
   --output results/figures/vanilla-position-0.svg
 ```
+
+大駒の状態追跡を調べる場合は，評価アーティファクトへ全クラス確率を保存しない。
+代わりに`linear_probes.pt`，checkpoint，評価JSONLから指定局面だけを再計算し，飛車・角・龍・馬の
+確率をcshogiで再生した正解盤面へ重ねる。
+
+```bash
+python visualize_major_piece_probe.py \
+  --checkpoint results/model-comparison/t2mlr/best.pt \
+  --vocab data/vocab.json \
+  --evaluation-jsonl data/datasets/evaluation.jsonl \
+  --probes results/probes/t2mlr-all-layers/linear_probes.pt \
+  --game-id GAME_ID \
+  --ply 42 \
+  --piece black_R \
+  --source layer_3 \
+  --output results/figures/game-major-rook-ply42.svg
+```
+
+各マスの背景色と数値は`P(先手飛車がそのマスにある)`であり，緑枠はcshogiで再生した正解位置を表す。
+`--piece`には飛車・角・龍・馬に加え，`black_K`と`white_K`も指定できる。同一対局の連続したplyへ
+適用すれば，大駒の移動，捕獲，成り，駒打ち，および玉移動に対して隠れ表現がどのように更新されるかを追える。
 
 VanillaとT²MLRなど、同じ評価順で作成した2つのアーティファクトの差分も表示できる。
 正値は第1ファイルの方が復元精度が高いマスである。
