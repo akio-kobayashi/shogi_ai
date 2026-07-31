@@ -108,6 +108,32 @@ class DataTest(unittest.TestCase):
         self.assertEqual(vanilla_output.logits.shape, t2mlr_output.logits.shape)
         self.assertGreaterEqual(int(batch["start_plies"][0]), 0)
 
+    def test_fixed_start_dataset_always_uses_original_start(self):
+        import create_dataset
+        from data import FixedStartSequenceDataset
+
+        board = cshogi.Board()
+        record = {
+            "game_id": "g3",
+            "engine_scope": "closed",
+            "initial_sfen": board.sfen(),
+            "initial_state_tokens": create_dataset.encode_initial_state(
+                board, cshogi
+            ),
+            "move_tokens": ["7g7f", "3c3d"],
+        }
+        vocabulary_tokens = create_dataset.base_vocabulary() + record["move_tokens"]
+        vocab = {token: index for index, token in enumerate(vocabulary_tokens)}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "data.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            dataset = FixedStartSequenceDataset(
+                str(path), vocab, max_suffix_moves=2
+            )
+            example = dataset[0]
+        self.assertEqual(int(example["start_ply"]), 0)
+        self.assertEqual(example["start_sfen"], board.sfen())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ SAMPLES_PER_GAME="${SAMPLES_PER_GAME:-1}"
 PROBE_EPOCHS="${PROBE_EPOCHS:-30}"
 PATIENCE="${PATIENCE:-5}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
+INCLUDE_INITIAL_STATE="${INCLUDE_INITIAL_STATE:-0}"
 
 UNTRAINED=0
 case "${MODE}" in
@@ -87,7 +88,14 @@ COMMAND=(
   --batch-size "${BATCH_SIZE}"
   --seed "${SEED}"
   --device "${DEVICE}"
+  --skip-language-model
 )
+
+if [[ "${INCLUDE_INITIAL_STATE}" -eq 1 ]]; then
+  COMMAND+=(--include-initial-state)
+else
+  COMMAND+=(--exclude-initial-state)
+fi
 
 if [[ "${UNTRAINED}" -eq 1 ]]; then
   COMMAND+=(--untrained)
@@ -99,6 +107,7 @@ COMMAND+=("$@")
 echo "mode: ${MODE}"
 echo "checkpoint: ${CHECKPOINT}"
 echo "sources: ${SOURCES}"
+echo "include_initial_state: ${INCLUDE_INITIAL_STATE}"
 echo "output: ${OUTPUT_DIR}"
 printf "command:"
 printf " %q" "${COMMAND[@]}"

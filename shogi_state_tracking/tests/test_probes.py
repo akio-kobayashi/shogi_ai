@@ -148,6 +148,7 @@ class ProbeReplayTest(unittest.TestCase):
                 "4",
                 "--sources",
                 "final,token_embedding",
+                "--include-language-model",
                 "--device",
                 "cpu",
             ]

@@ -106,6 +106,35 @@ class ShogiSequenceDataset(Dataset):
         }
 
 
+class FixedStartSequenceDataset(ShogiSequenceDataset):
+    """評価用に，JSONLの開始局面から固定的に再生するDataset。
+
+    学習用のRandomStartSequenceDatasetとは異なり，評価時にseedや候補開始点へ
+    依存しない。同じJSONLとcheckpointを使えば，常に同じ局面集合を評価できる。
+    ``max_suffix_moves``はモデルの最大系列長に合わせた末尾切り詰めにだけ使う。
+    """
+
+    def __init__(
+        self,
+        jsonl_path: str,
+        token_to_id: Mapping[str, int],
+        max_suffix_moves: int | None = None,
+    ):
+        super().__init__(jsonl_path, token_to_id)
+        if max_suffix_moves is not None and max_suffix_moves <= 0:
+            raise ValueError("max_suffix_moves must be positive when specified")
+        self.max_suffix_moves = max_suffix_moves
+
+    def __getitem__(self, index: int):
+        record = self.records[index]
+        segment = materialize_segment(
+            record,
+            start_ply=0,
+            max_suffix_moves=self.max_suffix_moves,
+        )
+        return self._encode_record(segment)
+
+
 class RandomStartSequenceDataset(ShogiSequenceDataset):
     """各epochで対局ごとの開始局面を選び直す学習用Dataset。
 

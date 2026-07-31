@@ -454,14 +454,32 @@ python evaluate_probes.py \
 既定では最終層、T²MLRの再帰状態、現在指手のtoken embedding対照を評価する。全層を
 評価する場合は`--sources layers,recurrent,token_embedding`を指定する。出力は
 `probe_metrics.json`、`linear_probes.pt`、`probe_predictions.pt`であり、前者には盤面・持ち駒・手番の指標、
-履歴長別・`player_scope`（open/mixed/closed）別指標と`position_scope`別指標、指手予測lossとtop-k accuracyが含まれる。また、
-各指手予測位置についてtop-1合法手率、top-5内の合法手有無、合法手への確率質量、
-合法手の語彙収録率をcshogiで計算する。`<EOS>`予測位置は合法手評価から除外する。
+履歴長別・`player_scope`（open/mixed/closed）別指標と`position_scope`別指標が含まれる。
+プローブ評価では，計算負荷の低い指手予測・合法手指標を既定で実行しない。
+旧形式の一括出力が必要な場合だけ，`--include-language-model`を追加する。
 同時に`probe_predictions.pt`へ評価位置ごとの盤面・持ち駒・手番の正解と予測、盤面の
 正解クラス確率、距離、対局IDを保存する。このファイルは可視化専用であり、モデルの
 学習には使用しない。
 `probe_metrics.json`では，対局者名義による層別は`strata`，未見局面による層別は
 `position_strata`に保存する．
+
+### 指手予測・合法手評価
+
+指手予測loss，top-k，合法手率，合法手への確率質量は，プローブ学習を伴わない独立評価として
+実行する．
+
+```bash
+CHECKPOINT=checkpoints/model.pt \
+  scripts/run_move_evaluation.sh
+```
+
+結果は`results/moves/<checkpoint>/seed_<seed>/move_metrics.json`へ保存する．この評価も
+元JSONLの開始局面から固定的に再生し，評価時のランダム開始を行わない．
+
+学習・検証ではランダム開始系列を使うが，評価では元JSONLの開始局面（`start_ply=0`）から
+固定的に再生する．したがって評価局面はseedによって変化しない．既定の
+`POSITIONS_PER_GAME=16`は各対局から評価する局面数を抑えるための決定論的な抽出であり，
+全局面を使う場合は`POSITIONS_PER_GAME=0`を指定する．
 
 ### 評価指標の読み方
 
@@ -635,6 +653,8 @@ BATCH_SIZE=2048 \
 `VOCAB_PATH`、`TRAIN_JSONL`、`VALIDATION_JSONL`、`EVALUATION_JSONL`、
 `OUTPUT_DIR`、`PYTHON_BIN`も同様に指定できる。modeより後の引数は
 `evaluate_probes.py`へそのまま渡される。
+シェル実行では`state_0`を主指標へ含めない。prompt読取りの確認が必要な場合は
+`INCLUDE_INITIAL_STATE=1`を指定する。
 
 ## 開始局面のランダム化
 
