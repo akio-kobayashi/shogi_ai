@@ -11,6 +11,8 @@ PYTHON_BIN="${PYTHON_BIN:-${PROJECT_DIR}/.venv/bin/python}"
 DATASET_DIR="${DATASET_DIR:-${PROJECT_DIR}/data/datasets}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_DIR}/data/check_probe}"
 MAX_PREFIX_MOVES="${MAX_PREFIX_MOVES:-221}"
+START_PLIES="${START_PLIES:-0,24,25,32,33}"
+MIN_SUFFIX_MOVES="${MIN_SUFFIX_MOVES:-40}"
 SEED="${SEED:-20260724}"
 TRAIN_SAMPLES_PER_CLASS="${TRAIN_SAMPLES_PER_CLASS:-20000}"
 VALIDATION_SAMPLES_PER_CLASS="${VALIDATION_SAMPLES_PER_CLASS:-5000}"
@@ -36,6 +38,8 @@ build_split() {
     --output-jsonl "${output}" \
     --samples-per-class "${samples}" \
     --max-prefix-moves "${MAX_PREFIX_MOVES}" \
+    --start-plies "${START_PLIES}" \
+    --min-suffix-moves "${MIN_SUFFIX_MOVES}" \
     --seed "${SEED}"
 }
 

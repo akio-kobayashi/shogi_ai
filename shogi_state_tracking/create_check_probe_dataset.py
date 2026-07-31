@@ -11,7 +11,9 @@ import random
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableSequence, Tuple
 
-from create_dataset import encode_initial_state, import_cshogi
+from create_dataset import import_cshogi
+from data import parse_start_plies
+from preprocess import materialize_segment
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,13 +27,24 @@ def parse_args() -> argparse.Namespace:
         "--samples-per-class",
         type=int,
         default=10000,
-        help="王手／非王手それぞれの最大状態数。0なら全件を保存する",
+        help="全開始条件を合わせた王手／非王手それぞれの最大状態数。0なら全件を保存する",
     )
     parser.add_argument(
         "--max-prefix-moves",
         type=int,
         default=221,
         help="開始局面から使う最大指手数。checkpointのmax_seq_lenに合わせる",
+    )
+    parser.add_argument(
+        "--start-plies",
+        default="0,24,25,32,33",
+        help="状態promptとして使う開始plyをcomma区切りで指定する",
+    )
+    parser.add_argument(
+        "--min-suffix-moves",
+        type=int,
+        default=40,
+        help="各開始局面の後に必要な最小指手数",
     )
     parser.add_argument("--seed", type=int, default=20260724)
     return parser.parse_args()
@@ -66,38 +79,56 @@ def position_scope(record: Mapping[str, object], ply: int) -> str:
 
 def make_state_record(
     record: Mapping[str, object],
-    moves: List[str],
-    ply: int,
+    start_ply: int,
+    prefix_moves: List[str],
+    absolute_ply: int,
     in_check: bool,
     current_sfen: str,
+    start_sfen: str,
     initial_tokens: List[str],
 ) -> Dict[str, object]:
     source_game_id = str(record.get("game_id", "unknown_game"))
     return {
         "schema_version": 1,
-        "game_id": "{}:check-ply-{}".format(source_game_id, ply),
+        "game_id": "{}:check-start-{}-ply-{}".format(
+            source_game_id, start_ply, absolute_ply
+        ),
         "source_game_id": source_game_id,
         "split": "{}_check_probe".format(record.get("split", "unknown")),
-        "probe_ply": ply,
+        "start_ply": start_ply,
+        "probe_ply": absolute_ply,
         "in_check": bool(in_check),
-        "initial_sfen": str(record.get("initial_sfen", record.get("start_sfen", ""))),
+        "initial_sfen": start_sfen,
         "initial_state_tokens": initial_tokens,
         # 後段ではこのprefixの最後の指手位置の表現を使う。
-        "move_tokens": moves[:ply],
+        "move_tokens": prefix_moves,
         "target_sfen": current_sfen,
         "player_scope": str(record.get("player_scope", record.get("engine_scope", ""))),
-        "position_scope": position_scope(record, ply),
+        "position_scope": position_scope(record, absolute_ply),
         "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
     }
 
 
 def build_dataset(args: argparse.Namespace) -> Dict[str, object]:
-    if args.samples_per_class < 0 or args.max_prefix_moves <= 0:
-        raise ValueError("samples-per-class must be nonnegative and max-prefix-moves positive")
+    if (
+        args.samples_per_class < 0
+        or args.max_prefix_moves <= 0
+        or args.min_suffix_moves <= 0
+    ):
+        raise ValueError("sampling and suffix limits must be positive")
     cshogi = import_cshogi()
+    start_plies = parse_start_plies(args.start_plies)
     rng = random.Random(args.seed)
-    selected: Dict[bool, List[Mapping[str, object]]] = {True: [], False: []}
-    seen = {True: 0, False: 0}
+    # 条件ごとの王手頻度差が結果に混ざらないよう，開始plyごとに均衡化する。
+    selected = {
+        start_ply: {True: [], False: []} for start_ply in start_plies
+    }
+    seen = {start_ply: {True: 0, False: 0} for start_ply in start_plies}
+    limit_per_start = (
+        0
+        if args.samples_per_class == 0
+        else (args.samples_per_class + len(start_plies) - 1) // len(start_plies)
+    )
     games = 0
 
     with Path(args.input_jsonl).open("r", encoding="utf-8") as handle:
@@ -108,36 +139,67 @@ def build_dataset(args: argparse.Namespace) -> Dict[str, object]:
             initial_sfen = str(record.get("initial_sfen", record.get("start_sfen", "")))
             if not initial_sfen:
                 raise ValueError("{}:{} has no initial_sfen".format(args.input_jsonl, line_number))
-            board = cshogi.Board(initial_sfen)
-            initial_tokens = list(record.get("initial_state_tokens", []))
-            if len(initial_tokens) != 96:
-                initial_tokens = encode_initial_state(board, cshogi)
             moves = [str(move) for move in record.get("move_tokens", [])]
             games += 1
-            # state_0は明示promptそのものなので除外する。
-            for ply, move_usi in enumerate(moves[: args.max_prefix_moves], 1):
-                move = board.move_from_usi(move_usi)
-                if not board.is_legal(move):
-                    raise ValueError(
-                        "{}:{} illegal move at ply {}: {}".format(
-                            args.input_jsonl, line_number, ply, move_usi
+            for start_ply in start_plies:
+                if len(moves) - start_ply < args.min_suffix_moves:
+                    continue
+                segment = materialize_segment(
+                    record,
+                    start_ply=start_ply,
+                    max_suffix_moves=args.max_prefix_moves,
+                )
+                board = cshogi.Board(str(segment["start_sfen"]))
+                initial_tokens = list(segment["initial_state_tokens"])
+                segment_moves = [str(move) for move in segment["move_tokens"]]
+                # state_0は明示promptそのものなので除外する。
+                for relative_ply, move_usi in enumerate(segment_moves, 1):
+                    move = board.move_from_usi(move_usi)
+                    if not board.is_legal(move):
+                        raise ValueError(
+                            "{}:{} illegal move at ply {}: {}".format(
+                                args.input_jsonl,
+                                line_number,
+                                start_ply + relative_ply,
+                                move_usi,
+                            )
                         )
+                    board.push(move)
+                    label = bool(board.is_check())
+                    item = make_state_record(
+                        record,
+                        start_ply,
+                        segment_moves[:relative_ply],
+                        start_ply + relative_ply,
+                        label,
+                        board.sfen(),
+                        str(segment["start_sfen"]),
+                        initial_tokens,
                     )
-                board.push(move)
-                label = bool(board.is_check())
-                item = make_state_record(
-                    record, moves, ply, label, board.sfen(), initial_tokens
-                )
-                seen[label] = reservoir_add(
-                    selected[label], item, seen[label], args.samples_per_class, rng
-                )
+                    seen[start_ply][label] = reservoir_add(
+                        selected[start_ply][label],
+                        item,
+                        seen[start_ply][label],
+                        limit_per_start,
+                        rng,
+                    )
 
-    # 両クラスを同数へ揃える。正例不足時にも，非王手だけが過剰に残らないようにする。
-    count = min(len(selected[True]), len(selected[False]))
-    for label in (True, False):
-        rng.shuffle(selected[label])
-        del selected[label][count:]
-    output_records = selected[True] + selected[False]
+    # 正例不足時にも，ある開始条件の非王手だけが過剰に残らないようにする。
+    counts_by_start = {}
+    output_records = []
+    for start_ply in start_plies:
+        count = min(
+            len(selected[start_ply][True]), len(selected[start_ply][False])
+        )
+        for label in (True, False):
+            rng.shuffle(selected[start_ply][label])
+            del selected[start_ply][label][count:]
+            output_records.extend(selected[start_ply][label])
+        counts_by_start[str(start_ply)] = {
+            "candidate_in_check": seen[start_ply][True],
+            "candidate_not_in_check": seen[start_ply][False],
+            "selected_per_class": count,
+        }
     rng.shuffle(output_records)
 
     output = Path(args.output_jsonl)
@@ -150,10 +212,14 @@ def build_dataset(args: argparse.Namespace) -> Dict[str, object]:
         "input_jsonl": str(args.input_jsonl),
         "output_jsonl": str(output),
         "games": games,
-        "candidate_states": {"in_check": seen[True], "not_in_check": seen[False]},
-        "selected_states_per_class": count,
+        "candidate_states_by_start_ply": counts_by_start,
+        "selected_states_per_class": sum(
+            value["selected_per_class"] for value in counts_by_start.values()
+        ),
         "selected_states": len(output_records),
         "max_prefix_moves": args.max_prefix_moves,
+        "start_plies": start_plies,
+        "min_suffix_moves": args.min_suffix_moves,
         "seed": args.seed,
     }
 

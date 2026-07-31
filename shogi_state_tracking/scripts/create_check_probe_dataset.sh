@@ -9,6 +9,8 @@ INPUT_JSONL="${INPUT_JSONL:-${PROJECT_DIR}/data/datasets/evaluation.jsonl}"
 OUTPUT_JSONL="${OUTPUT_JSONL:-${PROJECT_DIR}/data/check_probe/evaluation.jsonl}"
 SAMPLES_PER_CLASS="${SAMPLES_PER_CLASS:-10000}"
 MAX_PREFIX_MOVES="${MAX_PREFIX_MOVES:-221}"
+START_PLIES="${START_PLIES:-0,24,25,32,33}"
+MIN_SUFFIX_MOVES="${MIN_SUFFIX_MOVES:-40}"
 SEED="${SEED:-20260724}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -25,5 +27,7 @@ exec "${PYTHON_BIN}" "${PROJECT_DIR}/create_check_probe_dataset.py" \
   --output-jsonl "${OUTPUT_JSONL}" \
   --samples-per-class "${SAMPLES_PER_CLASS}" \
   --max-prefix-moves "${MAX_PREFIX_MOVES}" \
+  --start-plies "${START_PLIES}" \
+  --min-suffix-moves "${MIN_SUFFIX_MOVES}" \
   --seed "${SEED}" \
   "$@"

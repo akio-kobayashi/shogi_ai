@@ -135,6 +135,71 @@ class FixedStartSequenceDataset(ShogiSequenceDataset):
         return self._encode_record(segment)
 
 
+def parse_start_plies(value: str) -> List[int]:
+    """`0,24,25`形式の固定開始ply指定を正規化する。"""
+    result: List[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ply = int(item)
+        if ply < 0:
+            raise ValueError("start ply must be nonnegative")
+        result.append(ply)
+    result = list(dict.fromkeys(result))
+    if not result:
+        raise ValueError("at least one start ply is required")
+    return result
+
+
+class FixedStartPliesSequenceDataset(ShogiSequenceDataset):
+    """指定した複数の開始plyから，決定的に評価系列を作るDataset。
+
+    各開始plyは実際の局面を96 tokenのpromptとして与える。これにより，標準初期局面
+    だけへの依存を避けた条件付き指手評価ができる。短すぎる対局は，その開始plyだけを
+    除外する（他の開始plyは残す）。
+    """
+
+    def __init__(
+        self,
+        jsonl_path: str,
+        token_to_id: Mapping[str, int],
+        start_plies: Sequence[int],
+        min_suffix_moves: int = 1,
+        max_suffix_moves: int | None = None,
+    ):
+        super().__init__(jsonl_path, token_to_id)
+        if min_suffix_moves <= 0:
+            raise ValueError("min_suffix_moves must be positive")
+        if max_suffix_moves is not None and max_suffix_moves <= 0:
+            raise ValueError("max_suffix_moves must be positive when specified")
+        self.start_plies = list(dict.fromkeys(int(value) for value in start_plies))
+        if not self.start_plies or min(self.start_plies) < 0:
+            raise ValueError("start_plies must contain nonnegative values")
+        self.min_suffix_moves = min_suffix_moves
+        self.max_suffix_moves = max_suffix_moves
+        self.examples = [
+            (record_index, start_ply)
+            for record_index, record in enumerate(self.records)
+            for start_ply in self.start_plies
+            if len(record["move_tokens"]) - start_ply >= min_suffix_moves
+        ]
+        if not self.examples:
+            raise ValueError("no evaluation examples satisfy start ply constraints")
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, index: int):
+        record_index, start_ply = self.examples[index]
+        segment = materialize_segment(
+            self.records[record_index],
+            start_ply=start_ply,
+            max_suffix_moves=self.max_suffix_moves,
+        )
+        return self._encode_record(segment)
+
+
 class RandomStartSequenceDataset(ShogiSequenceDataset):
     """各epochで対局ごとの開始局面を選び直す学習用Dataset。
 

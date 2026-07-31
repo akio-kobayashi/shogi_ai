@@ -16,9 +16,10 @@ from create_dataset import all_usi_move_tokens, import_cshogi
 from data import (
     FIXED_SEQUENCE_OVERHEAD,
     IGNORE_INDEX,
-    FixedStartSequenceDataset,
+    FixedStartPliesSequenceDataset,
     RandomStartSequenceDataset,
     load_vocabulary,
+    parse_start_plies,
 )
 from models import ModelConfig, T2MLRConfig, build_model
 from probes import (
@@ -31,6 +32,7 @@ from probes import (
     replay_probe_targets,
     state_metrics,
     stratified_metrics,
+    subset_targets,
 )
 
 
@@ -142,6 +144,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--candidate-count", type=int, default=40)
     parser.add_argument("--min-suffix-moves", type=int, default=40)
+    parser.add_argument(
+        "--evaluation-start-plies",
+        default="0,24,25,32,33",
+        help="評価時に開始局面として使うplyをcomma区切りで指定する",
+    )
     parser.add_argument("--samples-per-game", type=int, default=1)
     parser.add_argument(
         "--positions-per-game",
@@ -270,12 +277,11 @@ def random_start_dataset(
 def evaluation_dataset(
     path: str,
     vocabulary: Mapping[str, int],
+    start_plies: Sequence[int],
+    min_suffix_moves: int,
     max_seq_len: int | None = None,
 ):
-    """評価用の固定開始Datasetを返す。
-
-    元JSONLの初期局面（start_ply=0）から再生し，評価対象をseedで変化させない。
-    """
+    """評価用の複数固定開始Datasetを返す。"""
     max_suffix_moves = None
     if max_seq_len is not None:
         max_suffix_moves = max_seq_len - FIXED_SEQUENCE_OVERHEAD
@@ -283,11 +289,33 @@ def evaluation_dataset(
             raise ValueError(
                 "checkpoint max_seq_len is too short for the fixed state prefix"
             )
-    return FixedStartSequenceDataset(
+    return FixedStartPliesSequenceDataset(
         path,
         vocabulary,
+        start_plies=start_plies,
+        min_suffix_moves=min_suffix_moves,
         max_suffix_moves=max_suffix_moves,
     )
+
+
+def metrics_by_start_ply(
+    targets: ProbeTargets,
+    board_prediction: torch.Tensor,
+    hand_prediction: torch.Tensor,
+    turn_prediction: torch.Tensor,
+    start_plies: torch.Tensor,
+) -> Dict[str, Mapping[str, object]]:
+    """開始局面条件ごとに状態復号性能を集計する。"""
+    result: Dict[str, Mapping[str, object]] = {}
+    for start_ply in sorted(set(int(value) for value in start_plies.tolist())):
+        mask = start_plies == start_ply
+        result[str(start_ply)] = state_metrics(
+            subset_targets(targets, mask),
+            board_prediction[mask],
+            hand_prediction[mask],
+            turn_prediction[mask],
+        )
+    return result
 
 
 def select_distances(
@@ -801,6 +829,13 @@ def evaluate_source(
         split_data["distances"],
         split_data["position_scopes"],
     )
+    metrics["start_ply_strata"] = metrics_by_start_ply(
+        split_data["targets"],
+        board,
+        hands,
+        turn,
+        split_data["start_plies"],
+    )
     return metrics, {
         "board_target": split_data["targets"].board,
         "board_prediction": board,
@@ -841,6 +876,7 @@ def main() -> None:
         config.n_layers,
         model_type in {"t2mlr", "t^2mlr", "t²mlr"},
     )
+    evaluation_start_plies = parse_start_plies(args.evaluation_start_plies)
 
     datasets = {
         "train": random_start_dataset(
@@ -864,6 +900,8 @@ def main() -> None:
         "evaluation": evaluation_dataset(
             args.evaluation_jsonl,
             vocabulary,
+            evaluation_start_plies,
+            args.min_suffix_moves,
             config.max_seq_len,
         ),
     }
@@ -907,7 +945,9 @@ def main() -> None:
             "include_initial_state": args.include_initial_state,
             "samples_per_game": args.samples_per_game,
             "seed": args.seed,
-            "evaluation_start_mode": "fixed_start_ply_0",
+            "evaluation_start_mode": "fixed_multi_start_ply",
+            "evaluation_start_plies": evaluation_start_plies,
+            "evaluation_min_suffix_moves": args.min_suffix_moves,
         },
         "probe_results": {},
     }
@@ -942,6 +982,13 @@ def main() -> None:
         majority_turn,
         extracted["evaluation"]["distances"],
         extracted["evaluation"]["position_scopes"],
+    )
+    majority_metrics["start_ply_strata"] = metrics_by_start_ply(
+        extracted["evaluation"]["targets"],
+        majority_board,
+        majority_hands,
+        majority_turn,
+        extracted["evaluation"]["start_plies"],
     )
     report["majority_baseline"] = majority_metrics
 

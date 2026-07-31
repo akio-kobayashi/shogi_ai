@@ -33,6 +33,8 @@ MOVE_OUTPUT_SUFFIX="${MOVE_OUTPUT_SUFFIX:-moves}"
 CHECK_PROBE_OUTPUT_SUFFIX="${CHECK_PROBE_OUTPUT_SUFFIX:-check_probes}"
 CHECK_PROBE_DIR="${CHECK_PROBE_DIR:-${PROJECT_DIR}/data/check_probe}"
 CHECK_MAX_PREFIX_MOVES="${CHECK_MAX_PREFIX_MOVES:-$((MAX_SEQ_LEN - 99))}"
+EVALUATION_START_PLIES="${EVALUATION_START_PLIES:-0,24,25,32,33}"
+EVALUATION_MIN_SUFFIX_MOVES="${EVALUATION_MIN_SUFFIX_MOVES:-40}"
 EPOCHS="${EPOCHS:-50}"
 EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-5}"
 EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0.0001}"
@@ -73,6 +75,8 @@ if [[ "${RUN_CHECK_PROBES}" -eq 1 && "${PREPARE_CHECK_PROBE_DATA}" -eq 1 ]]; the
   DATASET_DIR="${PROJECT_DIR}/data/datasets" \
   OUTPUT_DIR="${CHECK_PROBE_DIR}" \
   MAX_PREFIX_MOVES="${CHECK_MAX_PREFIX_MOVES}" \
+  START_PLIES="${EVALUATION_START_PLIES}" \
+  MIN_SUFFIX_MOVES="${EVALUATION_MIN_SUFFIX_MOVES}" \
     "${PROJECT_DIR}/scripts/create_check_probe_datasets.sh"
 elif [[ "${RUN_CHECK_PROBES}" -eq 1 ]]; then
   echo "use existing check-probe datasets: ${CHECK_PROBE_DIR}"
@@ -97,6 +101,8 @@ for size in small base large; do
     EVALUATION_JSONL="${EVALUATION_JSONL}" \
     OUTPUT_DIR="${move_output_dir}" \
     DEVICE="${DEVICE}" \
+    EVALUATION_START_PLIES="${EVALUATION_START_PLIES}" \
+    MIN_SUFFIX_MOVES="${EVALUATION_MIN_SUFFIX_MOVES}" \
       "${PROJECT_DIR}/scripts/run_move_evaluation.sh"
   else
     echo "skip move evaluation for size=${size} (RUN_MOVE_EVALUATION=0)"
@@ -113,6 +119,8 @@ for size in small base large; do
     EVALUATION_JSONL="${EVALUATION_JSONL}" \
     OUTPUT_DIR="${probe_output_dir}" \
     DEVICE="${DEVICE}" \
+    EVALUATION_START_PLIES="${EVALUATION_START_PLIES}" \
+    EVALUATION_MIN_SUFFIX_MOVES="${EVALUATION_MIN_SUFFIX_MOVES}" \
       "${PROJECT_DIR}/scripts/run_probe_evaluation.sh" "${PROBE_MODE}"
   else
     echo "skip state probe for size=${size} (RUN_PROBES=0)"

@@ -25,6 +25,8 @@ PROBE_EPOCHS="${PROBE_EPOCHS:-30}"
 PATIENCE="${PATIENCE:-5}"
 BATCH_SIZE="${BATCH_SIZE:-128}"
 INCLUDE_INITIAL_STATE="${INCLUDE_INITIAL_STATE:-0}"
+EVALUATION_START_PLIES="${EVALUATION_START_PLIES:-0,24,25,32,33}"
+EVALUATION_MIN_SUFFIX_MOVES="${EVALUATION_MIN_SUFFIX_MOVES:-40}"
 
 UNTRAINED=0
 case "${MODE}" in
@@ -86,6 +88,8 @@ COMMAND=(
   --probe-epochs "${PROBE_EPOCHS}"
   --patience "${PATIENCE}"
   --batch-size "${BATCH_SIZE}"
+  --evaluation-start-plies "${EVALUATION_START_PLIES}"
+  --min-suffix-moves "${EVALUATION_MIN_SUFFIX_MOVES}"
   --seed "${SEED}"
   --device "${DEVICE}"
   --skip-language-model
@@ -108,6 +112,8 @@ echo "mode: ${MODE}"
 echo "checkpoint: ${CHECKPOINT}"
 echo "sources: ${SOURCES}"
 echo "include_initial_state: ${INCLUDE_INITIAL_STATE}"
+echo "evaluation_start_plies: ${EVALUATION_START_PLIES}"
+echo "evaluation_min_suffix_moves: ${EVALUATION_MIN_SUFFIX_MOVES}"
 echo "output: ${OUTPUT_DIR}"
 printf "command:"
 printf " %q" "${COMMAND[@]}"

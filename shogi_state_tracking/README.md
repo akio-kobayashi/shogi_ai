@@ -45,11 +45,15 @@ scripts/run_transformer_size_compare_512.sh
 学習後に全サイズの数値評価だけを再実行する場合は次を使う．
 
 ```bash
-scripts/compare_transformer_sizes_maxseq512_with_probes.sh
+scripts/run_transformer_size_compare_512_evaluation.sh
 ```
 
-既定では数値評価を全て実行する．`RUN_TRAIN=0`で既存checkpointを使い，
+このスクリプトは`RUN_TRAIN=0`を固定し，既存checkpointを使う．既定では数値評価を全て実行する．
 `RUN_MOVE_EVALUATION=0`，`RUN_PROBES=0`，`RUN_CHECK_PROBES=0`で各評価を個別に省略できる．
+指手・状態・王手の評価は，既定で開始ply `0,24,25,32,33` の実局面を96 tokenの
+promptとして与える．偶数plyだけに偏らないよう，24/32に対応する25/33も含める．
+各開始局面の後に40手以上残る対局だけをその条件の評価へ使う．開始条件を変更する場合は，
+`EVALUATION_START_PLIES=0,40,41 EVALUATION_MIN_SUFFIX_MOVES=40`のように指定する．
 王手probe用の均衡化データは既定で再作成するが，既存の`data/check_probe/`を使う場合は
 `PREPARE_CHECK_PROBE_DATA=0`とする．
 

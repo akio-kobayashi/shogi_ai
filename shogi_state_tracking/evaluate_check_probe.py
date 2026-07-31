@@ -63,6 +63,7 @@ def extract_features(model, model_type: str, dataset, sources: Sequence[str], de
     """
     features = {source: [] for source in sources}
     labels = []
+    start_plies = []
     grouped = {}
     for record in dataset.records:
         key = (str(record.get("source_game_id", record["game_id"])), str(record.get("initial_sfen", "")))
@@ -105,6 +106,7 @@ def extract_features(model, model_type: str, dataset, sources: Sequence[str], de
                         value = output.hidden_states[layer][0, position]
                     features[source].append(value.detach().cpu())
                 labels.append(int(bool(record["in_check"])))
+                start_plies.append(int(record.get("start_ply", 0)))
             if group_index % 100 == 0 or group_index == len(grouped):
                 print(
                     "check_feature_extract_progress games={}/{} states={}".format(
@@ -115,6 +117,7 @@ def extract_features(model, model_type: str, dataset, sources: Sequence[str], de
     return (
         {source: torch.stack(values) for source, values in features.items()},
         torch.tensor(labels, dtype=torch.long),
+        torch.tensor(start_plies, dtype=torch.long),
     )
 
 
@@ -154,6 +157,16 @@ def evaluate_linear(probe: nn.Module, features: torch.Tensor, labels: torch.Tens
     metrics = binary_metrics(logits, labels)
     metrics["cross_entropy"] = float(nn.functional.cross_entropy(logits, labels))
     return metrics, logits
+
+
+def metrics_by_start_ply(
+    logits: torch.Tensor, labels: torch.Tensor, start_plies: torch.Tensor
+) -> Dict[str, Dict[str, float]]:
+    result = {}
+    for start_ply in sorted(set(int(value) for value in start_plies.tolist())):
+        mask = start_plies == start_ply
+        result[str(start_ply)] = binary_metrics(logits[mask], labels[mask])
+    return result
 
 
 def train_probe(train_x, train_y, validation_x, validation_y, args, device):
@@ -220,6 +233,7 @@ def main() -> int:
     # 学習集合の多数派を常に出す対照。均衡化された評価では通常ほぼ50%となる。
     majority = int(extracted["train"][1].mode().values)
     evaluation_labels = extracted["evaluation"][1]
+    evaluation_start_plies = extracted["evaluation"][2]
     baseline_logits = torch.zeros((evaluation_labels.numel(), 2))
     baseline_logits[:, majority] = 1.0
     report: Dict[str, object] = {
@@ -227,7 +241,14 @@ def main() -> int:
         "checkpoint": str(args.checkpoint),
         "model_type": model_type,
         "sources": sources,
-        "settings": {"seed": args.seed, "device": str(device), "balanced_dataset_expected": True},
+        "settings": {
+            "seed": args.seed,
+            "device": str(device),
+            "balanced_dataset_expected": True,
+            "evaluation_start_plies": sorted(
+                set(int(value) for value in evaluation_start_plies.tolist())
+            ),
+        },
         "majority_baseline": binary_metrics(baseline_logits, evaluation_labels),
         "probe_results": {},
     }
@@ -238,7 +259,10 @@ def main() -> int:
             extracted["validation"][0][source], extracted["validation"][1], args, device,
         )
         validation, _ = evaluate_linear(probe, extracted["validation"][0][source], extracted["validation"][1], args.batch_size, device)
-        evaluation, _ = evaluate_linear(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], args.batch_size, device)
+        evaluation, evaluation_logits = evaluate_linear(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], args.batch_size, device)
+        evaluation["start_ply_strata"] = metrics_by_start_ply(
+            evaluation_logits, evaluation_labels, evaluation_start_plies
+        )
         report["probe_results"][source] = {
             "training": training,
             "validation": validation,

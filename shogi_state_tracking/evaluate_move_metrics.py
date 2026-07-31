@@ -11,7 +11,12 @@ from typing import Dict
 import torch
 
 from create_dataset import all_usi_move_tokens, import_cshogi
-from data import FIXED_SEQUENCE_OVERHEAD, FixedStartSequenceDataset, IGNORE_INDEX
+from data import (
+    FIXED_SEQUENCE_OVERHEAD,
+    FixedStartPliesSequenceDataset,
+    IGNORE_INDEX,
+    parse_start_plies,
+)
 from data import load_vocabulary
 from evaluate_probes import load_backbone, resolve_device
 
@@ -29,7 +34,62 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-examples", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260724)
+    parser.add_argument(
+        "--evaluation-start-plies",
+        default="0,24,25,32,33",
+        help="開始局面として使うplyをcomma区切りで指定する",
+    )
+    parser.add_argument(
+        "--min-suffix-moves",
+        type=int,
+        default=40,
+        help="各開始局面の後に必要な最小指手数",
+    )
     return parser.parse_args()
+
+
+def empty_counts() -> Dict[str, float]:
+    return {
+        "move_loss_sum": 0.0,
+        "move_targets": 0.0,
+        "move_top1": 0.0,
+        "move_top5": 0.0,
+        "legal_positions": 0.0,
+        "legal_top1": 0.0,
+        "legal_top5": 0.0,
+        "syntactic_top1": 0.0,
+        "legal_probability_mass": 0.0,
+        "legal_vocabulary_coverage": 0.0,
+        "games": 0.0,
+        "total_replayed_moves": 0.0,
+    }
+
+
+def finalize_counts(counts: Dict[str, float]) -> Dict[str, object]:
+    move_targets = max(counts["move_targets"], 1.0)
+    legal_positions = max(counts["legal_positions"], 1.0)
+    mean_loss = counts["move_loss_sum"] / move_targets
+    return {
+        "games": int(counts["games"]),
+        "move_targets": int(counts["move_targets"]),
+        "total_replayed_moves": int(counts["total_replayed_moves"]),
+        "cross_entropy": mean_loss,
+        "perplexity": math.exp(min(mean_loss, 20.0)),
+        "top1_accuracy": counts["move_top1"] / move_targets,
+        "top5_accuracy": counts["move_top5"] / move_targets,
+        "legality": {
+            "move_positions": int(counts["legal_positions"]),
+            "top1_legal_rate": counts["legal_top1"] / legal_positions,
+            "top5_contains_legal_rate": counts["legal_top5"] / legal_positions,
+            "top1_syntactic_move_rate": counts["syntactic_top1"] / legal_positions,
+            "mean_legal_probability_mass": counts["legal_probability_mass"]
+            / legal_positions,
+            "mean_legal_move_vocabulary_coverage": counts[
+                "legal_vocabulary_coverage"
+            ]
+            / legal_positions,
+        },
+    }
 
 
 def evaluate(args: argparse.Namespace) -> Dict[str, object]:
@@ -46,9 +106,12 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
         raise ValueError(
             "checkpoint max_seq_len is too short for the fixed state prefix"
         )
-    dataset = FixedStartSequenceDataset(
+    start_plies = parse_start_plies(args.evaluation_start_plies)
+    dataset = FixedStartPliesSequenceDataset(
         args.evaluation_jsonl,
         vocabulary,
+        start_plies=start_plies,
+        min_suffix_moves=args.min_suffix_moves,
         max_suffix_moves=max_suffix_moves,
     )
     limit = len(dataset) if args.max_examples <= 0 else min(args.max_examples, len(dataset))
@@ -57,21 +120,12 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
     syntactic_moves = set(all_usi_move_tokens())
     eos_id = token_to_id.get("<EOS>")
 
-    move_loss_sum = 0.0
-    move_targets = 0
-    move_top1 = 0
-    move_top5 = 0
-    legal_positions = 0
-    legal_top1 = 0
-    legal_top5 = 0
-    syntactic_top1 = 0
-    legal_probability_mass = 0.0
-    legal_vocabulary_coverage = 0.0
-    total_moves = 0
+    total_counts = empty_counts()
+    counts_by_start = {str(ply): empty_counts() for ply in start_plies}
 
     print(
-        "move_evaluation_start examples={} device={} start_mode=fixed_start_ply_0".format(
-            limit, device
+        "move_evaluation_start examples={} device={} start_plies={}".format(
+            limit, device, ",".join(str(ply) for ply in start_plies)
         ),
         flush=True,
     )
@@ -90,6 +144,9 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
             )
 
             labels = example["labels"].to(device)
+            start_counts = counts_by_start[str(example["start_ply"])]
+            for counts in (total_counts, start_counts):
+                counts["games"] += 1
             supervised = labels != IGNORE_INDEX
             move_supervised = supervised
             if eos_id is not None:
@@ -97,17 +154,16 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
             move_logits = output.logits[0, move_supervised]
             move_labels = labels[move_supervised]
             if move_labels.numel():
-                move_loss_sum += float(
+                loss_sum = float(
                     torch.nn.functional.cross_entropy(
                         move_logits, move_labels, reduction="sum"
                     )
                 )
-                move_targets += int(move_labels.numel())
-                move_top1 += int(
+                top1 = int(
                     (move_logits.argmax(dim=-1) == move_labels).sum()
                 )
                 top_k = min(5, move_logits.shape[-1])
-                move_top5 += int(
+                top5 = int(
                     (
                         move_logits.topk(top_k, dim=-1).indices
                         == move_labels[:, None]
@@ -115,6 +171,11 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
                     .any(dim=1)
                     .sum()
                 )
+                for counts in (total_counts, start_counts):
+                    counts["move_loss_sum"] += loss_sum
+                    counts["move_targets"] += int(move_labels.numel())
+                    counts["move_top1"] += top1
+                    counts["move_top5"] += top5
 
             moves_marker = 1 + 96
             move_ids = input_ids[0, moves_marker + 1 : -1].tolist()
@@ -134,23 +195,26 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
                 legal_id_set = set(legal_ids)
                 top_ids = logits.topk(min(5, logits.shape[-1])).indices.tolist()
                 top_token = id_to_token[int(top_ids[0])]
-                legal_positions += 1
-                legal_top1 += int(int(top_ids[0]) in legal_id_set)
-                legal_top5 += int(
-                    any(int(value) in legal_id_set for value in top_ids)
-                )
-                syntactic_top1 += int(top_token in syntactic_moves)
-                legal_vocabulary_coverage += len(legal_ids) / max(
-                    len(legal_moves), 1
-                )
+                top1_legal = int(int(top_ids[0]) in legal_id_set)
+                top5_legal = int(any(int(value) in legal_id_set for value in top_ids))
+                syntactic = int(top_token in syntactic_moves)
+                coverage = len(legal_ids) / max(len(legal_moves), 1)
+                probability_mass = 0.0
                 if legal_ids:
                     probabilities = torch.softmax(logits, dim=-1)
                     legal_index = torch.tensor(
                         legal_ids, dtype=torch.long, device=device
                     )
-                    legal_probability_mass += float(
+                    probability_mass = float(
                         probabilities.index_select(0, legal_index).sum()
                     )
+                for counts in (total_counts, start_counts):
+                    counts["legal_positions"] += 1
+                    counts["legal_top1"] += top1_legal
+                    counts["legal_top5"] += top5_legal
+                    counts["syntactic_top1"] += syntactic
+                    counts["legal_vocabulary_coverage"] += coverage
+                    counts["legal_probability_mass"] += probability_mass
 
                 target = replay_board.move_from_usi(str(target_move))
                 if not replay_board.is_legal(target):
@@ -160,7 +224,8 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
                         )
                     )
                 replay_board.push(target)
-            total_moves += len(move_tokens)
+            for counts in (total_counts, start_counts):
+                counts["total_replayed_moves"] += len(move_tokens)
 
             processed = example_index + 1
             if args.progress_every > 0 and (
@@ -174,7 +239,6 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
                     flush=True,
                 )
 
-    mean_loss = move_loss_sum / max(move_targets, 1)
     return {
         "format_version": 1,
         "protocol": {
@@ -192,29 +256,15 @@ def evaluate(args: argparse.Namespace) -> Dict[str, object]:
             "examples": limit,
             "max_seq_len": config.max_seq_len,
             "max_suffix_moves": max_suffix_moves,
+            "min_suffix_moves": args.min_suffix_moves,
+            "evaluation_start_plies": start_plies,
             "seed": args.seed,
-            "start_mode": "fixed_start_ply_0",
+            "start_mode": "fixed_multi_start_ply",
         },
-        "metrics": {
-            "games": limit,
-            "move_targets": move_targets,
-            "total_replayed_moves": total_moves,
-            "cross_entropy": mean_loss,
-            "perplexity": math.exp(min(mean_loss, 20.0)),
-            "top1_accuracy": move_top1 / max(move_targets, 1),
-            "top5_accuracy": move_top5 / max(move_targets, 1),
-            "legality": {
-                "move_positions": legal_positions,
-                "top1_legal_rate": legal_top1 / max(legal_positions, 1),
-                "top5_contains_legal_rate": legal_top5
-                / max(legal_positions, 1),
-                "top1_syntactic_move_rate": syntactic_top1
-                / max(legal_positions, 1),
-                "mean_legal_probability_mass": legal_probability_mass
-                / max(legal_positions, 1),
-                "mean_legal_move_vocabulary_coverage": legal_vocabulary_coverage
-                / max(legal_positions, 1),
-            },
+        "metrics": finalize_counts(total_counts),
+        "metrics_by_start_ply": {
+            start_ply: finalize_counts(counts)
+            for start_ply, counts in counts_by_start.items()
         },
     }
 

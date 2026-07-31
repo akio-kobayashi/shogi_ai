@@ -12,6 +12,8 @@ EVALUATION_JSONL="${EVALUATION_JSONL:-${PROJECT_DIR}/data/datasets/evaluation.js
 SEED="${SEED:-20260724}"
 DEVICE="${DEVICE:-auto}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
+EVALUATION_START_PLIES="${EVALUATION_START_PLIES:-0,24,25,32,33}"
+MIN_SUFFIX_MOVES="${MIN_SUFFIX_MOVES:-40}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "Python executable is unavailable: ${PYTHON_BIN}" >&2
@@ -39,10 +41,14 @@ COMMAND=(
   --seed "${SEED}"
   --device "${DEVICE}"
   --progress-every "${PROGRESS_EVERY}"
+  --evaluation-start-plies "${EVALUATION_START_PLIES}"
+  --min-suffix-moves "${MIN_SUFFIX_MOVES}"
 )
 COMMAND+=("$@")
 
-echo "evaluation_start_mode: fixed_start_ply_0"
+echo "evaluation_start_mode: fixed_multi_start_ply"
+echo "evaluation_start_plies: ${EVALUATION_START_PLIES}"
+echo "min_suffix_moves: ${MIN_SUFFIX_MOVES}"
 echo "checkpoint: ${CHECKPOINT}"
 echo "output: ${OUTPUT_DIR}"
 printf "command:"
