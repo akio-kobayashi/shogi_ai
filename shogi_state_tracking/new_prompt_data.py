@@ -326,13 +326,13 @@ def collate_new_prompt_sequences(
         for key, destination in (
             ("input_ids", input_ids),
             ("labels", labels),
-            ("attention_mask", attention_mask),
             ("recurrent_mask", recurrent_mask),
             ("loss_weights", loss_weights),
             ("move_target_mask", move_target_mask),
             ("hint_target_mask", hint_target_mask),
         ):
             destination[row, :length] = example[key]
+        attention_mask[row, :length] = True
     return {
         "input_ids": input_ids,
         "labels": labels,
