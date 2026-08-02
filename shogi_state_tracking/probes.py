@@ -39,6 +39,8 @@ class ProbeTargets:
     board: torch.Tensor
     hands: torch.Tensor
     turn: torch.Tensor
+    # 旧artifactには保存されていないためoptionalにし，既存評価との互換性を保つ。
+    in_check: torch.Tensor | None = None
 
 
 @dataclass
@@ -46,6 +48,7 @@ class ProbeLogits:
     board: torch.Tensor
     hands: Tuple[torch.Tensor, ...]
     turn: torch.Tensor
+    in_check: torch.Tensor
 
 
 def board_state_targets(board, cshogi_module) -> Tuple[List[int], List[int], int]:
@@ -113,6 +116,7 @@ class LinearStateProbe(nn.Module):
             nn.Linear(d_model, maximum + 1) for maximum in HAND_MAX_COUNTS
         )
         self.turn_head = nn.Linear(d_model, 2)
+        self.in_check_head = nn.Linear(d_model, 2)
 
     def forward(self, features: torch.Tensor) -> ProbeLogits:
         if features.ndim != 2 or features.shape[-1] != self.d_model:
@@ -122,7 +126,7 @@ class LinearStateProbe(nn.Module):
         )
         hands = tuple(head(features) for head in self.hand_heads)
         turn = self.turn_head(features)
-        return ProbeLogits(board=board, hands=hands, turn=turn)
+        return ProbeLogits(board=board, hands=hands, turn=turn, in_check=self.in_check_head(features))
 
 
 def linear_probe_loss(
@@ -131,6 +135,7 @@ def linear_probe_loss(
     board_weight: float = 1.0,
     hand_weight: float = 1.0,
     turn_weight: float = 1.0,
+    check_weight: float = 1.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     board_loss = nn.functional.cross_entropy(
         logits.board.reshape(-1, BOARD_CLASS_COUNT),
@@ -142,15 +147,21 @@ def linear_probe_loss(
     ]
     hand_loss = torch.stack(hand_losses).mean()
     turn_loss = nn.functional.cross_entropy(logits.turn, targets.turn)
+    check_loss = None
+    if targets.in_check is not None:
+        check_loss = nn.functional.cross_entropy(logits.in_check, targets.in_check)
     total = (
         float(board_weight) * board_loss
         + float(hand_weight) * hand_loss
         + float(turn_weight) * turn_loss
     )
+    if check_loss is not None:
+        total = total + float(check_weight) * check_loss
     return total, {
         "board_loss": float(board_loss.detach()),
         "hand_loss": float(hand_loss.detach()),
         "turn_loss": float(turn_loss.detach()),
+        "check_loss": None if check_loss is None else float(check_loss.detach()),
         "total_loss": float(total.detach()),
     }
 
@@ -268,6 +279,7 @@ def subset_targets(targets: ProbeTargets, mask: torch.Tensor) -> ProbeTargets:
         board=targets.board[mask],
         hands=targets.hands[mask],
         turn=targets.turn[mask],
+        in_check=None if targets.in_check is None else targets.in_check[mask],
     )
 
 

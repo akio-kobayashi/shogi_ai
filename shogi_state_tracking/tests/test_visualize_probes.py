@@ -2,12 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 MODULE_DIR = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipIf(torch is None, "PyTorch is not installed")
 class ProbeVisualizationTest(unittest.TestCase):
     def payload(self):
         target = torch.zeros((2, 81), dtype=torch.long)
