@@ -117,8 +117,9 @@ class NewPromptSequenceDataset(Dataset):
             [str(move) for move in moves],
             [dict(annotation) for annotation in annotations],
         )
-        for token in [str(token) for token in state]:
-            self._token_id(token)
+        if state is not None:
+            for token in [str(token) for token in state]:
+                self._token_id(token)
         for move in [str(move) for move in moves]:
             self._token_id(move_token(move))
         for annotation in annotations:
@@ -138,6 +139,8 @@ class NewPromptSequenceDataset(Dataset):
                 if not isinstance(state, list):
                     raise ValueError("start candidate has no state_prompt_tokens")
                 validate_state_prompt_tokens([str(token) for token in state])
+                for token in state:
+                    self._token_id(str(token))
 
     def _make_control_pool(self) -> Dict[str, List[Dict[str, str]]]:
         pools: Dict[str, List[Dict[str, str]]] = {"B": [], "W": []}

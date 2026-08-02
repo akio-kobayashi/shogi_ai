@@ -15,6 +15,9 @@ RESULTS_DIR="$2"
 shift 2
 SEEDS_TEXT="${SEEDS:-20260802}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS_TEXT}"
+# Partial-actionとRandom controlは，注釈位置数以外の条件を揃えるため同じ確率を使う。
+# 例：PARTIAL_ACTION_PROBABILITY=0.1 scripts/run_new_prompt_vanilla_3x3.sh ...
+PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-0.30}"
 
 mkdir -p "${RESULTS_DIR}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" \
@@ -25,7 +28,7 @@ for size in small base large; do
     for seed in "${SEEDS[@]}"; do
       probability=0.0
       if [[ "${condition}" != "vanilla" ]]; then
-        probability=0.30
+        probability="${PARTIAL_ACTION_PROBABILITY}"
       fi
       output="${RESULTS_DIR}/vanilla-${size}/${condition}/seed-${seed}"
       mkdir -p "${output}"
