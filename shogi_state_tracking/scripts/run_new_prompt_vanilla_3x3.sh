@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 3規模 × 3条件のVanilla主実験．dataset作成機ではなく計算機で実行する．
+# 一括実行用の互換launcher。主実験はsmoke／rate-ablation／scale-comparisonへ分ける。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,9 +15,14 @@ RESULTS_DIR="$2"
 shift 2
 SEEDS_TEXT="${SEEDS:-20260802}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS_TEXT}"
-# Partial-actionとRandom controlは，注釈位置数以外の条件を揃えるため同じ確率を使う。
-# 例：PARTIAL_ACTION_PROBABILITY=0.1 scripts/run_new_prompt_vanilla_3x3.sh ...
-PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-0.30}"
+# 主比較は，注釈なしVanillaと，全非駒打ち指手へ注釈を挿入するPartial-actionである。
+# Random controlは同じ全挿入量で現在局面との対応だけを壊す補助対照とする。
+# p<1は主比較後のablation専用。例：PARTIAL_ACTION_PROBABILITY=0.1 ...
+PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-1.0}"
+# p=1の主比較では，選んだ履歴内の全非駒打ち指手を注釈できるようH=K=128を使う。
+# 512 token文脈では，prompt + H + 2K + boundary が収まる保守的な上限である。
+MAIN_MAX_MOVES="${MAIN_MAX_MOVES:-128}"
+MAIN_MAX_HINTS="${MAIN_MAX_HINTS:-128}"
 
 mkdir -p "${RESULTS_DIR}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" \
@@ -44,6 +49,7 @@ for size in small base large; do
       --model-size "${size}" \
       --annotation-mode "${condition}" \
       --annotation-probability "${probability}" \
+      --max-moves "${MAIN_MAX_MOVES}" --max-hints "${MAIN_MAX_HINTS}" \
       --seed "${seed}" "${resume_args[@]}" \
       "$@"
     done
