@@ -23,7 +23,11 @@ def write(path, lines):
 
 def bar_chart(rows, metric, title, output):
     lines = svg_header(title); lines += [f'<text class="title" x="40" y="42">{html.escape(title)}</text>', '<line x1="90" y1="580" x2="1160" y2="580" stroke="#333"/>', '<line x1="90" y1="90" x2="90" y2="580" stroke="#333"/>']
-    items = [(f'{row["model_size"]}/{row["condition"]}', float(row.get(metric, 0.0)), row["condition"]) for row in rows]
+    items = [
+        (f'{row["model_size"]}/{row["condition"]}/p{row.get("annotation_probability", "?")}',
+         float(row.get(metric, 0.0)), row["condition"])
+        for row in rows
+    ]
     for tick in range(6):
         value = tick / 5; y = 580 - value * 460
         lines += [f'<line x1="85" y1="{y:.1f}" x2="90" y2="{y:.1f}" stroke="#333"/>', f'<text class="small" x="45" y="{y+4:.1f}">{value:.1f}</text>']

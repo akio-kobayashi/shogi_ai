@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 注釈なしと全注釈p=1の差をsmall/largeで再現し，容量依存性を調べる。
+# 注釈率ablationで選んだp*をsmall/largeで比較し，容量依存性を調べる。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
@@ -7,18 +7,19 @@ PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
 IFS=',' read -r -a SEEDS <<< "${SEEDS:-20260802}"
 IFS=',' read -r -a SIZES <<< "${SCALE_SIZES:-small,large}"
+SCALE_ANNOTATION_RATE="${SCALE_ANNOTATION_RATE:?run_new_prompt_rate_ablation.sh後に採用率を指定してください。例：SCALE_ANNOTATION_RATE=0.3}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
 for size in "${SIZES[@]}"; do
   for seed in "${SEEDS[@]}"; do
     for condition in vanilla partial_action random_control; do
-      probability=1.0; [[ "${condition}" == "vanilla" ]] && probability=0.0
+      probability="${SCALE_ANNOTATION_RATE}"; [[ "${condition}" == "vanilla" ]] && probability=0.0
       output="${RESULTS_DIR}/vanilla-${size}/${condition}/p${probability}/seed-${seed}"
       resume=(); [[ -f "${output}/last.pt" ]] && resume=(--resume)
       "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
         --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
         --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
         --output-dir "${output}" --model-size "${size}" --annotation-mode "${condition}" \
-        --annotation-probability "${probability}" --max-moves 128 --max-hints 128 \
+        --annotation-probability "${probability}" --max-seq-len 512 --max-moves 192 --max-hints 110 \
         --seed "${seed}" "${resume[@]}" "$@"
     done
   done

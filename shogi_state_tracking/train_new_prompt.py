@@ -40,8 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="vanilla")
     parser.add_argument("--annotation-probability", type=float, default=0.0)
     parser.add_argument("--hint-loss-weight", type=float, default=1.0)
-    parser.add_argument("--max-hints", type=int, default=32)
-    parser.add_argument("--max-moves", type=int, default=256)
+    # max_seq_len=512では，最大の開始局面prompt（約90 token）を含めても，
+    # 192指手と110個の2-token注釈が同居する。p<=0.5の率ablationでは
+    # 注釈上限にほぼ達しないため，率そのものを比較できる。
+    parser.add_argument("--max-hints", type=int, default=110)
+    parser.add_argument("--max-moves", type=int, default=192)
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=50)

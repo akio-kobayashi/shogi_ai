@@ -22,6 +22,7 @@ from visualize_probes import (
     TOP,
     add_board_frame,
     add_hand_text,
+    add_piece,
     board_xy,
     esc,
     heat_color,
@@ -127,11 +128,11 @@ def heatmap_svg(board, cshogi, probabilities: torch.Tensor, class_index: int, so
     target, hands, turn = board_state_targets(board, cshogi)
     title = "{} probability at {} ply {}".format(BOARD_NAMES[class_index], game_id, ply)
     lines = svg_start(title, LEFT + BOARD_SIZE + 230, TOP + BOARD_SIZE + 160)
-    add_board_frame(lines)
+    add_board_frame(lines, heatmap=True)
     for square, probability in enumerate(probabilities.tolist()):
         x, y = board_xy(square)
         actual = int(target[square])
-        glyph, actual_name = piece_label(actual)
+        _, actual_name = piece_label(actual)
         is_target = actual == class_index
         lines.append(
             '<rect x="{}" y="{}" width="{}" height="{}" fill="{}" opacity="0.70" stroke="{}" stroke-width="{}"/>'.format(
@@ -139,12 +140,7 @@ def heatmap_svg(board, cshogi, probabilities: torch.Tensor, class_index: int, so
                 "#147a35" if is_target else "#6b4f2b", 3 if is_target else 1,
             )
         )
-        if glyph:
-            lines.append(
-                '<text class="piece" x="{}" y="{}" text-anchor="middle">{}</text>'.format(
-                    x + CELL / 2, y + 31, glyph
-                )
-            )
+        add_piece(lines, x, y, actual)
         lines.append(
             '<text class="prediction" x="{}" y="{}" text-anchor="middle">{:.2f}</text>'.format(
                 x + CELL / 2, y + 60, float(probability)

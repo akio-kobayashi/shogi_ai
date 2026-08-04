@@ -7,7 +7,9 @@ PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
 EXTRA_ARGS=("$@")
 IFS=',' read -r -a SEEDS <<< "${SEEDS:-20260802}"
-IFS=',' read -r -a RATES <<< "${ANNOTATION_RATES:-0.1,0.3,1.0}"
+# 512 token文脈で実指手数を192に固定する。p=0.5でも期待注釈数は約96で，
+# 上限110にほぼ達しない。p=1は注釈上限によって実効率が歪むので含めない。
+IFS=',' read -r -a RATES <<< "${ANNOTATION_RATES:-0.1,0.3,0.5}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
 run_one () {
   local condition="$1" probability="$2" seed="$3"
@@ -17,7 +19,7 @@ run_one () {
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
     --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
     --output-dir "${output}" --model-size base --annotation-mode "${condition}" \
-    --annotation-probability "${probability}" --max-moves 128 --max-hints 128 \
+    --annotation-probability "${probability}" --max-seq-len 512 --max-moves 192 --max-hints 110 \
     --seed "${seed}" "${resume[@]}" "${EXTRA_ARGS[@]}"
 }
 for seed in "${SEEDS[@]}"; do

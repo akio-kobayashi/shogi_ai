@@ -166,19 +166,29 @@ def svg_start(title: str, width: int, height: int) -> list[str]:
             esc(title), width, height, width, height
         ),
         "<title>{}</title>".format(esc(title)),
+        '<defs><linearGradient id="board-wood" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0%" stop-color="#f4d28d"/><stop offset="48%" stop-color="#d7a65a"/>'
+        '<stop offset="100%" stop-color="#bd7b35"/></linearGradient></defs>',
+        '<defs><linearGradient id="board-wood-muted" x1="0" y1="0" x2="1" y2="1">'
+        '<stop offset="0%" stop-color="#eee9db"/><stop offset="48%" stop-color="#d9d1be"/>'
+        '<stop offset="100%" stop-color="#c4b9a4"/></linearGradient></defs>',
         '<rect width="100%" height="100%" fill="#fffaf0"/>',
-        '<style>text{font-family: sans-serif; fill:#332b22} '
+        '<style>text{font-family:"Hiragino Mincho ProN","Yu Mincho",serif;fill:#332b22} '
         ".label{font-size:13px}.value{font-size:12px;font-weight:600}"
-        ".piece{font-size:29px}.prediction{font-size:12px}"
+        ".piece{font-size:27px;font-weight:700}.promoted{fill:#a12525}"
+        ".prediction{font-size:12px}.piece-body{fill:#f7df9d;stroke:#4c301c;stroke-width:1.6}"
+        ".shogi-piece.white .piece-body{fill:#e7c47d}.shogi-piece.white .piece{fill:#6f261e}"
         ".hand{font-size:18px}</style>",
     ]
 
 
-def add_board_frame(lines: list[str]) -> None:
+def add_board_frame(lines: list[str], heatmap: bool = False) -> None:
+    """盤枠を描く。ヒートマップでは配色を読ませるため低彩度にする。"""
+    fill = "url(#board-wood-muted)" if heatmap else "url(#board-wood)"
     lines.append(
-        '<rect x="{}" y="{}" width="{}" height="{}" fill="#d8a85e" '
+        '<rect x="{}" y="{}" width="{}" height="{}" fill="{}" '
         'stroke="#332b22" stroke-width="2"/>'.format(
-            LEFT, TOP, BOARD_SIZE, BOARD_SIZE
+            LEFT, TOP, BOARD_SIZE, BOARD_SIZE, fill
         )
     )
     for index in range(1, 9):
@@ -213,6 +223,38 @@ def piece_label(class_index: int) -> tuple[str, str]:
     side = "black" if class_index <= 14 else "white"
     name = BOARD_NAMES[class_index].split("_", 1)[1]
     return PIECE_GLYPHS.get(name, name), "{} {}".format(side, name)
+
+
+def add_piece(lines: list[str], x: int, y: int, class_index: int) -> None:
+    """升目に将棋駒の輪郭・向き・文字を描く。
+
+    後手の駒は180度回転する。SVGだけで完結するため、論文PDFへの埋め込み時も
+    フォント以外の外部アセットを必要としない。
+    """
+    glyph, _ = piece_label(class_index)
+    if not glyph:
+        return
+    center_x, center_y = x + CELL / 2, y + CELL / 2
+    # 上が尖り、下の裾が広がる五角形。実物の将棋駒に近い縦長の比率にする。
+    points = "{:.1f},{:.1f} {:.1f},{:.1f} {:.1f},{:.1f} {:.1f},{:.1f} {:.1f},{:.1f}".format(
+        center_x, y + 7,
+        x + 18, y + 25,
+        x + 9, y + 69,
+        x + 67, y + 69,
+        x + 58, y + 25,
+    )
+    side = "black" if class_index <= 14 else "white"
+    name = BOARD_NAMES[class_index].split("_", 1)[1]
+    transform = "" if side == "black" else ' transform="rotate(180 {:.1f} {:.1f})"'.format(center_x, center_y)
+    promoted = " promoted" if name.startswith("P") and name != "P" else ""
+    lines.append('<g class="shogi-piece {}"{}>'.format(side, transform))
+    lines.append('<polygon class="piece-body" points="{}"/>'.format(points))
+    lines.append(
+        '<text class="piece{}" x="{:.1f}" y="{:.1f}" text-anchor="middle">{}</text>'.format(
+            promoted, center_x, y + 53, glyph
+        )
+    )
+    lines.append("</g>")
 
 
 def add_hand_text(lines: list[str], hands: Sequence[int], prefix: str, y: int) -> None:
@@ -257,7 +299,7 @@ def aggregate_svg(
     lines = svg_start(
         "{}: {}".format(source, label), LEFT + BOARD_SIZE + 220, TOP + BOARD_SIZE + 120
     )
-    add_board_frame(lines)
+    add_board_frame(lines, heatmap=True)
     for index, value in enumerate(values.tolist()):
         x, y = board_xy(index)
         lines.append(
@@ -312,13 +354,13 @@ def position_svg(payload: Mapping[str, object], source: str, index: int) -> str:
     lines = svg_start(
         "{} position {}".format(source, index), LEFT + BOARD_SIZE + 220, TOP + BOARD_SIZE + 160
     )
-    add_board_frame(lines)
+    add_board_frame(lines, heatmap=True)
     for square in range(81):
         x, y = board_xy(square)
         actual = int(target[index, square])
         predicted = int(prediction[index, square])
         probability = float(target_probability[index, square])
-        glyph, actual_name = piece_label(actual)
+        _, actual_name = piece_label(actual)
         pred_glyph, pred_name = piece_label(predicted)
         correct = actual == predicted
         lines.append(
@@ -328,12 +370,7 @@ def position_svg(payload: Mapping[str, object], source: str, index: int) -> str:
                 "#27833b" if correct else "#b52b2b", 2 if not correct else 1,
             )
         )
-        if glyph:
-            lines.append(
-                '<text class="piece" x="{}" y="{}" text-anchor="middle">{}</text>'.format(
-                    x + CELL / 2, y + 34, glyph
-                )
-            )
+        add_piece(lines, x, y, actual)
         if not correct:
             lines.append(
                 '<text class="prediction" x="{}" y="{}" text-anchor="middle">→{}</text>'.format(
@@ -381,7 +418,7 @@ def difference_svg(
         raise ValueError("comparison artifacts do not share the same targets")
     values = (pred_a == target_a).float().mean(0) - (pred_b == target_b).float().mean(0)
     lines = svg_start("difference: {} minus second model".format(source), LEFT + BOARD_SIZE + 220, TOP + BOARD_SIZE + 120)
-    add_board_frame(lines)
+    add_board_frame(lines, heatmap=True)
     for index, value in enumerate(values.tolist()):
         x, y = board_xy(index)
         lines.append(

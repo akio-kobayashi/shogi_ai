@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一括実行用の互換launcher。主実験はsmoke／rate-ablation／scale-comparisonへ分ける。
+# 旧一括launcher。主実験には使わず，smoke／rate-ablation／scale-comparisonを順に使う。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,14 +15,10 @@ RESULTS_DIR="$2"
 shift 2
 SEEDS_TEXT="${SEEDS:-20260802}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS_TEXT}"
-# 主比較は，注釈なしVanillaと，全非駒打ち指手へ注釈を挿入するPartial-actionである。
-# Random controlは同じ全挿入量で現在局面との対応だけを壊す補助対照とする。
-# p<1は主比較後のablation専用。例：PARTIAL_ACTION_PROBABILITY=0.1 ...
-PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-1.0}"
-# p=1の主比較では，選んだ履歴内の全非駒打ち指手を注釈できるようH=K=128を使う。
-# 512 token文脈では，prompt + H + 2K + boundary が収まる保守的な上限である。
-MAIN_MAX_MOVES="${MAIN_MAX_MOVES:-128}"
-MAIN_MAX_HINTS="${MAIN_MAX_HINTS:-128}"
+# 512 tokenで192指手を保つ互換設定。p=1は上限によって実効率が歪むため不可。
+PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-0.3}"
+MAIN_MAX_MOVES="${MAIN_MAX_MOVES:-192}"
+MAIN_MAX_HINTS="${MAIN_MAX_HINTS:-110}"
 
 mkdir -p "${RESULTS_DIR}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" \

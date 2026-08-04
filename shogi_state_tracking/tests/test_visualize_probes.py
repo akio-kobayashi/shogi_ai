@@ -50,11 +50,17 @@ class ProbeVisualizationTest(unittest.TestCase):
             position = visualize_probes.position_svg(
                 payload["evaluation"]["layer_1"], "layer_1", 1
             )
+            black_position = visualize_probes.position_svg(
+                payload["evaluation"]["layer_1"], "layer_1", 0
+            )
             (temp_dir / "aggregate.svg").write_text(aggregate, encoding="utf-8")
             (temp_dir / "position.svg").write_text(position, encoding="utf-8")
             self.assertIn("<svg", aggregate)
             self.assertIn("0.50", aggregate)
             self.assertIn("→", position)
+            self.assertIn('class="shogi-piece black"', black_position)
+            self.assertIn('class="shogi-piece white" transform="rotate(180', position)
+            self.assertIn('fill="url(#board-wood-muted)"', position)
 
     def test_difference_requires_matching_targets(self):
         import visualize_probes

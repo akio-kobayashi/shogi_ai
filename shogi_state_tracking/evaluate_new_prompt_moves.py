@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--max-seq-len", type=int, default=512)
     parser.add_argument("--max-games", type=int, default=5000)
     parser.add_argument("--candidates-per-game", type=int, default=3)
-    parser.add_argument("--max-moves", type=int, default=128)
+    parser.add_argument("--max-moves", type=int, default=192)
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
 

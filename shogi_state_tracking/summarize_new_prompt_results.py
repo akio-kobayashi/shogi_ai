@@ -25,7 +25,10 @@ def main():
         manifest_path = path.parent / "run_manifest.json"
         if manifest_path.exists():
             run_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            row["seed"] = run_manifest.get("args", {}).get("seed")
+            run_args = run_manifest.get("args", {})
+            row["seed"] = run_args.get("seed")
+            # pはrate ablationの独立変数であり，conditionだけで集約してはならない。
+            row["annotation_probability"] = run_args.get("annotation_probability")
         probe_path = path.parent / "probes" / "probe_metrics.json"
         if probe_path.exists():
             probe = json.loads(probe_path.read_text(encoding="utf-8")); final = probe["probe_results"].get("layer_12", {})
@@ -39,18 +42,18 @@ def main():
     fields = sorted({key for row in rows for key in row})
     with (output / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
-    lines = ["# 新prompt実験サマリー", "", "| model | condition | top-1 | top-5 | legal top-1 | legal mass | probe full state |", "|---|---|---:|---:|---:|---:|---:|"]
+    lines = ["# 新prompt実験サマリー", "", "| model | condition | p | top-1 | top-5 | legal top-1 | legal mass | probe full state |", "|---|---|---:|---:|---:|---:|---:|---:|"]
     for row in rows:
-        lines.append("| {model_size} | {condition} | {top1_accuracy:.4f} | {top5_accuracy:.4f} | {top1_legal_rate:.4f} | {mean_legal_probability_mass:.4f} | {probe_final_full_state_exact_match:.4f} |".format(**{**row, "probe_final_full_state_exact_match": row.get("probe_final_full_state_exact_match", float("nan"))}))
+        lines.append("| {model_size} | {condition} | {annotation_probability} | {top1_accuracy:.4f} | {top5_accuracy:.4f} | {top1_legal_rate:.4f} | {mean_legal_probability_mass:.4f} | {probe_final_full_state_exact_match:.4f} |".format(**{**row, "annotation_probability": row.get("annotation_probability", "?"), "probe_final_full_state_exact_match": row.get("probe_final_full_state_exact_match", float("nan"))}))
     (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (output / "summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     grouped = {}
     numeric = ("top1_accuracy", "top5_accuracy", "top1_legal_rate", "mean_legal_probability_mass", "probe_final_full_state_exact_match")
     for row in rows:
-        grouped.setdefault((row["model_size"], row["condition"]), []).append(row)
+        grouped.setdefault((row["model_size"], row["condition"], row.get("annotation_probability")), []).append(row)
     aggregate = []
-    for (model_size, condition), values in sorted(grouped.items()):
-        row = {"model_size": model_size, "condition": condition, "runs": len(values)}
+    for (model_size, condition, probability), values in sorted(grouped.items()):
+        row = {"model_size": model_size, "condition": condition, "annotation_probability": probability, "runs": len(values)}
         for name in numeric:
             observations = [float(value[name]) for value in values if isinstance(value.get(name), (int, float))]
             if observations:
