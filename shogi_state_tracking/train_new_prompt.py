@@ -66,7 +66,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="DataLoader worker数。CUDA/ROCmではCPU側の系列生成を並列化する",
+    )
     parser.add_argument("--progress-every", type=int, default=20)
     parser.add_argument("--tensorboard-dir", help="TensorBoard event出力先。既定はOUTPUT_DIR/tensorboard")
     parser.add_argument("--no-tensorboard", action="store_true", help="TensorBoard eventを書き出さない")
@@ -77,15 +82,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def loss_for_batch(model, batch, device):
+    non_blocking = device.type == "cuda"
     output = model(
-        batch["input_ids"].to(device),
-        attention_mask=batch["attention_mask"].to(device),
-        recurrent_mask=batch["recurrent_mask"].to(device),
+        batch["input_ids"].to(device, non_blocking=non_blocking),
+        attention_mask=batch["attention_mask"].to(device, non_blocking=non_blocking),
+        recurrent_mask=batch["recurrent_mask"].to(device, non_blocking=non_blocking),
     )
-    labels = batch["labels"].to(device)
-    weights = batch["loss_weights"].to(device)
-    move_mask = batch["move_target_mask"].to(device)
-    hint_mask = batch["hint_target_mask"].to(device)
+    labels = batch["labels"].to(device, non_blocking=non_blocking)
+    weights = batch["loss_weights"].to(device, non_blocking=non_blocking)
+    move_mask = batch["move_target_mask"].to(device, non_blocking=non_blocking)
+    hint_mask = batch["hint_target_mask"].to(device, non_blocking=non_blocking)
     per_token = F.cross_entropy(
         output.logits.reshape(-1, output.logits.shape[-1]),
         labels.reshape(-1),
@@ -174,6 +180,8 @@ def git_commit() -> str:
 
 def main() -> None:
     args = parse_args()
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must be non-negative")
     if args.annotation_mode == "vanilla" and args.annotation_probability:
         raise ValueError("vanilla requires --annotation-probability 0")
     random.seed(args.seed)
@@ -194,8 +202,14 @@ def main() -> None:
     validation_common = dict(common, annotation_mode="vanilla", annotation_probability=0.0)
     validation_dataset = NewPromptSequenceDataset(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
     collate = partial(collate_new_prompt_sequences, pad_token_id=vocabulary["<PAD>"], max_seq_len=args.max_seq_len)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate)
-    validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate)
+    loader_options = {
+        "num_workers": args.num_workers,
+        "collate_fn": collate,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": args.num_workers > 0,
+    }
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
+    validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, **loader_options)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"

@@ -99,7 +99,12 @@ def parse_args() -> argparse.Namespace:
             "CPU/MPSでは無効"
         ),
     )
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="DataLoader worker数。CUDA/ROCmではCPU側の系列生成を並列化する",
+    )
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument(
         "--progress-every",
@@ -313,10 +318,11 @@ def build_datasets(args: argparse.Namespace, vocabulary):
 
 
 def batch_loss(model, batch, stage: str, device: torch.device):
-    input_ids = batch["input_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    recurrent_mask = batch["recurrent_mask"].to(device)
-    labels = batch["labels"].to(device)
+    non_blocking = device.type == "cuda"
+    input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
+    attention_mask = batch["attention_mask"].to(device, non_blocking=non_blocking)
+    recurrent_mask = batch["recurrent_mask"].to(device, non_blocking=non_blocking)
+    labels = batch["labels"].to(device, non_blocking=non_blocking)
     output = model(
         input_ids,
         attention_mask=attention_mask,
@@ -326,7 +332,7 @@ def batch_loss(model, batch, stage: str, device: torch.device):
         return weighted_causal_lm_loss(
             output.logits,
             labels,
-            batch["loss_weights"].to(device),
+            batch["loss_weights"].to(device, non_blocking=non_blocking),
         )
     return causal_lm_loss(output.logits, labels)
 
@@ -384,6 +390,8 @@ def save_checkpoint(path: Path, model, args: argparse.Namespace, epoch: int, ste
 
 def main() -> None:
     args = parse_args()
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must be non-negative")
     if args.epochs <= 0:
         raise ValueError("--epochs must be positive")
     if args.early_stopping_patience < 0:
@@ -445,6 +453,8 @@ def main() -> None:
         num_workers=args.num_workers,
         collate_fn=collate,
         generator=generator,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
     )
     validation_loader = DataLoader(
         validation_dataset,
@@ -452,6 +462,8 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
     )
     print(
         "data_ready train_examples={} validation_examples={} train_batches={} "

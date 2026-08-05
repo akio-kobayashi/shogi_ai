@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-1280}"
 MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
@@ -23,7 +24,7 @@ for size in "${SIZES[@]}"; do
         --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
         --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
         --output-dir "${output}" --model-type llama --model-size "${size}" --annotation-mode "${condition}" \
-        --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" \
+        --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
         --dropout 0.0 --seed "${seed}" "${resume[@]}" "$@"
     done
   done
