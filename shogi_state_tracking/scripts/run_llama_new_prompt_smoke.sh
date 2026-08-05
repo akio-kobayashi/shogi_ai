@@ -2,6 +2,7 @@
 # LLaMA型decoderの疎通確認。既存run_new_prompt_smoke.sh（Vanilla）は変更しない。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib_new_prompt_launcher.sh"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
   BATCH_SIZE="${batch_size}"
@@ -14,22 +15,18 @@ MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
+new_prompt_extract_launcher_args "$@"
 SEED="${SEED:-20260802}"; EPOCHS="${SMOKE_EPOCHS:-1}"
-if [[ -z "${MODEL_SIZE:-}" && -n "${SCALE_SIZES:-}" ]]; then
-  MODEL_SIZE="${SCALE_SIZES}"
-fi
-MODEL_SIZE="${MODEL_SIZE:-small}"
-case "${MODEL_SIZE}" in
-  small|base|large) ;;
-  *) echo "MODEL_SIZE must be small, base, or large" >&2; exit 2 ;;
-esac
+new_prompt_resolve_single_model_size small
+MODEL_SIZE="${NEW_PROMPT_MODEL_SIZE}"
 printf 'selected llama smoke model size: %s\n' "${MODEL_SIZE}" >&2
 printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
 for condition in vanilla partial_action random_control; do
   probability=0.0; [[ "${condition}" != "vanilla" ]] && probability="${SMOKE_ANNOTATION_RATE:-0.3}"
   output="${RESULTS_DIR}/llama-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
-  train_args=("$@")
+  train_args=()
+  if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
   [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
   printf 'run model_type=llama model_size=%s condition=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${SEED}" "${output}"
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \

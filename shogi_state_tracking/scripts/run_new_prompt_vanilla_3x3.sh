@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib_new_prompt_launcher.sh"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
   BATCH_SIZE="${batch_size}"
@@ -22,18 +23,14 @@ fi
 DATASET_DIR="$1"
 RESULTS_DIR="$2"
 shift 2
+new_prompt_extract_launcher_args "$@"
 SEEDS_TEXT="${SEEDS:-20260802}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS_TEXT}"
-IFS=',' read -r -a SIZES <<< "${SCALE_SIZES:-small,base,large}"
+new_prompt_resolve_model_sizes "small,base,large"
+SIZES=("${NEW_PROMPT_MODEL_SIZES[@]}")
 # 1280 tokenで512指手を保つ互換設定。p=1は上限によって実効率が歪むため不可。
 PARTIAL_ACTION_PROBABILITY="${PARTIAL_ACTION_PROBABILITY:-0.3}"
 
-for size in "${SIZES[@]}"; do
-  case "${size}" in
-    small|base|large) ;;
-    *) echo "SCALE_SIZES must contain only small, base, or large: ${size}" >&2; exit 2 ;;
-  esac
-done
 printf 'selected vanilla model sizes: %s\n' "${SIZES[*]}" >&2
 printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 
@@ -49,7 +46,8 @@ for size in "${SIZES[@]}"; do
         probability="${PARTIAL_ACTION_PROBABILITY}"
       fi
       output="${RESULTS_DIR}/vanilla-${size}/${condition}/seed-${seed}"
-      train_args=("$@")
+      train_args=()
+      if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
       if [[ -f "${output}/last.pt" ]]; then train_args+=(--resume); fi
       printf 'run model_type=vanilla model_size=%s condition=%s seed=%s output_dir=%s\n' "${size}" "${condition}" "${seed}" "${output}"
       "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \

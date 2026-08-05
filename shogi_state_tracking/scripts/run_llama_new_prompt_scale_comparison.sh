@@ -2,6 +2,7 @@
 # LLaMA型decoderについて，rate ablationで選んだp*の規模依存性を測る。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib_new_prompt_launcher.sh"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
   BATCH_SIZE="${batch_size}"
@@ -14,15 +15,11 @@ MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
+new_prompt_extract_launcher_args "$@"
 IFS=',' read -r -a SEEDS <<< "${SEEDS:-20260802}"
-IFS=',' read -r -a SIZES <<< "${SCALE_SIZES:-small,large}"
+new_prompt_resolve_model_sizes "small,large"
+SIZES=("${NEW_PROMPT_MODEL_SIZES[@]}")
 SCALE_ANNOTATION_RATE="${SCALE_ANNOTATION_RATE:?run_llama_new_prompt_rate_ablation.sh後に採用率を指定してください。例：SCALE_ANNOTATION_RATE=0.3}"
-for size in "${SIZES[@]}"; do
-  case "${size}" in
-    small|base|large) ;;
-    *) echo "SCALE_SIZES must contain only small, base, or large: ${size}" >&2; exit 2 ;;
-  esac
-done
 printf 'selected llama model sizes: %s\n' "${SIZES[*]}" >&2
 printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
@@ -31,7 +28,8 @@ for size in "${SIZES[@]}"; do
     for condition in vanilla partial_action random_control; do
       probability="${SCALE_ANNOTATION_RATE}"; [[ "${condition}" == "vanilla" ]] && probability=0.0
       output="${RESULTS_DIR}/llama-${size}/${condition}/p${probability}/seed-${seed}"
-      train_args=("$@")
+      train_args=()
+      if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
       [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
       printf 'run model_type=llama model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${size}" "${condition}" "${probability}" "${seed}" "${output}"
       "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \

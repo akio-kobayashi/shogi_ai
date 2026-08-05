@@ -2,6 +2,7 @@
 # LLaMA型decoderの注釈率ablation。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_DIR}/scripts/lib_new_prompt_launcher.sh"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
   BATCH_SIZE="${batch_size}"
@@ -14,12 +15,9 @@ MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
-EXTRA_ARGS=("$@")
-MODEL_SIZE="${MODEL_SIZE:-base}"
-case "${MODEL_SIZE}" in
-  small|base|large) ;;
-  *) echo "MODEL_SIZE must be small, base, or large" >&2; exit 2 ;;
-esac
+new_prompt_extract_launcher_args "$@"
+new_prompt_resolve_single_model_size base
+MODEL_SIZE="${NEW_PROMPT_MODEL_SIZE}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS:-20260802}"
 IFS=',' read -r -a RATES <<< "${ANNOTATION_RATES:-0.1,0.3,0.5}"
 printf 'selected llama rate-ablation model size: %s\n' "${MODEL_SIZE}" >&2
@@ -29,8 +27,8 @@ run_one () {
   local condition="$1" probability="$2" seed="$3"
   local output="${RESULTS_DIR}/llama-${MODEL_SIZE}/${condition}/p${probability}/seed-${seed}"
   local train_args=()
-  if ((${#EXTRA_ARGS[@]})); then
-    train_args=("${EXTRA_ARGS[@]}")
+  if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then
+    train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}")
   fi
   [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
   printf 'run model_type=llama model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${probability}" "${seed}" "${output}"
