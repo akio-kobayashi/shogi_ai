@@ -20,13 +20,14 @@ IFS=',' read -r -a RATES <<< "${ANNOTATION_RATES:-0.1,0.3,0.5}"
 run_one () {
   local condition="$1" probability="$2" seed="$3"
   local output="${RESULTS_DIR}/vanilla-base/${condition}/p${probability}/seed-${seed}"
-  local resume=(); [[ -f "${output}/last.pt" ]] && resume=(--resume)
+  local train_args=("${EXTRA_ARGS[@]}")
+  [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
     --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
     --output-dir "${output}" --model-size base --annotation-mode "${condition}" \
     --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
-    --seed "${seed}" "${resume[@]}" "${EXTRA_ARGS[@]}"
+    --seed "${seed}" "${train_args[@]}"
 }
 for seed in "${SEEDS[@]}"; do
   run_one vanilla 0.0 "${seed}"

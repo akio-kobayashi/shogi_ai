@@ -18,11 +18,12 @@ SEED="${SEED:-20260802}"; EPOCHS="${SMOKE_EPOCHS:-1}"
 for condition in vanilla partial_action random_control; do
   probability=0.0; [[ "${condition}" != "vanilla" ]] && probability="${SMOKE_ANNOTATION_RATE:-0.3}"
   output="${RESULTS_DIR}/vanilla-small/${condition}/p${probability}/seed-${SEED}"
-  resume=(); [[ -f "${output}/last.pt" ]] && resume=(--resume)
+  train_args=("$@")
+  [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
     --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
     --output-dir "${output}" --model-size small --annotation-mode "${condition}" \
     --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
-    --epochs "${EPOCHS}" --seed "${SEED}" "${resume[@]}" "$@"
+    --epochs "${EPOCHS}" --seed "${SEED}" "${train_args[@]}"
 done
