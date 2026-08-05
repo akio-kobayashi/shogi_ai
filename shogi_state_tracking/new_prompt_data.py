@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Sequence
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from data import IGNORE_INDEX
@@ -74,6 +75,9 @@ class NewPromptSequenceDataset(Dataset):
             raise ValueError("vanilla mode requires annotation_probability=0")
 
         self.token_to_id = dict(token_to_id)
+        self._bos_id = self._token_id("<BOS>")
+        self._moves_id = self._token_id("<MOVES>")
+        self._eos_id = self._token_id("<EOS>")
         self.annotation_mode = annotation_mode
         self.annotation_probability = float(annotation_probability)
         self.hint_loss_weight = float(hint_loss_weight)
@@ -92,11 +96,48 @@ class NewPromptSequenceDataset(Dataset):
                     self._validate_record(record)
                 except (TypeError, ValueError, KeyError) as exc:
                     raise ValueError("{}:{} {}".format(jsonl_path, line_number, exc)) from exc
-                self.records.append(record)
+                self.records.append(self._prepare_record(record))
         if not self.records:
             raise ValueError("new prompt dataset is empty: {}".format(jsonl_path))
         self._epoch = multiprocessing.Value("q", 0)
         self._control_pool = self._make_control_pool()
+
+    def _prepare_record(self, record: Mapping[str, object]) -> Dict[str, object]:
+        """文字列artifactを一度だけ整数IDへ変換する。
+
+        学習中の ``__getitem__`` では文字列変換・語彙検索を行わない。
+        開始候補の局面も同じタイミングで前処理しておく。
+        """
+        prepared = dict(record)
+        prepared["_state_prompt_ids"] = tuple(
+            self._token_id(str(token)) for token in record.get("state_prompt_tokens", [])
+        ) if record.get("state_prompt_tokens") is not None else None
+        prepared["_move_ids"] = tuple(
+            self._token_id(move_token(str(move))) for move in record["move_tokens"]
+        )
+        annotation_ids = []
+        eligible_indices = []
+        annotation_colors = []
+        for move_index, annotation in enumerate(record["move_annotations"]):
+            if bool(annotation.get("eligible", False)):
+                piece = str(annotation["piece"])
+                source = str(annotation["source"])
+                annotation_ids.append((self._token_id(piece), self._token_id(source)))
+                eligible_indices.append(move_index)
+                annotation_colors.append(_annotation_color(annotation))
+            else:
+                annotation_ids.append(None)
+                annotation_colors.append(None)
+        prepared["_annotation_ids"] = tuple(annotation_ids)
+        prepared["_eligible_indices"] = tuple(eligible_indices)
+        prepared["_annotation_colors"] = tuple(annotation_colors)
+        prepared["_prepared_candidates"] = tuple(
+            dict(candidate, _state_prompt_ids=tuple(
+                self._token_id(str(token)) for token in candidate["state_prompt_tokens"]
+            ))
+            for candidate in record.get("start_candidates", [])
+        )
+        return prepared
 
     def _validate_record(self, record: Mapping[str, object]) -> None:
         if not str(record.get("game_id", "")):
@@ -142,17 +183,15 @@ class NewPromptSequenceDataset(Dataset):
                 for token in state:
                     self._token_id(str(token))
 
-    def _make_control_pool(self) -> Dict[str, List[Dict[str, str]]]:
-        pools: Dict[str, List[Dict[str, str]]] = {"B": [], "W": []}
+    def _make_control_pool(self) -> Dict[str, List[tuple[int, int]]]:
+        pools: Dict[str, List[tuple[int, int]]] = {"B": [], "W": []}
         for record in self.records:
-            for annotation in record["move_annotations"]:
-                if not bool(annotation.get("eligible", False)):
+            for annotation, pair, color in zip(
+                record["move_annotations"], record["_annotation_ids"], record["_annotation_colors"]
+            ):
+                if not bool(annotation.get("eligible", False)) or pair is None:
                     continue
-                value = {
-                    "piece": str(annotation["piece"]),
-                    "source": str(annotation["source"]),
-                }
-                pools[_annotation_color(value)].append(value)
+                pools[color].append(pair)
         if not pools["B"] or not pools["W"]:
             raise ValueError("random control requires eligible annotations for both sides")
         return pools
@@ -170,19 +209,14 @@ class NewPromptSequenceDataset(Dataset):
         except KeyError as exc:
             raise KeyError("token is absent from vocab: {}".format(token)) from exc
 
-    def _selected_hint_indices(self, record: Mapping[str, object], index: int) -> set[int]:
+    def _selected_hint_indices(
+        self, record: Mapping[str, object], start_ply: int, end_ply: int, index: int
+    ) -> set[int]:
         if self.annotation_mode == "vanilla" or self.annotation_probability == 0.0:
             return set()
         epoch = self._epoch.value if self.randomize_each_epoch else 0
         rng = _seeded_rng(self.seed, epoch, index, record["game_id"], "hint")
-        start_ply = int(record.get("start_ply", 0))
-        end_ply = self._end_ply(record)
-        eligible = [
-            move_index
-            for move_index, annotation in enumerate(record["move_annotations"])
-            if start_ply <= move_index < end_ply
-            if bool(annotation.get("eligible", False))
-        ]
+        eligible = [move_index for move_index in record["_eligible_indices"] if start_ply <= move_index < end_ply]
         selected = [
             move_index
             for move_index in eligible
@@ -197,47 +231,49 @@ class NewPromptSequenceDataset(Dataset):
         record: Mapping[str, object],
         move_index: int,
         index: int,
-    ) -> List[str]:
-        annotation = record["move_annotations"][move_index]
+    ) -> tuple[int, int]:
+        original = record["_annotation_ids"][move_index]
+        if original is None:
+            raise ValueError("move {} has no eligible annotation".format(move_index))
         if self.annotation_mode != "random_control":
-            return [str(annotation["piece"]), str(annotation["source"])]
+            return original
         epoch = self._epoch.value if self.randomize_each_epoch else 0
         rng = _seeded_rng(self.seed, epoch, index, record["game_id"], move_index, "control")
-        pool = self._control_pool[_annotation_color(annotation)]
+        pool = self._control_pool[record["_annotation_colors"][move_index]]
         # 現在局面との対応だけを壊す対照なので，同一の駒種・開始位置対を
         # そのまま戻さない。色は保つため，先後や系列長は交絡させない。
-        alternatives = [
-            value for value in pool
-            if value["piece"] != str(annotation["piece"])
-            or value["source"] != str(annotation["source"])
-        ]
-        replacement = alternatives[rng.randrange(len(alternatives))] if alternatives else pool[0]
-        return [replacement["piece"], replacement["source"]]
+        if len(pool) <= 1:
+            return pool[0]
+        selected_index = rng.randrange(len(pool))
+        replacement = pool[selected_index]
+        if replacement == original:
+            replacement = pool[(selected_index + 1) % len(pool)]
+        return replacement
 
     def _encode_record(self, record: Mapping[str, object], index: int) -> Dict[str, object]:
-        record = self._materialize_candidate(record, index)
-        tokens = ["<BOS>"] + [str(token) for token in record["state_prompt_tokens"]] + ["<MOVES>"]
-        categories = ["prompt"] * len(tokens)
-        selected = self._selected_hint_indices(record, index)
-        start_ply = int(record.get("start_ply", 0))
-        end_ply = self._end_ply(record)
+        record, candidate = self._materialize_candidate(record, index)
+        state_ids = candidate["_state_prompt_ids"] if candidate is not None else record["_state_prompt_ids"]
+        start_ply = int(candidate.get("start_ply", 0) if candidate is not None else record.get("start_ply", 0))
+        end_ply = self._end_ply(record, len(state_ids), start_ply)
+        selected = self._selected_hint_indices(record, start_ply, end_ply, index)
+        token_ids = [self._bos_id, *state_ids, self._moves_id]
+        categories = ["prompt"] * len(token_ids)
         for move_index in range(start_ply, end_ply):
-            move_usi = record["move_tokens"][move_index]
             if move_index in selected:
-                tokens.extend(self._hint_pair(record, move_index, index))
+                token_ids.extend(self._hint_pair(record, move_index, index))
                 categories.extend(("hint", "hint"))
-            tokens.append(move_token(str(move_usi)))
+            token_ids.append(record["_move_ids"][move_index])
             categories.append("move")
-        tokens.append("<EOS>")
+        token_ids.append(self._eos_id)
         categories.append("eos")
 
-        input_ids = torch.tensor([self._token_id(token) for token in tokens], dtype=torch.long)
-        labels = torch.full((len(tokens),), IGNORE_INDEX, dtype=torch.long)
-        loss_weights = torch.zeros(len(tokens), dtype=torch.float32)
-        move_target_mask = torch.zeros(len(tokens), dtype=torch.bool)
-        hint_target_mask = torch.zeros(len(tokens), dtype=torch.bool)
+        input_ids = torch.tensor(token_ids, dtype=torch.long)
+        labels = torch.full((len(token_ids),), IGNORE_INDEX, dtype=torch.long)
+        loss_weights = torch.zeros(len(token_ids), dtype=torch.float32)
+        move_target_mask = torch.zeros(len(token_ids), dtype=torch.bool)
+        hint_target_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         # position iのlogitsでtokens[i+1]を予測する。
-        for position in range(len(tokens) - 1):
+        for position in range(len(token_ids) - 1):
             target_category = categories[position + 1]
             if target_category == "move":
                 labels[position] = input_ids[position + 1]
@@ -248,8 +284,8 @@ class NewPromptSequenceDataset(Dataset):
                 loss_weights[position] = self.hint_loss_weight
                 hint_target_mask[position] = True
 
-        moves_position = 1 + len(record["state_prompt_tokens"])
-        recurrent_mask = torch.zeros(len(tokens), dtype=torch.bool)
+        moves_position = 1 + len(state_ids)
+        recurrent_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         recurrent_mask[moves_position + 1 :] = True
         return {
             "input_ids": input_ids,
@@ -263,37 +299,33 @@ class NewPromptSequenceDataset(Dataset):
             "engine_scope": str(record.get("engine_scope", record.get("player_scope", ""))),
             "position_scope": str(record.get("position_scope", "unknown_position_scope")),
             "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
-            "start_ply": int(record.get("start_ply", 0)),
-            "start_sfen": str(record.get("start_sfen", "")),
+            "start_ply": start_ply,
+            "start_sfen": str(candidate.get("start_sfen", "") if candidate is not None else record.get("start_sfen", "")),
             "move_tokens": [str(move) for move in record["move_tokens"]],
             "move_annotations": [dict(value) for value in record["move_annotations"]],
         }
 
-    def _end_ply(self, record: Mapping[str, object]) -> int:
+    def _end_ply(self, record: Mapping[str, object], state_length: int, start_ply: int) -> int:
         """全条件で同数の実指手を保ちつつ，最悪時のhint数で長さを予約する。"""
-        start_ply = int(record.get("start_ply", 0))
-        available = len(record["move_tokens"]) - start_ply
+        available = len(record["_move_ids"]) - start_ply
         requested = self.max_moves if self.max_moves is not None else available
         if self.max_seq_len is not None:
             # BOS + state + MOVES + EOS に，最大K個の2 token hintを確保する。
-            overhead = 3 + len(record["state_prompt_tokens"])
+            overhead = 3 + state_length
             reserved_hints = 2 * (self.max_hints or 0)
             requested = min(requested, self.max_seq_len - overhead - reserved_hints)
         if requested <= 0:
             raise ValueError("state prompt and hint budget leave no room for a move")
         return start_ply + min(available, requested)
 
-    def _materialize_candidate(self, record: Mapping[str, object], index: int) -> Dict[str, object]:
+    def _materialize_candidate(self, record: Mapping[str, object], index: int):
         """候補開始局面から一つを決め，学習側でcshogiを使わずsuffixを選ぶ。"""
-        candidates = record.get("start_candidates")
+        candidates = record.get("_prepared_candidates")
         if not candidates:
-            return dict(record)
+            return record, None
         epoch = self._epoch.value if self.randomize_each_epoch else 0
         rng = _seeded_rng(self.seed, epoch, index, record["game_id"], "start")
-        candidate = dict(candidates[rng.randrange(len(candidates))])
-        result = dict(record)
-        result.update(candidate)
-        return result
+        return record, candidates[rng.randrange(len(candidates))]
 
     def __getitem__(self, index: int) -> Dict[str, object]:
         return self._encode_record(self.records[index], index)
@@ -313,26 +345,40 @@ def collate_new_prompt_sequences(
                 batch_length, max_seq_len
             )
         )
-    batch_size = len(examples)
-    input_ids = torch.full((batch_size, batch_length), pad_token_id, dtype=torch.long)
-    labels = torch.full((batch_size, batch_length), IGNORE_INDEX, dtype=torch.long)
-    attention_mask = torch.zeros((batch_size, batch_length), dtype=torch.bool)
-    recurrent_mask = torch.zeros((batch_size, batch_length), dtype=torch.bool)
-    loss_weights = torch.zeros((batch_size, batch_length), dtype=torch.float32)
-    move_target_mask = torch.zeros((batch_size, batch_length), dtype=torch.bool)
-    hint_target_mask = torch.zeros((batch_size, batch_length), dtype=torch.bool)
-    for row, example in enumerate(examples):
-        length = int(example["input_ids"].shape[0])
-        for key, destination in (
-            ("input_ids", input_ids),
-            ("labels", labels),
-            ("recurrent_mask", recurrent_mask),
-            ("loss_weights", loss_weights),
-            ("move_target_mask", move_target_mask),
-            ("hint_target_mask", hint_target_mask),
-        ):
-            destination[row, :length] = example[key]
-        attention_mask[row, :length] = True
+    input_ids = pad_sequence(
+        [example["input_ids"] for example in examples],
+        batch_first=True,
+        padding_value=pad_token_id,
+    )
+    labels = pad_sequence(
+        [example["labels"] for example in examples],
+        batch_first=True,
+        padding_value=IGNORE_INDEX,
+    )
+    recurrent_mask = pad_sequence(
+        [example["recurrent_mask"] for example in examples],
+        batch_first=True,
+        padding_value=False,
+    )
+    loss_weights = pad_sequence(
+        [example["loss_weights"] for example in examples],
+        batch_first=True,
+        padding_value=0.0,
+    )
+    move_target_mask = pad_sequence(
+        [example["move_target_mask"] for example in examples],
+        batch_first=True,
+        padding_value=False,
+    )
+    hint_target_mask = pad_sequence(
+        [example["hint_target_mask"] for example in examples],
+        batch_first=True,
+        padding_value=False,
+    )
+    lengths = torch.tensor(
+        [int(example["input_ids"].shape[0]) for example in examples], dtype=torch.long
+    )
+    attention_mask = torch.arange(batch_length)[None, :] < lengths[:, None]
     return {
         "input_ids": input_ids,
         "labels": labels,
