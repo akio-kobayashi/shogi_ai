@@ -30,7 +30,7 @@ def parse_args():
 def main():
     args = parse_args(); device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     vocabulary = load_vocabulary(args.vocab); payload = torch.load(args.checkpoint, map_location="cpu")
-    config = ModelConfig(**payload["config"]); model = build_model("vanilla", config).to(device); model.load_state_dict(payload["model_state_dict"]); model.eval()
+    config = ModelConfig(**payload["config"]); model = build_model(str(payload.get("model_type", "vanilla")), config).to(device); model.load_state_dict(payload["model_state_dict"]); model.eval()
     target = None
     with Path(args.evaluation_jsonl).open(encoding="utf-8") as handle:
         for line in handle:

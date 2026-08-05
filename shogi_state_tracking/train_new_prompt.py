@@ -27,6 +27,14 @@ MODEL_SIZES = {
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 2880},
 }
 
+# VanillaのGELU FFNは2投影，SwiGLU FFNは3投影である。d_ffを2/3にして，
+# LLaMA型と既存Vanillaの総パラメータ数をほぼ揃える。
+LLAMA_MODEL_SIZES = {
+    "small": {"d_model": 384, "n_layers": 12, "n_heads": 12, "d_ff": 1024},
+    "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
+    "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 1920},
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="新prompt用Vanilla decoderを学習する")
@@ -35,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab", required=True)
     parser.add_argument("--dataset-manifest", help="検証済みdataset_manifest.json。指定時はhashもrun manifestへ記録する")
     parser.add_argument("--output-dir", required=True)
+    # 既存呼出しとの互換性のため，既定値は従来どおりvanillaに保つ。
+    parser.add_argument("--model-type", choices=("vanilla", "llama"), default="vanilla")
     parser.add_argument("--resume", action="store_true", help="output-dir/last.ptからモデルとoptimizerを再開する")
     parser.add_argument("--model-size", choices=tuple(MODEL_SIZES), required=True)
     parser.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="vanilla")
@@ -84,7 +94,7 @@ def evaluate(model, loader, device, amp_dtype):
 
 def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss):
     torch.save({
-        "model_type": "vanilla", "config": model.config.to_dict(),
+        "model_type": args.model_type, "config": model.config.to_dict(),
         "model_state_dict": model.state_dict(), "epoch": epoch, "step": step,
         "best_validation_loss": best_loss, "new_prompt": {
             "model_size": args.model_size, "annotation_mode": args.annotation_mode,
@@ -112,9 +122,10 @@ def main() -> None:
     vocabulary = load_vocabulary(args.vocab)
     device = resolve_device(args.device)
     amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)
-    config = ModelConfig(vocab_size=len(vocabulary), max_seq_len=args.max_seq_len, dropout=args.dropout, **MODEL_SIZES[args.model_size])
+    size_table = LLAMA_MODEL_SIZES if args.model_type == "llama" else MODEL_SIZES
+    config = ModelConfig(vocab_size=len(vocabulary), max_seq_len=args.max_seq_len, dropout=args.dropout, **size_table[args.model_size])
     config.validate()
-    model = build_model("vanilla", config).to(device)
+    model = build_model(args.model_type, config).to(device)
     common = dict(annotation_mode=args.annotation_mode, annotation_probability=args.annotation_probability,
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
                   max_moves=args.max_moves, max_seq_len=args.max_seq_len)
@@ -135,6 +146,8 @@ def main() -> None:
         if not resume_path.is_file():
             raise FileNotFoundError("--resume was specified but last.pt is absent: {}".format(resume_path))
         resume = torch.load(resume_path, map_location=device)
+        if str(resume.get("model_type", "vanilla")).lower() != args.model_type:
+            raise ValueError("resume checkpoint model_type differs from requested model_type")
         if dict(resume.get("config", {})) != config.to_dict():
             raise ValueError("resume checkpoint model config differs from requested config")
         model.load_state_dict(resume["model_state_dict"])

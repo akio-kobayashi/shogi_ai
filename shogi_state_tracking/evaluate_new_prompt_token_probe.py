@@ -27,7 +27,7 @@ def main():
     args = parse_args(); vocabulary = load_vocabulary(args.vocab)
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     payload = torch.load(args.checkpoint, map_location="cpu")
-    config = ModelConfig(**payload["config"]); model = build_model("vanilla", config).to(device)
+    config = ModelConfig(**payload["config"]); model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)
     model.load_state_dict(payload["model_state_dict"]); model.eval()
     square_ids = [vocabulary[token] for token in square_tokens()]
     square_index = {token_id: index for index, token_id in enumerate(square_ids)}

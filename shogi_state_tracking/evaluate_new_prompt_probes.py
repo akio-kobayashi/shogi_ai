@@ -160,12 +160,13 @@ def main():
     vocabulary = load_vocabulary(args.vocab); device = resolve_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = ModelConfig(**checkpoint["config"])
-    model = build_model("vanilla", config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
+    model_type = str(checkpoint.get("model_type", "vanilla"))
+    model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
     board_map, hand_names = label_maps(); sources = expand_sources(args.sources, config.n_layers)
     raw = {"train": read_examples(args.train_jsonl, args.max_train_samples), "validation": read_examples(args.validation_jsonl, args.max_validation_samples), "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples)}
     extracted = {name: extract(model, examples, vocabulary, sources, board_map, hand_names, device, config.max_seq_len) for name, examples in raw.items()}
     majority = majority_predictions(extracted["train"][1], extracted["evaluation"][1].board.shape[0])
-    result = {"checkpoint": args.checkpoint, "settings": vars(args), "sources": sources, "majority_baseline": state_metrics(extracted["evaluation"][1], *majority), "probe_results": {}}
+    result = {"checkpoint": args.checkpoint, "model_type": model_type, "settings": vars(args), "sources": sources, "majority_baseline": state_metrics(extracted["evaluation"][1], *majority), "probe_results": {}}
     states = {}
     for source in sources:
         probe, best_loss = fit_probe(extracted["train"][0][source], extracted["train"][1], extracted["validation"][0][source], extracted["validation"][1], config.d_model, args, device)

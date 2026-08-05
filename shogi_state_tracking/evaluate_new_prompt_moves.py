@@ -103,7 +103,8 @@ def main():
     if config.vocab_size != len(vocabulary):
         raise ValueError("checkpoint and vocabulary sizes differ")
     device = device_for(args.device)
-    model = build_model("vanilla", config).to(device)
+    model_type = str(checkpoint.get("model_type", "vanilla"))
+    model = build_model(model_type, config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     totals = {"games": 0, "candidates": 0, **_empty_totals()}
@@ -123,7 +124,7 @@ def main():
     if not n:
         raise ValueError("no evaluable move targets")
     metrics = {"games": totals["games"], "candidates": totals["candidates"], **summarize(totals), "by_position_scope": {key: summarize(value) for key, value in scopes["position"].items()}, "by_trajectory_scope": {key: summarize(value) for key, value in scopes["trajectory"].items()}}
-    output = {"checkpoint": args.checkpoint, "settings": vars(args), "metrics": metrics}
+    output = {"checkpoint": args.checkpoint, "model_type": model_type, "settings": vars(args), "metrics": metrics}
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(output, ensure_ascii=False, indent=2))
