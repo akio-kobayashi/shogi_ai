@@ -99,6 +99,34 @@ class NewPromptDatasetTest(unittest.TestCase):
         self.assertEqual(int(example["start_ply"]), 1)
         self.assertEqual(example["move_tokens"], ["7g7f", "3c3d"])
 
+    def test_training_loss_reports_move_and_hint_targets_separately(self):
+        """注釈tokenがcombined lossに混ざるだけで消えないことを検査する。"""
+        from types import SimpleNamespace
+        import torch
+        from train_new_prompt import loss_for_batch
+
+        class ConstantModel(torch.nn.Module):
+            def forward(self, input_ids, attention_mask=None, recurrent_mask=None):
+                del attention_mask, recurrent_mask
+                return SimpleNamespace(logits=torch.zeros((*input_ids.shape, 7), device=input_ids.device))
+
+        batch = {
+            "input_ids": torch.tensor([[1, 2, 3, 4]]),
+            "attention_mask": torch.ones((1, 4), dtype=torch.bool),
+            "recurrent_mask": torch.zeros((1, 4), dtype=torch.bool),
+            "labels": torch.tensor([[-100, 2, 3, -100]]),
+            "loss_weights": torch.tensor([[0.0, 1.0, 1.0, 0.0]]),
+            "move_target_mask": torch.tensor([[False, True, False, False]]),
+            "hint_target_mask": torch.tensor([[False, False, True, False]]),
+        }
+        loss, metrics = loss_for_batch(ConstantModel(), batch, torch.device("cpu"))
+        expected = torch.log(torch.tensor(7.0))
+        self.assertTrue(torch.allclose(loss.detach(), expected))
+        self.assertEqual(int(metrics["move"]["targets"]), 1)
+        self.assertEqual(int(metrics["hint"]["targets"]), 1)
+        self.assertTrue(torch.allclose(metrics["move"]["nll_sum"], expected))
+        self.assertTrue(torch.allclose(metrics["hint"]["nll_sum"], expected))
+
 
 if __name__ == "__main__":
     unittest.main()

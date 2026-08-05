@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True); parser.add_argument("--vocab", required=True)
     parser.add_argument("--evaluation-jsonl", required=True); parser.add_argument("--output", required=True)
     parser.add_argument("--max-games", type=int, default=5000); parser.add_argument("--candidates-per-game", type=int, default=3)
-    parser.add_argument("--max-moves", type=int, default=192); parser.add_argument("--device", default="auto")
+    parser.add_argument("--max-moves", type=int); parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
 
@@ -27,7 +27,9 @@ def main():
     args = parse_args(); vocabulary = load_vocabulary(args.vocab)
     device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     payload = torch.load(args.checkpoint, map_location="cpu")
-    config = ModelConfig(**payload["config"]); model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)
+    config = ModelConfig(**payload["config"])
+    if args.max_moves is None: args.max_moves = int(payload.get("new_prompt", {}).get("max_moves", 512))
+    model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)
     model.load_state_dict(payload["model_state_dict"]); model.eval()
     square_ids = [vocabulary[token] for token in square_tokens()]
     square_index = {token_id: index for index, token_id in enumerate(square_ids)}

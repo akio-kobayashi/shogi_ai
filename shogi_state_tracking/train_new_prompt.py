@@ -13,9 +13,10 @@ from functools import partial
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from data import load_vocabulary, weighted_causal_lm_loss
+from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt_data import ANNOTATION_MODES, NewPromptSequenceDataset, collate_new_prompt_sequences
 from train_model import amp_context, resolve_amp, resolve_device
@@ -50,12 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="vanilla")
     parser.add_argument("--annotation-probability", type=float, default=0.0)
     parser.add_argument("--hint-loss-weight", type=float, default=1.0)
-    # max_seq_len=512では，最大の開始局面prompt（約90 token）を含めても，
-    # 192指手と110個の2-token注釈が同居する。p<=0.5の率ablationでは
-    # 注釈上限にほぼ達しないため，率そのものを比較できる。
-    parser.add_argument("--max-hints", type=int, default=110)
-    parser.add_argument("--max-moves", type=int, default=192)
-    parser.add_argument("--max-seq-len", type=int, default=512)
+    # 最大開始prompt約90 token，512指手，320個の2-token注釈を含めても
+    # 90 + 512 + 2*320 = 1242 tokenであり，1280 token文脈に収まる。
+    parser.add_argument("--max-hints", type=int, default=320)
+    parser.add_argument("--max-moves", type=int, default=512)
+    parser.add_argument("--max-seq-len", type=int, default=1280)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--early-stopping-patience", type=int, default=5)
@@ -77,19 +77,60 @@ def loss_for_batch(model, batch, device):
         attention_mask=batch["attention_mask"].to(device),
         recurrent_mask=batch["recurrent_mask"].to(device),
     )
-    return weighted_causal_lm_loss(
-        output.logits, batch["labels"].to(device), batch["loss_weights"].to(device)
-    )
+    labels = batch["labels"].to(device)
+    weights = batch["loss_weights"].to(device)
+    move_mask = batch["move_target_mask"].to(device)
+    hint_mask = batch["hint_target_mask"].to(device)
+    per_token = F.cross_entropy(
+        output.logits.reshape(-1, output.logits.shape[-1]),
+        labels.reshape(-1),
+        ignore_index=IGNORE_INDEX,
+        reduction="none",
+    ).view_as(labels)
+    active = labels != IGNORE_INDEX
+    effective_weights = torch.where(active, weights.to(per_token.dtype), 0.0)
+    weight_sum = effective_weights.sum()
+    if not bool(weight_sum > 0):
+        raise ValueError("batch has no active prediction targets")
+    loss = (per_token * effective_weights).sum() / weight_sum
+
+    # 注釈の有無が平均lossに埋もれないよう，重み付け前のCEと実トークン数を返す。
+    # move_mask/hint_maskはlabelsと同じ位置で，それぞれ排他的に定義される。
+    def totals(mask):
+        count = mask.sum()
+        return {
+            "nll_sum": per_token.masked_select(mask).sum().detach(),
+            "targets": count.detach(),
+        }
+
+    return loss, {
+        "combined_nll_sum": (per_token * effective_weights).sum().detach(),
+        "combined_weight": weight_sum.detach(),
+        "move": totals(move_mask),
+        "hint": totals(hint_mask),
+    }
 
 
 def evaluate(model, loader, device, amp_dtype):
     model.eval()
-    total = 0.0
+    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
     with torch.inference_mode():
         for batch in loader:
             with amp_context(device, amp_dtype):
-                total += float(loss_for_batch(model, batch, device))
-    return total / max(1, len(loader))
+                _, metrics = loss_for_batch(model, batch, device)
+            totals["combined_nll_sum"] += float(metrics["combined_nll_sum"])
+            totals["combined_weight"] += float(metrics["combined_weight"])
+            totals["move_nll_sum"] += float(metrics["move"]["nll_sum"])
+            totals["move_targets"] += int(metrics["move"]["targets"])
+            totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
+            totals["hint_targets"] += int(metrics["hint"]["targets"])
+    return {
+        "loss": totals["combined_nll_sum"] / max(1.0, totals["combined_weight"]),
+        "move_cross_entropy": totals["move_nll_sum"] / max(1, totals["move_targets"]),
+        "hint_cross_entropy": None if not totals["hint_targets"] else totals["hint_nll_sum"] / totals["hint_targets"],
+        "move_targets": totals["move_targets"],
+        "hint_targets": totals["hint_targets"],
+    }
 
 
 def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss):
@@ -167,11 +208,11 @@ def main() -> None:
     for epoch in range(start_epoch + 1, args.epochs + 1):
         train_dataset.set_epoch(epoch)
         model.train()
-        epoch_total = 0.0
+        epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
         for batch_index, batch in enumerate(train_loader, 1):
             optimizer.zero_grad(set_to_none=True)
             with amp_context(device, amp_dtype):
-                loss = loss_for_batch(model, batch, device)
+                loss, metrics = loss_for_batch(model, batch, device)
             if scaler is not None:
                 scaler.scale(loss).backward(); scaler.unscale_(optimizer)
             else:
@@ -182,15 +223,37 @@ def main() -> None:
                 scaler.step(optimizer); scaler.update()
             else:
                 optimizer.step()
-            step += 1; epoch_total += float(loss.detach())
+            step += 1
+            epoch_totals["combined_nll_sum"] += float(metrics["combined_nll_sum"])
+            epoch_totals["combined_weight"] += float(metrics["combined_weight"])
+            epoch_totals["move_nll_sum"] += float(metrics["move"]["nll_sum"])
+            epoch_totals["move_targets"] += int(metrics["move"]["targets"])
+            epoch_totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
+            epoch_totals["hint_targets"] += int(metrics["hint"]["targets"])
             if args.progress_every and (step == 1 or step % args.progress_every == 0):
-                print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
-        validation_loss = evaluate(model, validation_loader, device, amp_dtype)
-        row = {"epoch": epoch, "step": step, "training_loss": epoch_total / max(1, len(train_loader)), "validation_loss": validation_loss, "validation_perplexity": math.exp(min(validation_loss, 20.0)), "elapsed_sec": round(time.perf_counter()-started, 1)}
+                print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
+        validation = evaluate(model, validation_loader, device, amp_dtype)
+        training_loss = epoch_totals["combined_nll_sum"] / max(1.0, epoch_totals["combined_weight"])
+        row = {
+            "epoch": epoch, "step": step,
+            "training_loss": training_loss,
+            "training_move_cross_entropy": epoch_totals["move_nll_sum"] / max(1, epoch_totals["move_targets"]),
+            "training_hint_cross_entropy": None if not epoch_totals["hint_targets"] else epoch_totals["hint_nll_sum"] / epoch_totals["hint_targets"],
+            "training_move_targets": epoch_totals["move_targets"],
+            "training_hint_targets": epoch_totals["hint_targets"],
+            "training_hint_per_move": epoch_totals["hint_targets"] / max(1, epoch_totals["move_targets"]),
+            "validation_loss": validation["loss"],
+            "validation_move_cross_entropy": validation["move_cross_entropy"],
+            "validation_hint_cross_entropy": validation["hint_cross_entropy"],
+            "validation_move_targets": validation["move_targets"],
+            "validation_hint_targets": validation["hint_targets"],
+            "validation_perplexity": math.exp(min(validation["loss"], 20.0)),
+            "elapsed_sec": round(time.perf_counter()-started, 1),
+        }
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
         save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss)
-        if validation_loss < best_loss - 1e-4:
-            best_loss, wait = validation_loss, 0
+        if validation["loss"] < best_loss - 1e-4:
+            best_loss, wait = validation["loss"], 0
             save_checkpoint(output / "best.pt", model, optimizer, args, epoch, step, best_loss)
         else:
             wait += 1

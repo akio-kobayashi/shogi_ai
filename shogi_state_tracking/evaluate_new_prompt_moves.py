@@ -21,10 +21,10 @@ def parse_args():
     parser.add_argument("--evaluation-jsonl", required=True)
     parser.add_argument("--vocab", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--max-seq-len", type=int, default=512)
+    parser.add_argument("--max-seq-len", type=int)
     parser.add_argument("--max-games", type=int, default=5000)
     parser.add_argument("--candidates-per-game", type=int, default=3)
-    parser.add_argument("--max-moves", type=int, default=192)
+    parser.add_argument("--max-moves", type=int)
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
 
@@ -100,6 +100,11 @@ def main():
     action_index = {token_id: index for index, token_id in enumerate(action_ids)}
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = ModelConfig(**checkpoint["config"])
+    checkpoint_data = checkpoint.get("new_prompt", {})
+    if args.max_seq_len is None:
+        args.max_seq_len = config.max_seq_len
+    if args.max_moves is None:
+        args.max_moves = int(checkpoint_data.get("max_moves", 512))
     if config.vocab_size != len(vocabulary):
         raise ValueError("checkpoint and vocabulary sizes differ")
     device = device_for(args.device)
