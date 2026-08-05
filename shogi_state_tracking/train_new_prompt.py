@@ -11,6 +11,7 @@ import subprocess
 import time
 from functools import partial
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +21,11 @@ from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt_data import ANNOTATION_MODES, NewPromptSequenceDataset, collate_new_prompt_sequences
 from train_model import amp_context, resolve_amp, resolve_device
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:  # setup前の最小環境でもJSONログは利用可能にする。
+    SummaryWriter = None
 
 
 MODEL_SIZES = {
@@ -65,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=20)
+    parser.add_argument("--tensorboard-dir", help="TensorBoard event出力先。既定はOUTPUT_DIR/tensorboard")
+    parser.add_argument("--no-tensorboard", action="store_true", help="TensorBoard eventを書き出さない")
     parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="auto")
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument("--device", default="auto")
@@ -133,6 +141,19 @@ def evaluate(model, loader, device, amp_dtype):
     }
 
 
+def write_step_scalars(writer: Optional["SummaryWriter"], step: int, loss, metrics, batch, device) -> None:
+    """高頻度ログ。注釈数と系列長をlossと同じstepに残す。"""
+    if writer is None:
+        return
+    writer.add_scalar("train/combined_cross_entropy", float(loss.detach()), step)
+    writer.add_scalar("train/move_targets_per_batch", int(metrics["move"]["targets"]), step)
+    writer.add_scalar("train/hint_targets_per_batch", int(metrics["hint"]["targets"]), step)
+    writer.add_scalar("train/sequence_length", int(batch["input_ids"].shape[1]), step)
+    if device.type == "cuda":
+        writer.add_scalar("system/memory_allocated_mib", torch.cuda.memory_allocated(device) / 2**20, step)
+        writer.add_scalar("system/max_memory_allocated_mib", torch.cuda.max_memory_allocated(device) / 2**20, step)
+
+
 def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss):
     torch.save({
         "model_type": args.model_type, "config": model.config.to_dict(),
@@ -180,6 +201,14 @@ def main() -> None:
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"
+    writer = None
+    if not args.no_tensorboard:
+        if SummaryWriter is None:
+            print(json.dumps({"event": "tensorboard_unavailable", "reason": "tensorboard is not installed"}, ensure_ascii=False), flush=True)
+        else:
+            # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。
+            writer = SummaryWriter(log_dir=str(tensorboard_dir))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     start_epoch = step = 0; best_loss = float("inf")
     if args.resume:
@@ -194,11 +223,13 @@ def main() -> None:
         model.load_state_dict(resume["model_state_dict"])
         if "optimizer_state_dict" in resume: optimizer.load_state_dict(resume["optimizer_state_dict"])
         start_epoch = int(resume.get("epoch", 0)); step = int(resume.get("step", 0)); best_loss = float(resume.get("best_validation_loss", best_loss))
-    run = {"format_version": 1, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit()}
+    run = {"format_version": 1, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit(), "tensorboard": None if writer is None else str(tensorboard_dir.resolve())}
     if args.dataset_manifest:
         dataset_manifest = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
         run["dataset"] = {"manifest": str(Path(args.dataset_manifest).resolve()), "schema_version": dataset_manifest.get("schema_version"), "vocab_sha256": dataset_manifest.get("vocab_sha256"), "splits": dataset_manifest.get("splits")}
     (output / "run_manifest.json").write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if writer is not None:
+        writer.add_text("run/config", json.dumps(run, ensure_ascii=False, indent=2), 0)
     print(json.dumps({"event": "data_ready", "train": len(train_dataset), "validation": len(validation_dataset), **run}, ensure_ascii=False), flush=True)
     wait, history = 0, []
     history_path = output / "training_history.json"
@@ -231,6 +262,7 @@ def main() -> None:
             epoch_totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             epoch_totals["hint_targets"] += int(metrics["hint"]["targets"])
             if args.progress_every and (step == 1 or step % args.progress_every == 0):
+                write_step_scalars(writer, step, loss, metrics, batch, device)
                 print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
         validation = evaluate(model, validation_loader, device, amp_dtype)
         training_loss = epoch_totals["combined_nll_sum"] / max(1.0, epoch_totals["combined_weight"])
@@ -250,6 +282,16 @@ def main() -> None:
             "validation_perplexity": math.exp(min(validation["loss"], 20.0)),
             "elapsed_sec": round(time.perf_counter()-started, 1),
         }
+        if writer is not None:
+            writer.add_scalar("epoch/training_combined_cross_entropy", row["training_loss"], epoch)
+            writer.add_scalar("epoch/training_move_cross_entropy", row["training_move_cross_entropy"], epoch)
+            if row["training_hint_cross_entropy"] is not None:
+                writer.add_scalar("epoch/training_hint_cross_entropy", row["training_hint_cross_entropy"], epoch)
+            writer.add_scalar("epoch/training_hint_per_move", row["training_hint_per_move"], epoch)
+            writer.add_scalar("epoch/training_hint_targets", row["training_hint_targets"], epoch)
+            writer.add_scalar("epoch/validation_move_cross_entropy", row["validation_move_cross_entropy"], epoch)
+            writer.add_scalar("epoch/validation_perplexity", row["validation_perplexity"], epoch)
+            writer.flush()
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
         save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss)
         if validation["loss"] < best_loss - 1e-4:
@@ -260,6 +302,8 @@ def main() -> None:
             if args.early_stopping_patience and wait >= args.early_stopping_patience:
                 break
     history_path.write_text(json.dumps({"best_validation_loss": best_loss, "history": history}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":

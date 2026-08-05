@@ -70,6 +70,24 @@ ROCmでもPyTorch上のデバイス名は通常`cuda`であり，この設定で
 `PROGRESS_EVERY`はシェルから渡す追加引数として，例えば
 `scripts/run_training.sh pretrain vanilla --progress-every 1`のように指定できる．
 
+## TensorBoardによる学習監視
+
+`train_new_prompt.py`は既定で各runの`tensorboard/`へevent fileを保存する．指手と駒種注釈を
+混ぜた平均lossだけで判断しないため，次を個別に記録する。
+
+- stepごとのcombined loss，指手target数，注釈target数，系列長，GPUメモリ使用量
+- epochごとの指手cross entropy，注釈cross entropy，注釈数／指手数
+- 注釈なしvalidation入力に対する指手cross entropyとperplexity
+
+結果rootを指定して起動する。
+
+```bash
+scripts/launch_tensorboard.sh RESULTS_DIR
+```
+
+既定では `http://127.0.0.1:6006` を使う。WSL外から確認する場合だけ，明示的に
+`TENSORBOARD_HOST=0.0.0.0`を指定する。無効化する場合は学習器へ`--no-tensorboard`を渡す。
+
 学習用のランダム開始系列は，開始局面の固定99トークン（`<BOS>`，局面96，
 `<MOVES>`，`<EOS>`）を除いた範囲で`--max-seq-len`までに切り詰める．したがって，
 極端に長い対局のsuffixがbatch全体を長くすることはない．`start_ply`は保持されるため，

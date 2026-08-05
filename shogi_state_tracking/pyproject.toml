@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
   "cshogi @ git+https://github.com/akio-kobayashi/cshogi.git@c44708550d2dcd569179846a1ac35ad889d5ebb9",
+  "tensorboard>=2.16,<3",
 ]
 
 [tool.uv]

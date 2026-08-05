@@ -150,19 +150,23 @@ fi
 
 python_bin="${SCRIPT_DIR}/.venv/bin/python"
 
-echo "[verify 1/4] cshogi import"
+echo "[verify 1/5] cshogi import"
 "${python_bin}" -u -c \
   "import cshogi, importlib.metadata as m; print('cshogi:', m.version('cshogi'), flush=True)"
 
-echo "[verify 2/4] torch import"
+echo "[verify 2/5] tensorboard import"
+"${python_bin}" -u -c \
+  "import tensorboard; print('tensorboard:', tensorboard.__version__, flush=True)"
+
+echo "[verify 3/5] torch import"
 "${python_bin}" -u -c \
   "import torch; print('torch:', torch.__version__, flush=True); print('cuda:', torch.version.cuda, flush=True); print('hip:', torch.version.hip, flush=True)"
 
-echo "[verify 3/4] joint import (application order: torch, then cshogi)"
+echo "[verify 4/5] joint import (application order: torch, then cshogi)"
 "${python_bin}" -u -c \
   "import torch, cshogi; print('joint import: ok', flush=True)"
 
-echo "[verify 4/4] accelerator runtime"
+echo "[verify 5/5] accelerator runtime"
 if [[ "${BACKEND}" == "cpu" ]]; then
   "${python_bin}" -u -c \
     "import torch; print('accelerator available:', torch.cuda.is_available(), flush=True)"
