@@ -22,10 +22,7 @@ from models import ModelConfig, build_model
 from new_prompt_data import ANNOTATION_MODES, NewPromptSequenceDataset, collate_new_prompt_sequences
 from train_model import amp_context, resolve_amp, resolve_device
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-except ModuleNotFoundError:  # setup前の最小環境でもJSONログは利用可能にする。
-    SummaryWriter = None
+from torch.utils.tensorboard import SummaryWriter
 
 
 MODEL_SIZES = {
@@ -202,13 +199,8 @@ def main() -> None:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"
-    writer = None
-    if not args.no_tensorboard:
-        if SummaryWriter is None:
-            print(json.dumps({"event": "tensorboard_unavailable", "reason": "tensorboard is not installed"}, ensure_ascii=False), flush=True)
-        else:
-            # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。
-            writer = SummaryWriter(log_dir=str(tensorboard_dir))
+    # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。
+    writer = None if args.no_tensorboard else SummaryWriter(log_dir=str(tensorboard_dir))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     start_epoch = step = 0; best_loss = float("inf")
     if args.resume:

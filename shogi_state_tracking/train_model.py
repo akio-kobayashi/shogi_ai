@@ -13,6 +13,7 @@ from typing import Mapping
 
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from cot_data import ReasoningTraceDataset, collate_reasoning_traces
 from data import (
@@ -105,6 +106,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="この学習stepごとに進捗を表示する。0ならstep表示をしない",
+    )
+    parser.add_argument(
+        "--tensorboard-dir",
+        help="TensorBoard event出力先。既定はOUTPUT_DIR/tensorboard",
+    )
+    parser.add_argument(
+        "--no-tensorboard",
+        action="store_true",
+        help="TensorBoard eventを書き出さない。通常は指定しない",
     )
     parser.add_argument("--candidate-count", type=int, default=40)
     parser.add_argument("--min-suffix-moves", type=int, default=40)
@@ -466,6 +476,11 @@ def main() -> None:
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output_dir / "tensorboard"
+    writer = None if args.no_tensorboard else SummaryWriter(log_dir=str(tensorboard_dir))
+    if writer is not None:
+        writer.add_text("run/config", json.dumps(vars(args), ensure_ascii=False, indent=2), 0)
+        writer.add_scalar("model/parameter_count", sum(parameter.numel() for parameter in model.parameters()), 0)
     best_loss = float("inf")
     epochs_without_improvement = 0
     global_step = 0
@@ -529,6 +544,16 @@ def main() -> None:
             global_step += 1
             training_sum += float(loss.detach())
             training_batches += 1
+            if writer is not None:
+                writer.add_scalar("train/cross_entropy", float(loss.detach()), global_step)
+                writer.add_scalar("train/batch_sequence_length", batch_seq_len, global_step)
+                writer.add_scalar("train/batch_active_tokens", batch_active_tokens, global_step)
+                if device.type == "cuda":
+                    writer.add_scalar(
+                        "system/gpu_memory_allocated_mib",
+                        torch.cuda.memory_allocated(device) / (1024 ** 2),
+                        global_step,
+                    )
             if args.progress_every > 0 and (
                 global_step == 1 or global_step % args.progress_every == 0
             ):
@@ -584,6 +609,11 @@ def main() -> None:
         )
         history.append(row)
         row["elapsed_sec"] = round(time.perf_counter() - run_started_at, 1)
+        if writer is not None:
+            writer.add_scalar("epoch/training_cross_entropy", training_loss, epoch)
+            writer.add_scalar("validation/cross_entropy", validation_loss, epoch)
+            writer.add_scalar("validation/perplexity", row["validation_perplexity"], epoch)
+            writer.flush()
         print(json.dumps(row, ensure_ascii=False), flush=True)
         save_checkpoint(output_dir / "last.pt", model, args, epoch, global_step)
         if improved:
@@ -644,6 +674,7 @@ def main() -> None:
                 "torch_version": torch.__version__,
                 "torch_cuda_version": getattr(torch.version, "cuda", None),
                 "torch_hip_version": getattr(torch.version, "hip", None),
+                "tensorboard": None if writer is None else str(tensorboard_dir.resolve()),
                 "best_validation_loss": best_loss,
                 "epochs_requested": args.epochs,
                 "epochs_completed": len(history),
@@ -657,6 +688,8 @@ def main() -> None:
             indent=2,
         )
         handle.write("\n")
+    if writer is not None:
+        writer.close()
     print(
         "run_complete stage={} model_type={} steps={} elapsed_sec={:.1f}".format(
             args.stage,
