@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import random
+import re
 import subprocess
 import time
 from functools import partial
@@ -38,6 +39,21 @@ LLAMA_MODEL_SIZES = {
     "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 1920},
 }
+
+
+def validate_output_dir_model_label(output: Path, model_type: str, model_size: str) -> None:
+    """出力パス内のfamily-sizeラベルと実際の学習設定の不一致を拒否する。"""
+    expected = (model_type, model_size)
+    for component in output.parts:
+        match = re.fullmatch(r"(vanilla|llama)-(small|base|large)", component)
+        if match and match.groups() != expected:
+            actual = "{}-{}".format(*expected)
+            raise ValueError(
+                "output directory model label conflicts with training configuration: "
+                "{} contains {}, but --model-type/--model-size specify {}".format(
+                    output, component, actual
+                )
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,6 +196,8 @@ def git_commit() -> str:
 
 def main() -> None:
     args = parse_args()
+    output = Path(args.output_dir)
+    validate_output_dir_model_label(output, args.model_type, args.model_size)
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative")
     if args.annotation_mode == "vanilla" and args.annotation_probability:
@@ -210,7 +228,6 @@ def main() -> None:
     }
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, **loader_options)
-    output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"
     # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。

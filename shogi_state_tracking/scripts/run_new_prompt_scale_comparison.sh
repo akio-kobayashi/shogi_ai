@@ -9,6 +9,7 @@ if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
 fi
 BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+DROPOUT="${DROPOUT:-0.0}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-1280}"
 MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
@@ -33,12 +34,13 @@ for size in "${SIZES[@]}"; do
       output="${RESULTS_DIR}/vanilla-${size}/${condition}/p${probability}/seed-${seed}"
       train_args=("$@")
       [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
+      printf 'run model_type=vanilla model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${size}" "${condition}" "${probability}" "${seed}" "${output}"
       "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
         --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
         --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
-        --output-dir "${output}" --model-size "${size}" --annotation-mode "${condition}" \
+        --output-dir "${output}" --model-type vanilla --model-size "${size}" --annotation-mode "${condition}" \
         --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
-        --seed "${seed}" "${train_args[@]}"
+        --dropout "${DROPOUT}" --seed "${seed}" "${train_args[@]+"${train_args[@]}"}"
     done
   done
 done

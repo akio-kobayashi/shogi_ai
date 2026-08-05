@@ -1,29 +1,41 @@
 #!/usr/bin/env bash
-# データ・モデル・loss・checkpointの疎通確認だけを行う短時間run。
+# Vanilla decoderの疎通確認。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
-# GPUメモリに合わせて呼出し側から上書きできる。1280 tokenの既定は安全側に1。
+if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
+  BATCH_SIZE="${batch_size}"
+fi
 BATCH_SIZE="${BATCH_SIZE:-1}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+DROPOUT="${DROPOUT:-0.0}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-1280}"
 MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
 SEED="${SEED:-20260802}"; EPOCHS="${SMOKE_EPOCHS:-1}"
+if [[ -z "${MODEL_SIZE:-}" && -n "${SCALE_SIZES:-}" ]]; then
+  MODEL_SIZE="${SCALE_SIZES}"
+fi
+MODEL_SIZE="${MODEL_SIZE:-small}"
+case "${MODEL_SIZE}" in
+  small|base|large) ;;
+  *) echo "MODEL_SIZE must be small, base, or large" >&2; exit 2 ;;
+esac
+printf 'selected vanilla smoke model size: %s\n' "${MODEL_SIZE}" >&2
+printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
-# 本実験と同じ文脈予算・代表的な注釈率で，三条件の疎通だけを確認する。
-# p=1は1280 token内で512手を保てないため，本実験には含めない。
 for condition in vanilla partial_action random_control; do
   probability=0.0; [[ "${condition}" != "vanilla" ]] && probability="${SMOKE_ANNOTATION_RATE:-0.3}"
-  output="${RESULTS_DIR}/vanilla-small/${condition}/p${probability}/seed-${SEED}"
+  output="${RESULTS_DIR}/vanilla-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
   train_args=("$@")
   [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
+  printf 'run model_type=vanilla model_size=%s condition=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${SEED}" "${output}"
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
     --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
-    --output-dir "${output}" --model-size small --annotation-mode "${condition}" \
+    --output-dir "${output}" --model-type vanilla --model-size "${MODEL_SIZE}" --annotation-mode "${condition}" \
     --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
-    --epochs "${EPOCHS}" --seed "${SEED}" "${train_args[@]}"
+    --dropout "${DROPOUT}" --epochs "${EPOCHS}" --seed "${SEED}" "${train_args[@]+"${train_args[@]}"}"
 done
