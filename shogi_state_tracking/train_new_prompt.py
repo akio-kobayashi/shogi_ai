@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
+import resource
 import subprocess
 import time
 from functools import partial
@@ -39,6 +41,15 @@ LLAMA_MODEL_SIZES = {
     "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 1920},
 }
+
+
+def runtime_marker(event: str, **fields: object) -> None:
+    """SIGKILL直前の段階とプロセスRSSを残すための即時ログ。"""
+    payload = {"event": event, "pid": os.getpid()}
+    # LinuxではKiB，macOSではbyteだが，実行環境内での相対比較に使える。
+    payload["max_rss"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    payload.update(fields)
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def validate_output_dir_model_label(output: Path, model_type: str, model_size: str) -> None:
@@ -212,6 +223,7 @@ def git_commit() -> str:
 
 def main() -> None:
     args = parse_args()
+    runtime_marker("process_start", model_type=args.model_type, model_size=args.model_size)
     output = Path(args.output_dir)
     validate_output_dir_model_label(output, args.model_type, args.model_size)
     if args.num_workers < 0:
@@ -225,20 +237,24 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     vocabulary = load_vocabulary(args.vocab)
+    runtime_marker("vocabulary_loaded", vocab_size=len(vocabulary))
     device = resolve_device(args.device)
     amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)
     size_table = LLAMA_MODEL_SIZES if args.model_type == "llama" else MODEL_SIZES
     config = ModelConfig(vocab_size=len(vocabulary), max_seq_len=args.max_seq_len, dropout=args.dropout, **size_table[args.model_size])
     config.validate()
     model = build_model(args.model_type, config).to(device)
+    runtime_marker("model_ready", device=str(device), parameter_count=sum(parameter.numel() for parameter in model.parameters()))
     common = dict(annotation_mode=args.annotation_mode, annotation_probability=args.annotation_probability,
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
                   max_moves=args.max_moves, max_seq_len=args.max_seq_len)
     train_dataset = NewPromptSequenceDataset(args.train_jsonl, vocabulary, seed=args.seed, randomize_each_epoch=True, **common)
+    runtime_marker("train_dataset_ready", records=len(train_dataset))
     # early stoppingも運用時と同じ，注釈を除いた入力で測る。主比較の制約付き
     # 指手評価はevaluate_new_prompt_moves.pyで別に実行する。
     validation_common = dict(common, annotation_mode="vanilla", annotation_probability=0.0)
     validation_dataset = NewPromptSequenceDataset(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
+    runtime_marker("validation_dataset_ready", records=len(validation_dataset))
     collate = partial(collate_new_prompt_sequences, pad_token_id=vocabulary["<PAD>"], max_seq_len=args.max_seq_len)
     loader_options = {
         "num_workers": args.num_workers,
@@ -248,6 +264,7 @@ def main() -> None:
     }
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, **loader_options)
+    runtime_marker("loaders_ready", batch_size=args.batch_size, num_workers=args.num_workers)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"
     # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。
