@@ -99,6 +99,33 @@ class NewPromptDatasetTest(unittest.TestCase):
         self.assertEqual(int(example["start_ply"]), 1)
         self.assertEqual(example["move_tokens"], ["7g7f", "3c3d"])
 
+    def test_streaming_dataset_keeps_offsets_and_training_omits_metadata(self):
+        """学習時に全JSON recordや棋譜metadataを常駐・転送しない。"""
+        from new_prompt import new_prompt_vocabulary_tokens
+        from new_prompt_data import NewPromptSequenceDataset, collate_new_prompt_sequences
+
+        state = [
+            "<STATE>", "<BOARD>", "<W_K>", "<SQ_5a>", "<B_K>", "<SQ_5i>",
+            "<B_P>", "<SQ_7g>", "</BOARD>", "<HANDS>", "</HANDS>", "<TURN_BLACK>",
+        ]
+        record = {
+            "game_id": "g3", "state_prompt_tokens": state, "start_ply": 0,
+            "move_tokens": ["7g7f"],
+            "move_annotations": [{"eligible": True, "piece": "<B_P>", "source": "<SQ_7g>"}],
+        }
+        vocab = {token: index for index, token in enumerate(new_prompt_vocabulary_tokens())}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            path.write_text("".join(json.dumps(record) + "\n" for _ in range(2)), encoding="utf-8")
+            dataset = NewPromptSequenceDataset(str(path), vocab, return_metadata=False)
+            self.assertEqual(len(dataset), 2)
+            self.assertFalse(hasattr(dataset, "records"))
+            example = dataset[1]
+            self.assertNotIn("move_tokens", example)
+            batch = collate_new_prompt_sequences([example], vocab["<PAD>"], max_seq_len=64)
+        self.assertNotIn("move_tokens", batch)
+        self.assertEqual(tuple(batch["input_ids"].shape), (1, 16))
+
     def test_training_loss_reports_move_and_hint_targets_separately(self):
         """注釈tokenがcombined lossに混ざるだけで消えないことを検査する。"""
         from types import SimpleNamespace

@@ -96,8 +96,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
-        help="DataLoader worker数。CUDA/ROCmではCPU側の系列生成を並列化する",
+        default=0,
+        help="DataLoader worker数。JSONLストリーミングではまず0を推奨し，必要時だけ増やす",
     )
     parser.add_argument(
         "--max-steps",
@@ -247,14 +247,15 @@ def main() -> None:
     runtime_marker("model_ready", device=str(device), parameter_count=sum(parameter.numel() for parameter in model.parameters()))
     common = dict(annotation_mode=args.annotation_mode, annotation_probability=args.annotation_probability,
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
-                  max_moves=args.max_moves, max_seq_len=args.max_seq_len)
+                  max_moves=args.max_moves, max_seq_len=args.max_seq_len,
+                  return_metadata=False, validate_records=False)
     train_dataset = NewPromptSequenceDataset(args.train_jsonl, vocabulary, seed=args.seed, randomize_each_epoch=True, **common)
-    runtime_marker("train_dataset_ready", records=len(train_dataset))
+    runtime_marker("train_dataset_ready", **train_dataset.storage_statistics())
     # early stoppingも運用時と同じ，注釈を除いた入力で測る。主比較の制約付き
     # 指手評価はevaluate_new_prompt_moves.pyで別に実行する。
     validation_common = dict(common, annotation_mode="vanilla", annotation_probability=0.0)
     validation_dataset = NewPromptSequenceDataset(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
-    runtime_marker("validation_dataset_ready", records=len(validation_dataset))
+    runtime_marker("validation_dataset_ready", **validation_dataset.storage_statistics())
     collate = partial(collate_new_prompt_sequences, pad_token_id=vocabulary["<PAD>"], max_seq_len=args.max_seq_len)
     loader_options = {
         "num_workers": args.num_workers,
@@ -262,6 +263,10 @@ def main() -> None:
         "pin_memory": device.type == "cuda",
         "persistent_workers": args.num_workers > 0,
     }
+    if args.num_workers > 0:
+        # worker数×prefetch_factor個のbatchがCPU/Pinned memoryに滞留する。
+        # 長い系列を扱うため既定の2ではなく1に固定する。
+        loader_options["prefetch_factor"] = 1
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, **loader_options)
     runtime_marker("loaders_ready", batch_size=args.batch_size, num_workers=args.num_workers)

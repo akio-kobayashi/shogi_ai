@@ -9,7 +9,7 @@ if [[ -z "${BATCH_SIZE:-}" && -n "${batch_size:-}" ]]; then
   BATCH_SIZE="${batch_size}"
 fi
 BATCH_SIZE="${BATCH_SIZE:-1}"
-NUM_WORKERS="${NUM_WORKERS:-4}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 DROPOUT="${DROPOUT:-0.0}"
 MAIN_MAX_SEQ_LEN="${MAIN_MAX_SEQ_LEN:-1280}"
 MAIN_MAX_MOVES="${MAIN_MAX_MOVES:-512}"

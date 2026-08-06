@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+from array import array
 import hashlib
 import json
 import multiprocessing
+import os
 import random
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence
@@ -44,7 +46,12 @@ def _seeded_rng(*parts: object) -> random.Random:
 
 
 class NewPromptSequenceDataset(Dataset):
-    """materialize済み新schema segmentをcausal decoder入力へ変換する。"""
+    """JSONLを逐次復号してcausal decoder入力へ変換するDataset。
+
+    常駐させるのは各JSONL行のbyte offsetだけである。巨大なJSON dictを保持したり，
+    DataLoader workerごとに複製したりしない。``random_control`` の候補集合だけは
+    32-bit整数に圧縮して保持する。
+    """
 
     def __init__(
         self,
@@ -58,6 +65,8 @@ class NewPromptSequenceDataset(Dataset):
         max_seq_len: int | None = None,
         seed: int = 20260802,
         randomize_each_epoch: bool = True,
+        return_metadata: bool = True,
+        validate_records: bool = False,
     ):
         if annotation_mode not in ANNOTATION_MODES:
             raise ValueError("unknown annotation_mode: {}".format(annotation_mode))
@@ -86,21 +95,63 @@ class NewPromptSequenceDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.seed = int(seed)
         self.randomize_each_epoch = bool(randomize_each_epoch)
-        self.records: List[Dict[str, object]] = []
-        with Path(jsonl_path).open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                record = json.loads(line)
-                try:
-                    self._validate_record(record)
-                except (TypeError, ValueError, KeyError) as exc:
-                    raise ValueError("{}:{} {}".format(jsonl_path, line_number, exc)) from exc
-                self.records.append(self._prepare_record(record))
-        if not self.records:
+        self.return_metadata = bool(return_metadata)
+        self.validate_records = bool(validate_records)
+        self.jsonl_path = Path(jsonl_path)
+        if not self.jsonl_path.is_file():
+            raise FileNotFoundError(self.jsonl_path)
+        self._offsets = self._build_offsets(self.jsonl_path)
+        if not self._offsets:
             raise ValueError("new prompt dataset is empty: {}".format(jsonl_path))
+        self._handle = None
+        self._handle_pid: int | None = None
         self._epoch = multiprocessing.Value("q", 0)
-        self._control_pool = self._make_control_pool()
+        self._control_pool = self._make_control_pool() if (
+            self.annotation_mode == "random_control" and self.annotation_probability > 0.0
+        ) else None
+
+    @staticmethod
+    def _build_offsets(path: Path) -> array:
+        """非空JSONL行のfile offsetだけを保持する。"""
+        offsets = array("Q")
+        with path.open("rb") as handle:
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if line.strip():
+                    offsets.append(offset)
+        return offsets
+
+    def __getstate__(self):
+        """spawn workerへ開いたfile handleを渡さない。"""
+        state = dict(self.__dict__)
+        state["_handle"] = None
+        state["_handle_pid"] = None
+        return state
+
+    def _open_handle(self):
+        """worker PIDごとに独立したread-only handleを遅延生成する。"""
+        pid = os.getpid()
+        if self._handle is None or self._handle_pid != pid:
+            self._handle = self.jsonl_path.open("rb")
+            self._handle_pid = pid
+        return self._handle
+
+    def _read_record(self, index: int) -> Dict[str, object]:
+        if not 0 <= index < len(self._offsets):
+            raise IndexError(index)
+        handle = self._open_handle()
+        handle.seek(self._offsets[index])
+        line = handle.readline()
+        try:
+            record = json.loads(line)
+            if self.validate_records:
+                self._validate_record(record)
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ValueError("{}:record {} {}".format(self.jsonl_path, index + 1, exc)) from exc
+        return self._prepare_record(record)
 
     def _prepare_record(self, record: Mapping[str, object]) -> Dict[str, object]:
         """文字列artifactを一度だけ整数IDへ変換する。
@@ -183,21 +234,58 @@ class NewPromptSequenceDataset(Dataset):
                 for token in state:
                     self._token_id(str(token))
 
-    def _make_control_pool(self) -> Dict[str, List[tuple[int, int]]]:
-        pools: Dict[str, List[tuple[int, int]]] = {"B": [], "W": []}
-        for record in self.records:
-            for annotation, pair, color in zip(
-                record["move_annotations"], record["_annotation_ids"], record["_annotation_colors"]
-            ):
-                if not bool(annotation.get("eligible", False)) or pair is None:
-                    continue
-                pools[color].append(pair)
+    @staticmethod
+    def _pack_annotation_pair(pair: tuple[int, int]) -> int:
+        piece_id, source_id = pair
+        if not 0 <= piece_id <= 0xFFFF or not 0 <= source_id <= 0xFFFF:
+            raise ValueError("random-control annotation token id exceeds 16-bit storage")
+        return (piece_id << 16) | source_id
+
+    @staticmethod
+    def _unpack_annotation_pair(value: int) -> tuple[int, int]:
+        return value >> 16, value & 0xFFFF
+
+    def _make_control_pool(self) -> Dict[str, array]:
+        """対照用の駒種・開始升対だけを4 byte/件で収集する。"""
+        pools: Dict[str, array] = {"B": array("I"), "W": array("I")}
+        # 開始候補・プローブ教師など大きな部分をprepareしない。ランダム対照に必要なのは
+        # 注釈のpiece/sourceだけであり，1レコードずつ破棄する。
+        with self.jsonl_path.open("rb") as handle:
+            for offset in self._offsets:
+                handle.seek(offset)
+                try:
+                    annotations = json.loads(handle.readline())["move_annotations"]
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    raise ValueError("{} has malformed move_annotations".format(self.jsonl_path)) from exc
+                for annotation in annotations:
+                    if not bool(annotation.get("eligible", False)):
+                        continue
+                    piece_id = self._token_id(str(annotation["piece"]))
+                    source_id = self._token_id(str(annotation["source"]))
+                    pools[_annotation_color(annotation)].append(
+                        self._pack_annotation_pair((piece_id, source_id))
+                    )
         if not pools["B"] or not pools["W"]:
             raise ValueError("random control requires eligible annotations for both sides")
         return pools
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self._offsets)
+
+    def storage_statistics(self) -> Dict[str, int | str]:
+        """DatasetがPythonプロセスに保持する索引・対照poolの概算。"""
+        control_bytes = 0
+        control_entries = 0
+        if self._control_pool is not None:
+            control_entries = sum(len(pool) for pool in self._control_pool.values())
+            control_bytes = sum(len(pool) * pool.itemsize for pool in self._control_pool.values())
+        return {
+            "storage_mode": "jsonl_offsets",
+            "records": len(self),
+            "offset_bytes": len(self._offsets) * self._offsets.itemsize,
+            "control_pool_entries": control_entries,
+            "control_pool_bytes": control_bytes,
+        }
 
     def set_epoch(self, epoch: int) -> None:
         with self._epoch.get_lock():
@@ -239,15 +327,17 @@ class NewPromptSequenceDataset(Dataset):
             return original
         epoch = self._epoch.value if self.randomize_each_epoch else 0
         rng = _seeded_rng(self.seed, epoch, index, record["game_id"], move_index, "control")
+        if self._control_pool is None:
+            raise RuntimeError("random-control pool was not initialized")
         pool = self._control_pool[record["_annotation_colors"][move_index]]
         # 現在局面との対応だけを壊す対照なので，同一の駒種・開始位置対を
         # そのまま戻さない。色は保つため，先後や系列長は交絡させない。
         if len(pool) <= 1:
-            return pool[0]
+            return self._unpack_annotation_pair(pool[0])
         selected_index = rng.randrange(len(pool))
-        replacement = pool[selected_index]
+        replacement = self._unpack_annotation_pair(pool[selected_index])
         if replacement == original:
-            replacement = pool[(selected_index + 1) % len(pool)]
+            replacement = self._unpack_annotation_pair(pool[(selected_index + 1) % len(pool)])
         return replacement
 
     def _encode_record(self, record: Mapping[str, object], index: int) -> Dict[str, object]:
@@ -287,23 +377,27 @@ class NewPromptSequenceDataset(Dataset):
         moves_position = 1 + len(state_ids)
         recurrent_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         recurrent_mask[moves_position + 1 :] = True
-        return {
+        example = {
             "input_ids": input_ids,
             "labels": labels,
             "loss_weights": loss_weights,
             "move_target_mask": move_target_mask,
             "hint_target_mask": hint_target_mask,
             "recurrent_mask": recurrent_mask,
-            "game_id": str(record["game_id"]),
-            "player_scope": str(record.get("player_scope", record.get("engine_scope", ""))),
-            "engine_scope": str(record.get("engine_scope", record.get("player_scope", ""))),
-            "position_scope": str(record.get("position_scope", "unknown_position_scope")),
-            "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
-            "start_ply": start_ply,
-            "start_sfen": str(candidate.get("start_sfen", "") if candidate is not None else record.get("start_sfen", "")),
-            "move_tokens": [str(move) for move in record["move_tokens"]],
-            "move_annotations": [dict(value) for value in record["move_annotations"]],
         }
+        if self.return_metadata:
+            example.update({
+                "game_id": str(record["game_id"]),
+                "player_scope": str(record.get("player_scope", record.get("engine_scope", ""))),
+                "engine_scope": str(record.get("engine_scope", record.get("player_scope", ""))),
+                "position_scope": str(record.get("position_scope", "unknown_position_scope")),
+                "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
+                "start_ply": start_ply,
+                "start_sfen": str(candidate.get("start_sfen", "") if candidate is not None else record.get("start_sfen", "")),
+                "move_tokens": [str(move) for move in record["move_tokens"]],
+                "move_annotations": [dict(value) for value in record["move_annotations"]],
+            })
+        return example
 
     def _end_ply(self, record: Mapping[str, object], state_length: int, start_ply: int) -> int:
         """全条件で同数の実指手を保ちつつ，最悪時のhint数で長さを予約する。"""
@@ -328,7 +422,7 @@ class NewPromptSequenceDataset(Dataset):
         return record, candidates[rng.randrange(len(candidates))]
 
     def __getitem__(self, index: int) -> Dict[str, object]:
-        return self._encode_record(self.records[index], index)
+        return self._encode_record(self._read_record(index), index)
 
 
 def collate_new_prompt_sequences(
@@ -379,7 +473,7 @@ def collate_new_prompt_sequences(
         [int(example["input_ids"].shape[0]) for example in examples], dtype=torch.long
     )
     attention_mask = torch.arange(batch_length)[None, :] < lengths[:, None]
-    return {
+    batch = {
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask,
@@ -387,13 +481,18 @@ def collate_new_prompt_sequences(
         "loss_weights": loss_weights,
         "move_target_mask": move_target_mask,
         "hint_target_mask": hint_target_mask,
-        "game_ids": [str(example["game_id"]) for example in examples],
-        "player_scopes": [str(example["player_scope"]) for example in examples],
-        "engine_scopes": [str(example["engine_scope"]) for example in examples],
-        "position_scopes": [str(example["position_scope"]) for example in examples],
-        "trajectory_scopes": [str(example["trajectory_scope"]) for example in examples],
-        "start_plies": torch.tensor([int(example["start_ply"]) for example in examples], dtype=torch.long),
-        "start_sfens": [str(example["start_sfen"]) for example in examples],
-        "move_tokens": [list(example["move_tokens"]) for example in examples],
-        "move_annotations": [list(example["move_annotations"]) for example in examples],
     }
+    # 学習ではmetadataを返さない。worker→親プロセスのpickle転送を避ける。
+    if "game_id" in examples[0]:
+        batch.update({
+            "game_ids": [str(example["game_id"]) for example in examples],
+            "player_scopes": [str(example["player_scope"]) for example in examples],
+            "engine_scopes": [str(example["engine_scope"]) for example in examples],
+            "position_scopes": [str(example["position_scope"]) for example in examples],
+            "trajectory_scopes": [str(example["trajectory_scope"]) for example in examples],
+            "start_plies": torch.tensor([int(example["start_ply"]) for example in examples], dtype=torch.long),
+            "start_sfens": [str(example["start_sfen"]) for example in examples],
+            "move_tokens": [list(example["move_tokens"]) for example in examples],
+            "move_annotations": [list(example["move_annotations"]) for example in examples],
+        })
+    return batch
