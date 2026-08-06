@@ -16,23 +16,32 @@ MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-320}"
 
 smoke_failure_report() {
-  local status="$1" output_dir="$2"
+  local status="$1" output_dir="$2" log_path="$3"
   printf 'smoke training process failed: exit_status=%s output_dir=%s\n' "${status}" "${output_dir}" >&2
-  if [[ -r /sys/fs/cgroup/memory.events ]]; then
-    printf '%s\n' 'cgroup memory.events:' >&2
-    cat /sys/fs/cgroup/memory.events >&2 || true
-  fi
-  if [[ -r /sys/fs/cgroup/memory.current ]]; then
-    printf 'cgroup memory.current: %s\n' "$(cat /sys/fs/cgroup/memory.current)" >&2
-  fi
-  if [[ -r /sys/fs/cgroup/memory.max ]]; then
-    printf 'cgroup memory.max: %s\n' "$(cat /sys/fs/cgroup/memory.max)" >&2
-  fi
+  for memory_file in \
+    /sys/fs/cgroup/memory.events \
+    /sys/fs/cgroup/memory.current \
+    /sys/fs/cgroup/memory.max \
+    /sys/fs/cgroup/memory/memory.oom_control \
+    /sys/fs/cgroup/memory/memory.limit_in_bytes \
+    /sys/fs/cgroup/memory/memory.usage_in_bytes \
+    /sys/fs/cgroup/memory/memory.failcnt; do
+    if [[ -r "${memory_file}" ]]; then
+      printf 'cgroup %s:\n' "${memory_file}" >&2
+      cat "${memory_file}" >&2 || true
+    fi
+  done
   if command -v free >/dev/null 2>&1; then
     free -h >&2 || true
   fi
   if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader >&2 || true
+    nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader >&2 || printf 'nvidia-smi failed\n' >&2
+  else
+    printf 'nvidia-smi is unavailable\n' >&2
+  fi
+  if [[ -f "${log_path}" ]]; then
+    printf 'last 40 lines of %s:\n' "${log_path}" >&2
+    tail -n 40 "${log_path}" >&2 || true
   fi
 }
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
@@ -49,6 +58,8 @@ printf 'smoke max_steps: %s, validation: full split, num_workers: %s\n' "${SMOKE
 for condition in vanilla partial_action random_control; do
   probability=0.0; [[ "${condition}" != "vanilla" ]] && probability="${SMOKE_ANNOTATION_RATE:-0.3}"
   output="${RESULTS_DIR}/llama-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
+  mkdir -p "${output}"
+  log_path="${output}/train.log"
   train_args=()
   if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
   [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
@@ -59,11 +70,11 @@ for condition in vanilla partial_action random_control; do
     --vocab "${DATASET_DIR}/vocab.json" --dataset-manifest "${DATASET_DIR}/dataset_manifest.json" \
     --output-dir "${output}" --model-type llama --model-size "${MODEL_SIZE}" --annotation-mode "${condition}" \
     --annotation-probability "${probability}" --max-seq-len "${MAX_SEQ_LEN}" --max-moves "${MAX_MOVES}" --max-hints "${MAX_HINTS}" --batch-size "${BATCH_SIZE}" --num-workers "${NUM_WORKERS}" \
-    --dropout "${DROPOUT}" --epochs "${EPOCHS}" --max-steps "${SMOKE_MAX_STEPS}" --seed "${SEED}" "${train_args[@]+"${train_args[@]}"}"
-  status=$?
+    --dropout "${DROPOUT}" --epochs "${EPOCHS}" --max-steps "${SMOKE_MAX_STEPS}" --seed "${SEED}" "${train_args[@]+"${train_args[@]}"}" 2>&1 | tee -a "${log_path}"
+  status=${PIPESTATUS[0]}
   set -e
   if [[ "${status}" -ne 0 ]]; then
-    smoke_failure_report "${status}" "${output}"
+    smoke_failure_report "${status}" "${output}" "${log_path}"
     exit "${status}"
   fi
 done
