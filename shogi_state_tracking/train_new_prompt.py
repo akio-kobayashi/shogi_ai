@@ -88,6 +88,18 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="DataLoader worker数。CUDA/ROCmではCPU側の系列生成を並列化する",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=0,
+        help="学習stepの総数上限。0はepoch数だけで終了する",
+    )
+    parser.add_argument(
+        "--max-validation-batches",
+        type=int,
+        default=0,
+        help="各validationのbatch上限。0はvalidation split全体を評価する",
+    )
     parser.add_argument("--progress-every", type=int, default=20)
     parser.add_argument("--tensorboard-dir", help="TensorBoard event出力先。既定はOUTPUT_DIR/tensorboard")
     parser.add_argument("--no-tensorboard", action="store_true", help="TensorBoard eventを書き出さない")
@@ -138,11 +150,11 @@ def loss_for_batch(model, batch, device):
     }
 
 
-def evaluate(model, loader, device, amp_dtype):
+def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
     model.eval()
-    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
+    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "batches": 0}
     with torch.inference_mode():
-        for batch in loader:
+        for batch_index, batch in enumerate(loader, 1):
             with amp_context(device, amp_dtype):
                 _, metrics = loss_for_batch(model, batch, device)
             totals["combined_nll_sum"] += float(metrics["combined_nll_sum"])
@@ -151,12 +163,16 @@ def evaluate(model, loader, device, amp_dtype):
             totals["move_targets"] += int(metrics["move"]["targets"])
             totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             totals["hint_targets"] += int(metrics["hint"]["targets"])
+            totals["batches"] += 1
+            if max_batches > 0 and batch_index >= max_batches:
+                break
     return {
         "loss": totals["combined_nll_sum"] / max(1.0, totals["combined_weight"]),
         "move_cross_entropy": totals["move_nll_sum"] / max(1, totals["move_targets"]),
         "hint_cross_entropy": None if not totals["hint_targets"] else totals["hint_nll_sum"] / totals["hint_targets"],
         "move_targets": totals["move_targets"],
         "hint_targets": totals["hint_targets"],
+        "batches": totals["batches"],
     }
 
 
@@ -200,6 +216,10 @@ def main() -> None:
     validate_output_dir_model_label(output, args.model_type, args.model_size)
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative")
+    if args.max_steps < 0:
+        raise ValueError("--max-steps must be non-negative")
+    if args.max_validation_batches < 0:
+        raise ValueError("--max-validation-batches must be non-negative")
     if args.annotation_mode == "vanilla" and args.annotation_probability:
         raise ValueError("vanilla requires --annotation-probability 0")
     random.seed(args.seed)
@@ -259,6 +279,11 @@ def main() -> None:
     if args.resume and history_path.is_file():
         history = list(json.loads(history_path.read_text(encoding="utf-8")).get("history", []))
     started = time.perf_counter()
+    if args.max_steps and step >= args.max_steps:
+        print(json.dumps({"event": "max_steps_already_reached", "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
+        if writer is not None:
+            writer.close()
+        return
     for epoch in range(start_epoch + 1, args.epochs + 1):
         train_dataset.set_epoch(epoch)
         model.train()
@@ -287,7 +312,9 @@ def main() -> None:
             if args.progress_every and (step == 1 or step % args.progress_every == 0):
                 write_step_scalars(writer, step, loss, metrics, batch, device)
                 print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
-        validation = evaluate(model, validation_loader, device, amp_dtype)
+            if args.max_steps and step >= args.max_steps:
+                break
+        validation = evaluate(model, validation_loader, device, amp_dtype, args.max_validation_batches)
         training_loss = epoch_totals["combined_nll_sum"] / max(1.0, epoch_totals["combined_weight"])
         row = {
             "epoch": epoch, "step": step,
@@ -302,6 +329,7 @@ def main() -> None:
             "validation_hint_cross_entropy": validation["hint_cross_entropy"],
             "validation_move_targets": validation["move_targets"],
             "validation_hint_targets": validation["hint_targets"],
+            "validation_batches": validation["batches"],
             "validation_perplexity": math.exp(min(validation["loss"], 20.0)),
             "elapsed_sec": round(time.perf_counter()-started, 1),
         }
@@ -324,6 +352,9 @@ def main() -> None:
             wait += 1
             if args.early_stopping_patience and wait >= args.early_stopping_patience:
                 break
+        if args.max_steps and step >= args.max_steps:
+            print(json.dumps({"event": "max_steps_reached", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
+            break
     history_path.write_text(json.dumps({"best_validation_loss": best_loss, "history": history}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if writer is not None:
         writer.close()
