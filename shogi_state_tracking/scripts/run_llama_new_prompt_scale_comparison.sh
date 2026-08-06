@@ -16,6 +16,9 @@ MAX_HINTS="${MAX_HINTS:-320}"
 [[ $# -ge 2 ]] || { echo "Usage: $0 DATASET_DIR RESULTS_DIR [extra train options]" >&2; exit 2; }
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
 new_prompt_extract_launcher_args "$@"
+if [[ -n "${NEW_PROMPT_CLI_NUM_WORKERS}" ]]; then
+  NUM_WORKERS="${NEW_PROMPT_CLI_NUM_WORKERS}"
+fi
 IFS=',' read -r -a SEEDS <<< "${SEEDS:-20260802}"
 new_prompt_resolve_model_sizes "small,large"
 SIZES=("${NEW_PROMPT_MODEL_SIZES[@]}")

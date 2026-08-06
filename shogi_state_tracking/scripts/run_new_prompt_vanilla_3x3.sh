@@ -24,6 +24,9 @@ DATASET_DIR="$1"
 RESULTS_DIR="$2"
 shift 2
 new_prompt_extract_launcher_args "$@"
+if [[ -n "${NEW_PROMPT_CLI_NUM_WORKERS}" ]]; then
+  NUM_WORKERS="${NEW_PROMPT_CLI_NUM_WORKERS}"
+fi
 SEEDS_TEXT="${SEEDS:-20260802}"
 IFS=',' read -r -a SEEDS <<< "${SEEDS_TEXT}"
 new_prompt_resolve_model_sizes "small,base,large"

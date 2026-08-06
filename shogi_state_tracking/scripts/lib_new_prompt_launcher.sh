@@ -4,6 +4,7 @@
 
 new_prompt_extract_launcher_args() {
   NEW_PROMPT_CLI_MODEL_SIZE=""
+  NEW_PROMPT_CLI_NUM_WORKERS=""
   NEW_PROMPT_EXTRA_ARGS=()
 
   while [[ $# -gt 0 ]]; do
@@ -15,6 +16,15 @@ new_prompt_extract_launcher_args() {
         ;;
       --model-size=*)
         new_prompt_set_cli_model_size "${1#--model-size=}" || return 2
+        shift
+        ;;
+      --num-workers)
+        [[ $# -ge 2 ]] || { echo "--num-workers requires a non-negative integer" >&2; return 2; }
+        new_prompt_set_cli_num_workers "$2" || return 2
+        shift 2
+        ;;
+      --num-workers=*)
+        new_prompt_set_cli_num_workers "${1#--num-workers=}" || return 2
         shift
         ;;
       --model-type|--output-dir)
@@ -46,6 +56,19 @@ new_prompt_set_cli_model_size() {
     return 2
   fi
   NEW_PROMPT_CLI_MODEL_SIZE="${candidate}"
+}
+
+
+new_prompt_set_cli_num_workers() {
+  local candidate="$1"
+  case "${candidate}" in
+    ''|*[!0-9]*) echo "--num-workers must be a non-negative integer: ${candidate}" >&2; return 2 ;;
+  esac
+  if [[ -n "${NEW_PROMPT_CLI_NUM_WORKERS}" && "${NEW_PROMPT_CLI_NUM_WORKERS}" != "${candidate}" ]]; then
+    echo "--num-workers was specified more than once with conflicting values" >&2
+    return 2
+  fi
+  NEW_PROMPT_CLI_NUM_WORKERS="${candidate}"
 }
 
 
