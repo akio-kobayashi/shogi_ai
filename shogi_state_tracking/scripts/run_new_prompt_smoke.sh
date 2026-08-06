@@ -56,14 +56,19 @@ printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 printf 'smoke max_steps: %s, validation: full split, num_workers: %s\n' "${SMOKE_MAX_STEPS}" "${NUM_WORKERS}" >&2
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
 for condition in vanilla partial_action random_control; do
-  probability=0.0; [[ "${condition}" != "vanilla" ]] && probability="${SMOKE_ANNOTATION_RATE:-0.3}"
+  probability=0.0
+  if [[ "${condition}" != "vanilla" ]]; then
+    probability="${SMOKE_ANNOTATION_RATE:-0.3}"
+  fi
   output="${RESULTS_DIR}/vanilla-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
   mkdir -p "${output}"
   log_path="${output}/train.log"
   train_args=()
   if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
-  [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
-  printf 'run model_type=vanilla model_size=%s condition=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${SEED}" "${output}"
+  if [[ -f "${output}/last.pt" ]]; then
+    train_args+=(--resume)
+  fi
+  printf '[smoke] start model_type=vanilla model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${probability}" "${SEED}" "${output}"
   set +e
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
@@ -77,4 +82,6 @@ for condition in vanilla partial_action random_control; do
     smoke_failure_report "${status}" "${output}" "${log_path}"
     exit "${status}"
   fi
+  printf '[smoke] complete condition=%s probability=%s\n' "${condition}" "${probability}"
 done
+printf '[smoke] complete all conditions\n'

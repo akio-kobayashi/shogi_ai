@@ -27,11 +27,16 @@ printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 for size in "${SIZES[@]}"; do
   for seed in "${SEEDS[@]}"; do
     for condition in vanilla partial_action random_control; do
-      probability="${SCALE_ANNOTATION_RATE}"; [[ "${condition}" == "vanilla" ]] && probability=0.0
+      probability="${SCALE_ANNOTATION_RATE}"
+      if [[ "${condition}" == "vanilla" ]]; then
+        probability=0.0
+      fi
       output="${RESULTS_DIR}/vanilla-${size}/${condition}/p${probability}/seed-${seed}"
       train_args=()
       if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}"); fi
-      [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
+      if [[ -f "${output}/last.pt" ]]; then
+        train_args+=(--resume)
+      fi
       printf 'run model_type=vanilla model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${size}" "${condition}" "${probability}" "${seed}" "${output}"
       "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
         --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \

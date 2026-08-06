@@ -32,7 +32,9 @@ run_one () {
   if ((${#NEW_PROMPT_EXTRA_ARGS[@]})); then
     train_args=("${NEW_PROMPT_EXTRA_ARGS[@]}")
   fi
-  [[ -f "${output}/last.pt" ]] && train_args+=(--resume)
+  if [[ -f "${output}/last.pt" ]]; then
+    train_args+=(--resume)
+  fi
   printf 'run model_type=vanilla model_size=%s condition=%s probability=%s seed=%s output_dir=%s\n' "${MODEL_SIZE}" "${condition}" "${probability}" "${seed}" "${output}"
   "${PYTHON_BIN}" "${SCRIPT_DIR}/train_new_prompt.py" \
     --train-jsonl "${DATASET_DIR}/train.jsonl" --validation-jsonl "${DATASET_DIR}/validation.jsonl" \

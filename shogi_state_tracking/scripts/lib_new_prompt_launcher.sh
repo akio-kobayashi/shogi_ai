@@ -31,6 +31,7 @@ new_prompt_extract_launcher_args() {
         ;;
     esac
   done
+  return 0
 }
 
 
