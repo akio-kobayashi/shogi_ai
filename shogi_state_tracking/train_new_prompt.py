@@ -285,6 +285,7 @@ def main() -> None:
             writer.close()
         return
     for epoch in range(start_epoch + 1, args.epochs + 1):
+        print(json.dumps({"event": "epoch_start", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
         train_dataset.set_epoch(epoch)
         model.train()
         epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
@@ -314,6 +315,7 @@ def main() -> None:
                 print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
             if args.max_steps and step >= args.max_steps:
                 break
+        print(json.dumps({"event": "validation_start", "epoch": epoch, "step": step, "max_validation_batches": args.max_validation_batches}, ensure_ascii=False), flush=True)
         validation = evaluate(model, validation_loader, device, amp_dtype, args.max_validation_batches)
         training_loss = epoch_totals["combined_nll_sum"] / max(1.0, epoch_totals["combined_weight"])
         row = {
@@ -344,10 +346,14 @@ def main() -> None:
             writer.add_scalar("epoch/validation_perplexity", row["validation_perplexity"], epoch)
             writer.flush()
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
+        print(json.dumps({"event": "checkpoint_save_start", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss)
+        print(json.dumps({"event": "checkpoint_save_complete", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         if validation["loss"] < best_loss - 1e-4:
             best_loss, wait = validation["loss"], 0
+            print(json.dumps({"event": "checkpoint_save_start", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
             save_checkpoint(output / "best.pt", model, optimizer, args, epoch, step, best_loss)
+            print(json.dumps({"event": "checkpoint_save_complete", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         else:
             wait += 1
             if args.early_stopping_patience and wait >= args.early_stopping_patience:
@@ -356,6 +362,7 @@ def main() -> None:
             print(json.dumps({"event": "max_steps_reached", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
             break
     history_path.write_text(json.dumps({"best_validation_loss": best_loss, "history": history}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"event": "run_complete", "step": step, "epochs_recorded": len(history)}, ensure_ascii=False), flush=True)
     if writer is not None:
         writer.close()
 
