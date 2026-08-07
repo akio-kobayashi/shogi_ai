@@ -27,11 +27,11 @@ new_prompt_extract_launcher_args() {
         new_prompt_set_cli_num_workers "${1#--num-workers=}" || return 2
         shift
         ;;
-      --model-type|--output-dir)
+      --model-type|--output-dir|--epochs|--max-steps)
         echo "$1 is controlled by the launcher and must not be passed as an extra option" >&2
         return 2
         ;;
-      --model-type=*|--output-dir=*)
+      --model-type=*|--output-dir=*|--epochs=*|--max-steps=*)
         echo "${1%%=*} is controlled by the launcher and must not be passed as an extra option" >&2
         return 2
         ;;
@@ -98,4 +98,18 @@ new_prompt_resolve_model_sizes() {
         ;;
     esac
   done
+}
+
+
+new_prompt_run_logged() {
+  # stdout/stderrを結果ディレクトリへ常に残し，Python本体の終了値を返す。
+  # pipefailとset -eの組合せでteeの終了値を誤って採用しないよう明示的に扱う。
+  local log_path="$1"
+  shift
+  local status
+  set +e
+  "$@" 2>&1 | tee -a "${log_path}"
+  status=${PIPESTATUS[0]}
+  set -e
+  return "${status}"
 }

@@ -52,18 +52,20 @@ if [[ -n "${NEW_PROMPT_CLI_NUM_WORKERS}" ]]; then
 fi
 SEED="${SEED:-20260802}"; EPOCHS="${SMOKE_EPOCHS:-1}"
 SMOKE_MAX_STEPS="${SMOKE_MAX_STEPS:-32}"
+SMOKE_RESULTS_DIR="${RESULTS_DIR}/smoke"
 new_prompt_resolve_single_model_size small
 MODEL_SIZE="${NEW_PROMPT_MODEL_SIZE}"
 printf 'selected llama smoke model size: %s\n' "${MODEL_SIZE}" >&2
 printf 'batch size: %s\n' "${BATCH_SIZE}" >&2
 printf 'smoke max_steps: %s, validation: full split, num_workers: %s\n' "${SMOKE_MAX_STEPS}" "${NUM_WORKERS}" >&2
-"${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${RESULTS_DIR}/artifact_verification.json"
+mkdir -p "${SMOKE_RESULTS_DIR}"
+"${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" --dataset-dir "${DATASET_DIR}" --output "${SMOKE_RESULTS_DIR}/artifact_verification.json"
 for condition in vanilla partial_action random_control; do
   probability=0.0
   if [[ "${condition}" != "vanilla" ]]; then
     probability="${SMOKE_ANNOTATION_RATE:-0.3}"
   fi
-  output="${RESULTS_DIR}/llama-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
+  output="${SMOKE_RESULTS_DIR}/llama-${MODEL_SIZE}/${condition}/p${probability}/seed-${SEED}"
   mkdir -p "${output}"
   log_path="${output}/train.log"
   train_args=()
