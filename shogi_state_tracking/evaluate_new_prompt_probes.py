@@ -110,10 +110,19 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
     return {source: torch.stack(values) for source, values in chunks.items()}, concat_targets(target_chunks), scopes
 
 
-def fit_probe(train_x, train_y, validation_x, validation_y, d_model, args, device):
+def fit_probe(train_x, train_y, validation_x, validation_y, d_model, args, device, seed):
+    # checkpoint backboneの構築時に消費した乱数と切り離し，モデル種別間で
+    # probe初期値とmini-batch順を揃える。
+    torch.manual_seed(seed)
     probe = LinearStateProbe(d_model).to(device)
     optimizer = torch.optim.AdamW(probe.parameters(), lr=args.learning_rate)
-    loader = DataLoader(TensorDataset(train_x, train_y.board, train_y.hands, train_y.turn, train_y.in_check), batch_size=args.batch_size, shuffle=True)
+    generator = torch.Generator().manual_seed(seed)
+    loader = DataLoader(
+        TensorDataset(train_x, train_y.board, train_y.hands, train_y.turn, train_y.in_check),
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=generator,
+    )
     best_state, best_loss, wait = None, float("inf"), 0
     for _ in range(args.probe_epochs):
         probe.train()
@@ -168,8 +177,12 @@ def main():
     majority = majority_predictions(extracted["train"][1], extracted["evaluation"][1].board.shape[0])
     result = {"checkpoint": args.checkpoint, "model_type": model_type, "settings": vars(args), "sources": sources, "majority_baseline": state_metrics(extracted["evaluation"][1], *majority), "probe_results": {}}
     states = {}
-    for source in sources:
-        probe, best_loss = fit_probe(extracted["train"][0][source], extracted["train"][1], extracted["validation"][0][source], extracted["validation"][1], config.d_model, args, device)
+    for source_index, source in enumerate(sources):
+        probe, best_loss = fit_probe(
+            extracted["train"][0][source], extracted["train"][1],
+            extracted["validation"][0][source], extracted["validation"][1],
+            config.d_model, args, device, args.seed + source_index,
+        )
         result["probe_results"][source] = {"best_validation_loss": best_loss, "validation": metric(probe, extracted["validation"][0][source], extracted["validation"][1], device), "evaluation": metric(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], device), "evaluation_by_position_scope": metrics_by_scope(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], extracted["evaluation"][2], device)}
         states[source] = probe.cpu().state_dict()
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
