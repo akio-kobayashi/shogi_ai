@@ -12,9 +12,12 @@ fi
 DATASET_DIR="$1"; RESULTS_DIR="$2"; shift 2
 EVALUATION_MAX_GAMES="${EVALUATION_MAX_GAMES:-5000}"
 EVALUATION_CANDIDATES_PER_GAME="${EVALUATION_CANDIDATES_PER_GAME:-3}"
+MOVE_PRIMARY_HISTORY_DISTANCES="${MOVE_PRIMARY_HISTORY_DISTANCES:-8,32}"
+MOVE_REPORT_HISTORY_DISTANCES="${MOVE_REPORT_HISTORY_DISTANCES:-0,8,32}"
 PROBE_MAX_TRAIN_SAMPLES="${PROBE_MAX_TRAIN_SAMPLES:-12000}"
 PROBE_MAX_VALIDATION_SAMPLES="${PROBE_MAX_VALIDATION_SAMPLES:-3000}"
 PROBE_MAX_EVALUATION_SAMPLES="${PROBE_MAX_EVALUATION_SAMPLES:-5000}"
+PROBE_HISTORY_DISTANCES="${PROBE_HISTORY_DISTANCES:-8,32}"
 EVALUATION_SEED="${EVALUATION_SEED:-20260802}"
 mkdir -p "${RESULTS_DIR}"
 "${PYTHON_BIN}" "${SCRIPT_DIR}/validate_new_prompt_dataset.py" \
@@ -30,6 +33,8 @@ for checkpoint in "${checkpoints[@]}"; do
     --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
     --max-games "${EVALUATION_MAX_GAMES}" \
     --candidates-per-game "${EVALUATION_CANDIDATES_PER_GAME}" \
+    --primary-history-distances "${MOVE_PRIMARY_HISTORY_DISTANCES}" \
+    --report-history-distances "${MOVE_REPORT_HISTORY_DISTANCES}" \
     --output "${run_dir}/move_metrics.json"
   "${PYTHON_BIN}" "${SCRIPT_DIR}/evaluate_new_prompt_probes.py" \
     --checkpoint "${checkpoint}" --vocab "${DATASET_DIR}/vocab.json" \
@@ -39,6 +44,7 @@ for checkpoint in "${checkpoints[@]}"; do
     --max-train-samples "${PROBE_MAX_TRAIN_SAMPLES}" \
     --max-validation-samples "${PROBE_MAX_VALIDATION_SAMPLES}" \
     --max-evaluation-samples "${PROBE_MAX_EVALUATION_SAMPLES}" \
+    --history-distances "${PROBE_HISTORY_DISTANCES}" \
     --seed "${EVALUATION_SEED}" \
     --output-dir "${run_dir}/probes"
   if [[ "${run_dir}" == *"/partial_action/"* ]]; then

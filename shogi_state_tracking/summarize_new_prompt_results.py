@@ -22,6 +22,8 @@ def main():
         relative = path.relative_to(model_root)
         condition = relative.parts[0]
         row = {"model_type": model_type, "model_size": model_size, "condition": condition, "run_dir": str(path.parent), **metrics, **metrics["legality"]}
+        distances = metrics.get("primary_history_distances", [])
+        row["move_primary_history_distances"] = ",".join(str(value) for value in distances) if distances else "all"
         manifest_path = path.parent / "run_manifest.json"
         if manifest_path.exists():
             run_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -42,7 +44,15 @@ def main():
     fields = sorted({key for row in rows for key in row})
     with (output / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
-    lines = ["# 新prompt実験サマリー", "", "| architecture | size | condition | p | top-1 | top-5 | legal top-1 | legal mass | probe full state |", "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+    distance_sets = sorted({str(row.get("move_primary_history_distances", "all")) for row in rows})
+    lines = [
+        "# 新prompt実験サマリー",
+        "",
+        "主指手指標の開始局面からの履歴距離: " + ", ".join(distance_sets),
+        "",
+        "| architecture | size | condition | p | top-1 | top-5 | legal top-1 | legal mass | probe full state |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
     for row in rows:
         lines.append("| {model_type} | {model_size} | {condition} | {annotation_probability} | {top1_accuracy:.4f} | {top5_accuracy:.4f} | {top1_legal_rate:.4f} | {mean_legal_probability_mass:.4f} | {probe_final_full_state_exact_match:.4f} |".format(**{**row, "model_type": row.get("model_type", "vanilla"), "annotation_probability": row.get("annotation_probability", "?"), "probe_final_full_state_exact_match": row.get("probe_final_full_state_exact_match", float("nan"))}))
     (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

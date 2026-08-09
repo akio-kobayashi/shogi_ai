@@ -166,6 +166,7 @@ def materialize_record(
                     "history_moves": moves[start_ply:ply],
                     "probe_targets": state_targets(board, cshogi_module),
                     "position_scope": candidate["position_scope"] if offset == 0 else (scopes[ply] if ply < len(scopes) else "unknown_position_scope"),
+                    "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
                 })
         move = board.move_from_usi(moves[ply])
         if not board.is_legal(move):
@@ -183,6 +184,9 @@ def materialize_record(
         "player_scope": str(record.get("player_scope", record.get("engine_scope", ""))),
         "engine_scope": str(record.get("engine_scope", record.get("player_scope", ""))),
         "position_scope": str(record.get("position_scope", "unknown_position_scope")),
+        # 任意の開始ply・履歴距離で評価を層別化できるよう，全plyのscopeも保存する。
+        # 旧artifactとの互換性のため，評価器側はこの列がない場合probe例へfallbackする。
+        "position_scope_by_ply": [str(value) for value in scopes],
         "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
     }
     if include_evaluation_steps:

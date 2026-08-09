@@ -34,6 +34,10 @@ def validate_record(record: Mapping[str, object], expected_vocab: set[str]) -> i
     if not isinstance(moves, list) or not isinstance(annotations, list) or not isinstance(candidates, list):
         raise ValueError("missing moves, annotations, or candidates")
     validate_move_annotations(moves, annotations)
+    position_scopes = record.get("position_scope_by_ply")
+    if position_scopes is not None:
+        if not isinstance(position_scopes, list) or len(position_scopes) != len(moves):
+            raise ValueError("position_scope_by_ply must align with move_tokens")
     if not candidates:
         raise ValueError("record has no start candidate")
     previous_ply = -1

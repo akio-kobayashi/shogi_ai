@@ -31,6 +31,11 @@ def parse_args():
     parser.add_argument("--max-train-samples", type=int, default=12000)
     parser.add_argument("--max-validation-samples", type=int, default=3000)
     parser.add_argument("--max-evaluation-samples", type=int, default=5000)
+    parser.add_argument(
+        "--history-distances",
+        default="8,32",
+        help="プローブの学習・主評価へ含める開始局面からの指手距離。0はprompt再読出しになるため既定では除外する。",
+    )
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--probe-epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
@@ -78,13 +83,34 @@ def expand_sources(text, n_layers):
     return list(dict.fromkeys(result))
 
 
-def read_examples(path, limit):
+def parse_history_distances(value):
+    result = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        distance = int(item)
+        if distance < 0:
+            raise ValueError("history distance must be nonnegative")
+        if distance not in result:
+            result.append(distance)
+    if not result:
+        raise ValueError("at least one history distance is required")
+    return tuple(result)
+
+
+def read_examples(path, limit, history_distances):
     examples = []
     with Path(path).open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip(): continue
             record = json.loads(line)
-            for example in record.get("probe_examples", []):
+            for raw_example in record.get("probe_examples", []):
+                example = dict(raw_example)
+                example.setdefault("trajectory_scope", record.get("trajectory_scope", "unknown_position_scope"))
+                distance = int(example["ply"]) - int(example["start_ply"])
+                if distance not in history_distances:
+                    continue
                 examples.append(example)
                 if len(examples) >= limit: return examples
     if not examples: raise ValueError("no probe_examples in {}".format(path))
@@ -92,7 +118,8 @@ def read_examples(path, limit):
 
 
 def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len):
-    chunks = {source: [] for source in sources}; target_chunks = []; scopes = []
+    chunks = {source: [] for source in sources}; target_chunks = []
+    metadata = {"position_scope": [], "trajectory_scope": [], "history_distance": [], "start_ply": []}
     model.eval()
     with torch.inference_mode():
         for example in examples:
@@ -105,9 +132,12 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
                 layer = int(source.split("_", 1)[1])
                 chunks[source].append(output.hidden_states[layer][0, position].detach().cpu())
             target_chunks.append(target_from_mapping(example["probe_targets"], board_map, hand_names))
-            scopes.append(str(example.get("position_scope", "unknown_position_scope")))
+            metadata["position_scope"].append(str(example.get("position_scope", "unknown_position_scope")))
+            metadata["trajectory_scope"].append(str(example.get("trajectory_scope", "unknown_position_scope")))
+            metadata["history_distance"].append(int(example["ply"]) - int(example["start_ply"]))
+            metadata["start_ply"].append(int(example["start_ply"]))
     if not target_chunks: raise ValueError("all probe examples exceeded max_seq_len")
-    return {source: torch.stack(values) for source, values in chunks.items()}, concat_targets(target_chunks), scopes
+    return {source: torch.stack(values) for source, values in chunks.items()}, concat_targets(target_chunks), metadata
 
 
 def fit_probe(train_x, train_y, validation_x, validation_y, d_model, args, device, seed):
@@ -155,27 +185,54 @@ def metric(probe, x, targets, device):
     return result
 
 
-def metrics_by_scope(probe, x, targets, scopes, device):
+def metrics_by_group(probe, x, targets, values, device):
     result = {}
-    for scope in sorted(set(scopes)):
-        indices = torch.tensor([index for index, value in enumerate(scopes) if value == scope], dtype=torch.long)
+    for group in sorted(set(values), key=str):
+        indices = torch.tensor([index for index, value in enumerate(values) if value == group], dtype=torch.long)
         subset = ProbeTargets(targets.board[indices], targets.hands[indices], targets.turn[indices], None if targets.in_check is None else targets.in_check[indices])
-        result[scope] = metric(probe, x[indices], subset, device)
+        result[str(group)] = metric(probe, x[indices], subset, device)
+    return result
+
+
+def metrics_by_history_distance_and_group(probe, x, targets, distances, groups, device):
+    result = {}
+    for distance in sorted(set(distances)):
+        indices = [index for index, value in enumerate(distances) if value == distance]
+        subset = ProbeTargets(
+            targets.board[indices], targets.hands[indices], targets.turn[indices],
+            None if targets.in_check is None else targets.in_check[indices],
+        )
+        result[str(distance)] = metrics_by_group(
+            probe, x[indices], subset, [groups[index] for index in indices], device,
+        )
     return result
 
 
 def main():
-    args = parse_args(); random.seed(args.seed); torch.manual_seed(args.seed)
+    args = parse_args(); args.history_distances = parse_history_distances(args.history_distances)
+    random.seed(args.seed); torch.manual_seed(args.seed)
     vocabulary = load_vocabulary(args.vocab); device = resolve_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = ModelConfig(**checkpoint["config"])
     model_type = str(checkpoint.get("model_type", "vanilla"))
     model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
     board_map, hand_names = label_maps(); sources = expand_sources(args.sources, config.n_layers)
-    raw = {"train": read_examples(args.train_jsonl, args.max_train_samples), "validation": read_examples(args.validation_jsonl, args.max_validation_samples), "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples)}
+    raw = {
+        "train": read_examples(args.train_jsonl, args.max_train_samples, args.history_distances),
+        "validation": read_examples(args.validation_jsonl, args.max_validation_samples, args.history_distances),
+        "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples, args.history_distances),
+    }
     extracted = {name: extract(model, examples, vocabulary, sources, board_map, hand_names, device, config.max_seq_len) for name, examples in raw.items()}
     majority = majority_predictions(extracted["train"][1], extracted["evaluation"][1].board.shape[0])
-    result = {"checkpoint": args.checkpoint, "model_type": model_type, "settings": vars(args), "sources": sources, "majority_baseline": state_metrics(extracted["evaluation"][1], *majority), "probe_results": {}}
+    result = {
+        "checkpoint": args.checkpoint,
+        "model_type": model_type,
+        "settings": vars(args),
+        "history_distances": list(args.history_distances),
+        "sources": sources,
+        "majority_baseline": state_metrics(extracted["evaluation"][1], *majority),
+        "probe_results": {},
+    }
     states = {}
     for source_index, source in enumerate(sources):
         probe, best_loss = fit_probe(
@@ -183,7 +240,29 @@ def main():
             extracted["validation"][0][source], extracted["validation"][1],
             config.d_model, args, device, args.seed + source_index,
         )
-        result["probe_results"][source] = {"best_validation_loss": best_loss, "validation": metric(probe, extracted["validation"][0][source], extracted["validation"][1], device), "evaluation": metric(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], device), "evaluation_by_position_scope": metrics_by_scope(probe, extracted["evaluation"][0][source], extracted["evaluation"][1], extracted["evaluation"][2], device)}
+        evaluation_x, evaluation_y, evaluation_metadata = extracted["evaluation"]
+        result["probe_results"][source] = {
+            "best_validation_loss": best_loss,
+            "validation": metric(probe, extracted["validation"][0][source], extracted["validation"][1], device),
+            "evaluation": metric(probe, evaluation_x[source], evaluation_y, device),
+            "evaluation_by_position_scope": metrics_by_group(
+                probe, evaluation_x[source], evaluation_y, evaluation_metadata["position_scope"], device,
+            ),
+            "evaluation_by_trajectory_scope": metrics_by_group(
+                probe, evaluation_x[source], evaluation_y, evaluation_metadata["trajectory_scope"], device,
+            ),
+            "evaluation_by_history_distance": metrics_by_group(
+                probe, evaluation_x[source], evaluation_y, evaluation_metadata["history_distance"], device,
+            ),
+            "evaluation_by_history_distance_and_position_scope": metrics_by_history_distance_and_group(
+                probe, evaluation_x[source], evaluation_y,
+                evaluation_metadata["history_distance"], evaluation_metadata["position_scope"], device,
+            ),
+            "evaluation_by_history_distance_and_trajectory_scope": metrics_by_history_distance_and_group(
+                probe, evaluation_x[source], evaluation_y,
+                evaluation_metadata["history_distance"], evaluation_metadata["trajectory_scope"], device,
+            ),
+        }
         states[source] = probe.cpu().state_dict()
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
     (output / "probe_metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
