@@ -15,6 +15,14 @@ except ImportError:
 
 
 class NewPromptSchemaTest(unittest.TestCase):
+    def test_factorized_move_round_trip(self):
+        from factorized_prompt import factorize_usi, unfactorize_usi
+
+        for move in ("7g7f", "2b3c+", "P*5e"):
+            tokens = factorize_usi(move)
+            self.assertEqual(tokens[-1], "<EOM>")
+            self.assertEqual(unfactorize_usi(tokens), move)
+
     def test_prompt_and_move_annotation_validation(self):
         from new_prompt import validate_move_annotations, validate_state_prompt_tokens
 
@@ -44,6 +52,37 @@ class NewPromptSchemaTest(unittest.TestCase):
 
 @unittest.skipIf(torch is None, "PyTorch is not installed")
 class NewPromptDatasetTest(unittest.TestCase):
+    def test_factorized_dataset_counts_one_loss_unit_per_move(self):
+        from factorized_prompt import factorized_vocabulary_tokens
+        from factorized_prompt_data import FactorizedPromptSequenceDataset
+        from new_prompt_data import collate_new_prompt_sequences
+
+        state = [
+            "<STATE>", "<BOARD>", "<W_K>", "<SQ_5a>", "<B_K>", "<SQ_5i>",
+            "<B_P>", "<SQ_7g>", "</BOARD>", "<HANDS>", "</HANDS>", "<TURN_BLACK>",
+        ]
+        record = {
+            "game_id": "factorized", "state_prompt_tokens": state, "start_ply": 0,
+            "move_tokens": ["7g7f", "P*5e"],
+            "move_annotations": [
+                {"eligible": True, "piece": "<B_P>", "source": "<SQ_7g>"},
+                {"eligible": False},
+            ],
+        }
+        vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            dataset = FactorizedPromptSequenceDataset(
+                str(path), vocab, annotation_mode="partial_action", annotation_probability=1.0,
+                randomize_each_epoch=False,
+            )
+            batch = collate_new_prompt_sequences([dataset[0]], vocab["<PAD>"], max_seq_len=64)
+        self.assertEqual(int(batch["move_target_mask"].sum()), 6)
+        self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 6.0)
+        self.assertEqual(int(batch["move_boundary_mask"].sum()), 2)
+        self.assertEqual(int(batch["hint_target_mask"].sum()), 1)
+
     def test_partial_action_labels_hints_and_moves(self):
         from new_prompt import new_prompt_vocabulary_tokens
         from new_prompt_data import NewPromptSequenceDataset, collate_new_prompt_sequences

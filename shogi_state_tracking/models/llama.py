@@ -8,10 +8,11 @@ import math
 from typing import List, Optional, Sequence, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .config import ModelConfig
-from .layers import RMSNorm
+from .layers import RMSNorm, prepare_sdpa_mask
 from .outputs import DecoderOutput
 
 
@@ -45,40 +46,54 @@ class RotaryCausalSelfAttention(nn.Module):
         batch, seq_len, _ = x.shape
         return x.view(batch, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
-    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, position_offset: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        length = q.shape[-2]
-        positions = torch.arange(position_offset, position_offset + length, device=q.device, dtype=torch.float32)
-        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.head_dim, 2, device=q.device, dtype=torch.float32) / self.head_dim))
-        angles = torch.outer(positions, inv_freq)
-        angles = torch.cat((angles, angles), dim=-1)
-        cos = angles.cos().to(dtype=q.dtype)[None, None, :, :]
-        sin = angles.sin().to(dtype=q.dtype)[None, None, :, :]
+    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, position_offset: int, rotary=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        if rotary is None:
+            length = q.shape[-2]
+            positions = torch.arange(position_offset, position_offset + length, device=q.device, dtype=torch.float32)
+            inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, self.head_dim, 2, device=q.device, dtype=torch.float32) / self.head_dim))
+            angles = torch.outer(positions, inv_freq)
+            angles = torch.cat((angles, angles), dim=-1)
+            cos = angles.cos().to(dtype=q.dtype)[None, None, :, :]
+            sin = angles.sin().to(dtype=q.dtype)[None, None, :, :]
+        else:
+            cos, sin = rotary
         return q * cos + _rotate_half(q) * sin, k * cos + _rotate_half(k) * sin
 
-    def _project(self, x: torch.Tensor, position_offset: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _project(self, x: torch.Tensor, position_offset: int, rotary=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q, k, v = self._split_heads(q), self._split_heads(k), self._split_heads(v)
-        q, k = self._apply_rope(q, k, position_offset)
+        q, k = self._apply_rope(q, k, position_offset, rotary)
         return q, k, v
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, position_offset: int = 0) -> torch.Tensor:
+    def _attention(self, q, k, v, attention_mask=None):
+        batch, _, seq_len, _ = q.shape
+        if attention_mask is None:
+            mask, is_causal = None, True
+        else:
+            mask = prepare_sdpa_mask(attention_mask)
+            is_causal = False
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=is_causal,
+        )
+
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, position_offset: int = 0, rotary=None) -> torch.Tensor:
         batch, seq_len, _ = x.shape
-        q, k, v = self._project(x, position_offset)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal = torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device).triu(diagonal=1)
-        scores = scores.masked_fill(causal[None, None], float("-inf"))
-        if attention_mask is not None:
-            if attention_mask.shape != (batch, seq_len):
-                raise ValueError("attention_mask must have shape [batch, seq_len]")
-            scores = scores.masked_fill(~attention_mask.to(dtype=torch.bool)[:, None, None, :], float("-inf"))
-        weights = self.attn_dropout(torch.softmax(scores.float(), dim=-1).to(dtype=q.dtype))
-        output = torch.matmul(weights, v).transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
+        q, k, v = self._project(x, position_offset, rotary)
+        output = self._attention(q, k, v, attention_mask).transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
         return self.resid_dropout(self.out_proj(output))
 
-    def forward_step(self, x: torch.Tensor, past_key_value: Optional[KeyValue], position: int) -> Tuple[torch.Tensor, KeyValue]:
+    def forward_with_cache(self, x, attention_mask=None, position_offset=0, rotary=None):
+        batch, seq_len, _ = x.shape
+        q, k, v = self._project(x, position_offset, rotary)
+        output = self._attention(q, k, v, attention_mask).transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
+        return self.resid_dropout(self.out_proj(output)), (k, v)
+
+    def forward_step(self, x: torch.Tensor, past_key_value: Optional[KeyValue], position: int, rotary=None) -> Tuple[torch.Tensor, KeyValue]:
         if x.shape[1] != 1:
             raise ValueError("forward_step expects exactly one token")
-        q, k, v = self._project(x, position)
+        q, k, v = self._project(x, position, rotary)
         if past_key_value is not None:
             past_k, past_v = past_key_value
             k, v = torch.cat((past_k, k), dim=2), torch.cat((past_v, v), dim=2)
@@ -107,12 +122,17 @@ class LlamaDecoderBlock(nn.Module):
         self.ffn_norm = RMSNorm(config.d_model, config.norm_eps)
         self.ffn = SwiGLUFeedForward(config.d_model, config.d_ff, config.dropout)
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), attention_mask)
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, rotary=None) -> torch.Tensor:
+        x = x + self.attn(self.attn_norm(x), attention_mask, rotary=rotary)
         return x + self.ffn(self.ffn_norm(x))
 
-    def forward_step(self, x: torch.Tensor, past_key_value: Optional[KeyValue], position: int) -> Tuple[torch.Tensor, KeyValue]:
-        attention, key_value = self.attn.forward_step(self.attn_norm(x), past_key_value, position)
+    def forward_with_cache(self, x, attention_mask=None, rotary=None):
+        attention, key_value = self.attn.forward_with_cache(self.attn_norm(x), attention_mask, rotary=rotary)
+        x = x + attention
+        return x + self.ffn(self.ffn_norm(x)), key_value
+
+    def forward_step(self, x: torch.Tensor, past_key_value: Optional[KeyValue], position: int, rotary=None) -> Tuple[torch.Tensor, KeyValue]:
+        attention, key_value = self.attn.forward_step(self.attn_norm(x), past_key_value, position, rotary)
         x = x + attention
         return x + self.ffn(self.ffn_norm(x)), key_value
 
@@ -129,6 +149,12 @@ class LlamaTransformer(nn.Module):
         self.layers = nn.ModuleList(LlamaDecoderBlock(config) for _ in range(config.n_layers))
         self.final_norm = RMSNorm(config.d_model, config.norm_eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        head_dim = config.d_model // config.n_heads
+        self.register_buffer(
+            "rope_inv_freq",
+            1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)),
+            persistent=False,
+        )
         if config.tie_embeddings:
             self.lm_head.weight = self.token_embedding.weight
         self.apply(self._init_weights)
@@ -145,16 +171,25 @@ class LlamaTransformer(nn.Module):
             raise ValueError("sequence exceeds max_seq_len")
         return self.embedding_dropout(self.token_embedding(input_ids))
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, recurrent_mask: Optional[torch.Tensor] = None, exact_recurrence: bool = False) -> DecoderOutput:
+    def _rotary(self, device, dtype, position_offset, length):
+        positions = torch.arange(position_offset, position_offset + length, device=device, dtype=torch.float32)
+        angles = torch.outer(positions, self.rope_inv_freq.to(device=device))
+        angles = torch.cat((angles, angles), dim=-1)
+        return angles.cos().to(dtype)[None, None], angles.sin().to(dtype)[None, None]
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, recurrent_mask: Optional[torch.Tensor] = None, exact_recurrence: bool = False, output_hidden_states: bool = True) -> DecoderOutput:
         del recurrent_mask
         if exact_recurrence:
             return self.forward_exact(input_ids)
         x = self._embed(input_ids)
-        hidden_states = [x]
+        attention_mask = prepare_sdpa_mask(attention_mask)
+        rotary = self._rotary(x.device, x.dtype, 0, x.shape[1])
+        hidden_states = [x] if output_hidden_states else None
         for layer in self.layers:
-            x = layer(x, attention_mask)
-            hidden_states.append(x)
-        return DecoderOutput(logits=self.lm_head(self.final_norm(x)), hidden_states=tuple(hidden_states))
+            x = layer(x, attention_mask, rotary)
+            if hidden_states is not None:
+                hidden_states.append(x)
+        return DecoderOutput(logits=self.lm_head(self.final_norm(x)), hidden_states=tuple(hidden_states or ()))
 
     def step(self, input_ids: torch.Tensor, position: int, past_key_values: Optional[Sequence[Optional[KeyValue]]] = None, recurrent_state=None, recurrent_active=None, return_logits: bool = True):
         del recurrent_state, recurrent_active
@@ -163,14 +198,28 @@ class LlamaTransformer(nn.Module):
         if past_key_values is None:
             past_key_values = [None] * self.config.n_layers
         x = self._embed(input_ids, position)
+        rotary = self._rotary(x.device, x.dtype, position, 1)
         layer_states = [x]
         next_key_values: List[KeyValue] = []
         for layer, past in zip(self.layers, past_key_values):
-            x, key_value = layer.forward_step(x, past, position)
+            x, key_value = layer.forward_step(x, past, position, rotary)
             next_key_values.append(key_value)
             layer_states.append(x)
         logits = self.lm_head(self.final_norm(x)) if return_logits else None
         return logits, tuple(next_key_values), None, tuple(layer_states), None
+
+    def prefill(self, input_ids: torch.Tensor):
+        """paddingなしprefixを並列計算し，末尾logitsとKV cacheを返す。"""
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must have shape [batch, seq_len]")
+        x = self._embed(input_ids)
+        rotary = self._rotary(x.device, x.dtype, 0, x.shape[1])
+        key_values = []
+        for layer in self.layers:
+            x, key_value = layer.forward_with_cache(x, rotary=rotary)
+            key_values.append(key_value)
+        logits = self.lm_head(self.final_norm(x[:, -1:]))
+        return logits, tuple(key_values)
 
     def forward_exact(self, input_ids: torch.Tensor, recurrent_mask: Optional[torch.Tensor] = None) -> DecoderOutput:
         del recurrent_mask

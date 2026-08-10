@@ -41,8 +41,38 @@ class ProbeMetricTest(unittest.TestCase):
         self.assertEqual(metrics["board_occupancy_accuracy"], 1.0)
         self.assertEqual(metrics["board_piece_accuracy_on_occupied"], 1.0)
         self.assertEqual(metrics["board_occupied_accuracy"], 1.0)
+        self.assertEqual(metrics["board_balanced_accuracy"], 1.0)
+        self.assertEqual(metrics["board_macro_precision"], 1.0)
+        self.assertEqual(metrics["board_macro_recall"], 1.0)
+        self.assertEqual(metrics["board_macro_f1"], 1.0)
+        self.assertEqual(metrics["board_occupancy_balanced_accuracy"], 1.0)
+        self.assertEqual(metrics["board_occupancy_precision"], 1.0)
+        self.assertEqual(metrics["board_occupancy_recall"], 1.0)
+        self.assertEqual(metrics["board_occupancy_f1"], 1.0)
         self.assertEqual(metrics["hand_exact_match"], 1.0)
+        self.assertEqual(metrics["hand_nonzero_balanced_accuracy"], 1.0)
         self.assertEqual(metrics["full_state_exact_match"], 1.0)
+
+    def test_imbalanced_occupancy_is_not_hidden_by_accuracy(self):
+        from probes import ProbeTargets, state_metrics
+
+        targets = ProbeTargets(
+            board=torch.tensor([[1] + [0] * 80]),
+            hands=torch.tensor([[1] + [0] * 13]),
+            turn=torch.tensor([0]),
+        )
+        metrics = state_metrics(
+            targets,
+            torch.zeros_like(targets.board),
+            torch.zeros_like(targets.hands),
+            targets.turn.clone(),
+        )
+        self.assertGreater(metrics["board_occupancy_accuracy"], 0.98)
+        self.assertEqual(metrics["board_occupancy_balanced_accuracy"], 0.5)
+        self.assertEqual(metrics["board_occupancy_precision"], 0.0)
+        self.assertEqual(metrics["board_occupancy_recall"], 0.0)
+        self.assertEqual(metrics["board_occupancy_f1"], 0.0)
+        self.assertEqual(metrics["hand_nonzero_balanced_accuracy"], 0.5)
 
     def test_majority_baseline_is_position_specific(self):
         from probes import ProbeTargets, majority_predictions

@@ -13,7 +13,10 @@ from typing import Mapping
 
 import torch
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # --no-tensorboardのsmoke環境を許す。
+    SummaryWriter = None
 
 from cot_data import ReasoningTraceDataset, collate_reasoning_traces
 from data import (
@@ -489,7 +492,9 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output_dir / "tensorboard"
-    writer = None if args.no_tensorboard else SummaryWriter(log_dir=str(tensorboard_dir))
+    if not args.no_tensorboard and SummaryWriter is None:
+        print(json.dumps({"event": "tensorboard_unavailable", "action": "disabled"}), flush=True)
+    writer = None if args.no_tensorboard or SummaryWriter is None else SummaryWriter(log_dir=str(tensorboard_dir))
     if writer is not None:
         writer.add_text("run/config", json.dumps(vars(args), ensure_ascii=False, indent=2), 0)
         writer.add_scalar("model/parameter_count", sum(parameter.numel() for parameter in model.parameters()), 0)

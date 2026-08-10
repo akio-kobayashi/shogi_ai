@@ -175,9 +175,20 @@ def predictions_from_logits(
     return board, hands, turn
 
 
-def _macro_f1(target: torch.Tensor, prediction: torch.Tensor, classes: int) -> float:
-    scores = []
-    for class_index in range(classes):
+def classification_metrics(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+    class_indices: Sequence[int],
+) -> Dict[str, float]:
+    """正解集合に出現するクラスについてmacro指標を返す。
+
+    balanced accuracyは各クラスrecallの単純平均である。未出現クラスを0点として
+    混ぜるとsplitごとのクラス欠落に左右されるため，support>0のクラスだけを使う。
+    """
+    precision_scores = []
+    recall_scores = []
+    f1_scores = []
+    for class_index in class_indices:
         truth = target == class_index
         if not bool(truth.any()):
             continue
@@ -185,9 +196,48 @@ def _macro_f1(target: torch.Tensor, prediction: torch.Tensor, classes: int) -> f
         true_positive = int((truth & predicted).sum())
         false_positive = int((~truth & predicted).sum())
         false_negative = int((truth & ~predicted).sum())
-        denominator = 2 * true_positive + false_positive + false_negative
-        scores.append(0.0 if denominator == 0 else 2 * true_positive / denominator)
-    return float(sum(scores) / len(scores)) if scores else 0.0
+        precision = true_positive / max(true_positive + false_positive, 1)
+        recall = true_positive / max(true_positive + false_negative, 1)
+        f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+        precision_scores.append(precision)
+        recall_scores.append(recall)
+        f1_scores.append(f1)
+    denominator = max(len(recall_scores), 1)
+    return {
+        "balanced_accuracy": float(sum(recall_scores) / denominator),
+        "macro_precision": float(sum(precision_scores) / denominator),
+        "macro_recall": float(sum(recall_scores) / denominator),
+        "macro_f1": float(sum(f1_scores) / denominator),
+        "supported_classes": len(recall_scores),
+    }
+
+
+def binary_classification_metrics(
+    target: torch.Tensor, prediction: torch.Tensor
+) -> Dict[str, float]:
+    """1をpositiveとする二値precision／recall／F1とbalanced accuracy。"""
+    target = target.reshape(-1).to(dtype=torch.long)
+    prediction = prediction.reshape(-1).to(dtype=torch.long)
+    positive = target == 1
+    predicted_positive = prediction == 1
+    tp = int((positive & predicted_positive).sum())
+    fp = int((~positive & predicted_positive).sum())
+    fn = int((positive & ~predicted_positive).sum())
+    tn = int((~positive & ~predicted_positive).sum())
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    supported = classification_metrics(target, prediction, (0, 1))
+    return {
+        "accuracy": float((target == prediction).float().mean()),
+        "balanced_accuracy": supported["balanced_accuracy"],
+        "precision": precision,
+        "recall": recall,
+        "f1": 2 * precision * recall / max(precision + recall, 1e-12),
+        "true_positive": tp,
+        "false_positive": fp,
+        "false_negative": fn,
+        "true_negative": tn,
+    }
 
 
 def state_metrics(
@@ -217,6 +267,22 @@ def state_metrics(
     full_exact = board_exact & hand_exact & turn_correct
     predicted_occupied = board_prediction != 0
     occupancy_correct = predicted_occupied == occupied
+    board_multiclass = classification_metrics(
+        targets.board.reshape(-1), board_prediction.reshape(-1), range(BOARD_CLASS_COUNT)
+    )
+    occupied_piece_multiclass = classification_metrics(
+        targets.board[occupied], board_prediction[occupied], range(1, BOARD_CLASS_COUNT)
+    ) if occupied_total else None
+    occupancy_binary = binary_classification_metrics(
+        occupied.to(dtype=torch.long), predicted_occupied.to(dtype=torch.long)
+    )
+    hand_count_multiclass = classification_metrics(
+        targets.hands.reshape(-1), hand_prediction.reshape(-1), range(max(HAND_MAX_COUNTS) + 1)
+    )
+    hand_nonzero_binary = binary_classification_metrics(
+        nonzero_hand.to(dtype=torch.long), (hand_prediction != 0).to(dtype=torch.long)
+    )
+    turn_binary = binary_classification_metrics(targets.turn, turn_prediction)
 
     per_hand = {
         name: float(hand_correct[:, index].float().mean())
@@ -239,6 +305,10 @@ def state_metrics(
         "board_square_accuracy": float(board_correct.float().mean()),
         # 全81マスについて，空／非空だけを判定する二値指標。
         "board_occupancy_accuracy": float(occupancy_correct.float().mean()),
+        "board_occupancy_balanced_accuracy": occupancy_binary["balanced_accuracy"],
+        "board_occupancy_precision": occupancy_binary["precision"],
+        "board_occupancy_recall": occupancy_binary["recall"],
+        "board_occupancy_f1": occupancy_binary["f1"],
         # 正解が駒のあるマスに限定し，駒種・所属まで一致した割合。
         # 旧名 board_occupied_accuracy は互換性のため残す。
         "board_piece_accuracy_on_occupied": (
@@ -251,11 +321,14 @@ def state_metrics(
             if occupied_total
             else None
         ),
-        "board_macro_f1": _macro_f1(
-            targets.board.reshape(-1),
-            board_prediction.reshape(-1),
-            BOARD_CLASS_COUNT,
-        ),
+        "board_balanced_accuracy": board_multiclass["balanced_accuracy"],
+        "board_macro_precision": board_multiclass["macro_precision"],
+        "board_macro_recall": board_multiclass["macro_recall"],
+        "board_macro_f1": board_multiclass["macro_f1"],
+        "board_piece_on_occupied_balanced_accuracy": None if occupied_piece_multiclass is None else occupied_piece_multiclass["balanced_accuracy"],
+        "board_piece_on_occupied_macro_precision": None if occupied_piece_multiclass is None else occupied_piece_multiclass["macro_precision"],
+        "board_piece_on_occupied_macro_recall": None if occupied_piece_multiclass is None else occupied_piece_multiclass["macro_recall"],
+        "board_piece_on_occupied_macro_f1": None if occupied_piece_multiclass is None else occupied_piece_multiclass["macro_f1"],
         "hand_exact_match": float(hand_exact.float().mean()),
         "hand_slot_accuracy": float(hand_correct.float().mean()),
         "hand_nonzero_accuracy": (
@@ -263,10 +336,22 @@ def state_metrics(
             if nonzero_hand_total
             else None
         ),
+        "hand_count_balanced_accuracy": hand_count_multiclass["balanced_accuracy"],
+        "hand_count_macro_precision": hand_count_multiclass["macro_precision"],
+        "hand_count_macro_recall": hand_count_multiclass["macro_recall"],
+        "hand_count_macro_f1": hand_count_multiclass["macro_f1"],
+        "hand_nonzero_balanced_accuracy": hand_nonzero_binary["balanced_accuracy"],
+        "hand_nonzero_precision": hand_nonzero_binary["precision"],
+        "hand_nonzero_recall": hand_nonzero_binary["recall"],
+        "hand_nonzero_f1": hand_nonzero_binary["f1"],
         "hand_mae": float(
             (hand_prediction - targets.hands).abs().float().mean()
         ),
         "turn_accuracy": float(turn_correct.float().mean()),
+        "turn_balanced_accuracy": turn_binary["balanced_accuracy"],
+        "turn_precision": turn_binary["precision"],
+        "turn_recall": turn_binary["recall"],
+        "turn_f1": turn_binary["f1"],
         "full_state_exact_match": float(full_exact.float().mean()),
         "board_accuracy_by_class": per_board_class,
         "board_samples_by_class": per_board_class_samples,

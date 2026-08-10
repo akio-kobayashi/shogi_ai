@@ -27,7 +27,7 @@ from new_prompt import (
 )
 
 
-ANNOTATION_MODES = ("vanilla", "partial_action", "random_control")
+ANNOTATION_MODES = ("vanilla", "rap", "partial_action", "random_control")
 
 
 def _annotation_color(annotation: Mapping[str, object]) -> str:
@@ -130,6 +130,19 @@ class NewPromptSequenceDataset(Dataset):
         state["_handle"] = None
         state["_handle_pid"] = None
         return state
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+            self._handle_pid = None
+
+    def __del__(self):
+        # DataLoader worker終了時と短いテストでfile descriptorを確実に返す。
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _open_handle(self):
         """worker PIDごとに独立したread-only handleを遅延生成する。"""
@@ -482,6 +495,17 @@ def collate_new_prompt_sequences(
         "move_target_mask": move_target_mask,
         "hint_target_mask": hint_target_mask,
     }
+    if "move_unit_weight" in examples[0]:
+        batch["move_unit_weight"] = pad_sequence(
+            [example["move_unit_weight"] for example in examples],
+            batch_first=True,
+            padding_value=0.0,
+        )
+        batch["move_boundary_mask"] = pad_sequence(
+            [example["move_boundary_mask"] for example in examples],
+            batch_first=True,
+            padding_value=False,
+        )
     # 学習ではmetadataを返さない。worker→親プロセスのpickle転送を避ける。
     if "game_id" in examples[0]:
         batch.update({

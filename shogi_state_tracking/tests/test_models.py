@@ -52,6 +52,24 @@ class ModelTest(unittest.TestCase):
         torch.testing.assert_close(parallel.logits, exact.logits, rtol=1e-5, atol=1e-6)
         self.assertEqual(len(parallel.hidden_states), 5)
 
+    def test_vanilla_and_llama_prefill_match_parallel_last_logit(self):
+        from models import build_model
+
+        for model_type in ("vanilla", "llama"):
+            model = build_model(model_type, self.vanilla_config).eval()
+            parallel = model(self.input_ids)
+            logits, cache = model.prefill(self.input_ids)
+            torch.testing.assert_close(logits, parallel.logits[:, -1:], rtol=1e-5, atol=1e-6)
+            self.assertEqual(len(cache), self.vanilla_config.n_layers)
+
+    def test_llama_parallel_matches_kv_cached_exact(self):
+        from models import build_model
+
+        model = build_model("llama", self.vanilla_config).eval()
+        parallel = model(self.input_ids)
+        exact = model(self.input_ids, exact_recurrence=True)
+        torch.testing.assert_close(parallel.logits, exact.logits, rtol=1e-5, atol=1e-6)
+
     def test_t2mlr_shapes_expose_probe_states(self):
         from models import T2MLRTransformer
 

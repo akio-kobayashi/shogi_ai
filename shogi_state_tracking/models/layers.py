@@ -2,7 +2,19 @@ import math
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+
+
+def prepare_sdpa_mask(attention_mask: Optional[torch.Tensor]):
+    """2D padding maskを全層で共有するcausal SDPA maskへ一度だけ変換する。"""
+    if attention_mask is None or attention_mask.ndim == 4:
+        return attention_mask
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must have shape [batch, seq_len]")
+    seq_len = attention_mask.shape[1]
+    causal = torch.ones(seq_len, seq_len, dtype=torch.bool, device=attention_mask.device).tril()
+    return causal[None, None] & attention_mask.to(torch.bool)[:, None, None, :]
 
 
 class RMSNorm(nn.Module):
@@ -33,6 +45,20 @@ class CausalSelfAttention(nn.Module):
         batch, seq_len, _ = x.shape
         return x.view(batch, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
+    def _attention(self, q, k, v, attention_mask=None):
+        batch, _, seq_len, _ = q.shape
+        if attention_mask is None:
+            mask = None
+            is_causal = True
+        else:
+            mask = prepare_sdpa_mask(attention_mask)
+            is_causal = False
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=is_causal,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -44,22 +70,7 @@ class CausalSelfAttention(nn.Module):
         k = self._split_heads(k)
         v = self._split_heads(v)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal = torch.ones(
-            seq_len, seq_len, dtype=torch.bool, device=x.device
-        ).triu(diagonal=1)
-        scores = scores.masked_fill(causal.view(1, 1, seq_len, seq_len), float("-inf"))
-        if attention_mask is not None:
-            if attention_mask.shape != (batch, seq_len):
-                raise ValueError("attention_mask must have shape [batch, seq_len]")
-            invalid_keys = ~attention_mask.to(dtype=torch.bool)
-            scores = scores.masked_fill(
-                invalid_keys[:, None, None, :], float("-inf")
-            )
-
-        weights = torch.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
-        weights = self.attn_dropout(weights)
-        output = torch.matmul(weights, v)
+        output = self._attention(q, k, v, attention_mask)
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
         return self.resid_dropout(self.out_proj(output))
 
@@ -79,22 +90,7 @@ class CausalSelfAttention(nn.Module):
         k = self._split_heads(k)
         v = self._split_heads(v)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal = torch.ones(
-            seq_len, seq_len, dtype=torch.bool, device=x.device
-        ).triu(diagonal=1)
-        scores = scores.masked_fill(causal.view(1, 1, seq_len, seq_len), float("-inf"))
-        if attention_mask is not None:
-            if attention_mask.shape != (batch, seq_len):
-                raise ValueError("attention_mask must have shape [batch, seq_len]")
-            invalid_keys = ~attention_mask.to(dtype=torch.bool)
-            scores = scores.masked_fill(
-                invalid_keys[:, None, None, :], float("-inf")
-            )
-
-        weights = torch.softmax(scores.float(), dim=-1).to(dtype=q.dtype)
-        weights = self.attn_dropout(weights)
-        output = torch.matmul(weights, v)
+        output = self._attention(q, k, v, attention_mask)
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
         output = self.resid_dropout(self.out_proj(output))
         return output, (k, v)

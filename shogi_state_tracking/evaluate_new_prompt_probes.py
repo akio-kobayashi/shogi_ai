@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence
 
@@ -16,7 +18,8 @@ from create_dataset import HAND_ORDER, PIECE_NAMES
 from data import load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
-from probes import LinearStateProbe, ProbeTargets, linear_probe_loss, majority_predictions, predictions_from_logits, state_metrics
+from factorized_prompt import factorize_usi
+from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, state_metrics
 
 
 def parse_args():
@@ -99,7 +102,7 @@ def parse_history_distances(value):
     return tuple(result)
 
 
-def read_examples(path, limit, history_distances):
+def read_examples(path, limit, history_distances, start_selection="random_candidates"):
     examples = []
     with Path(path).open(encoding="utf-8") as handle:
         for line in handle:
@@ -107,6 +110,8 @@ def read_examples(path, limit, history_distances):
             record = json.loads(line)
             for raw_example in record.get("probe_examples", []):
                 example = dict(raw_example)
+                if start_selection == "fixed_initial" and int(example.get("start_ply", -1)) != 0:
+                    continue
                 example.setdefault("trajectory_scope", record.get("trajectory_scope", "unknown_position_scope"))
                 distance = int(example["ply"]) - int(example["start_ply"])
                 if distance not in history_distances:
@@ -117,27 +122,70 @@ def read_examples(path, limit, history_distances):
     return examples
 
 
-def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len):
-    chunks = {source: [] for source in sources}; target_chunks = []
+def _mapped_features(directory, split, sources, rows, d_model):
+    result = {}
+    for source in sources:
+        path = Path(directory) / "{}_{}.f32".format(split, source)
+        with path.open("wb") as handle:
+            handle.truncate(rows * d_model * 4)
+        result[source] = torch.from_file(
+            str(path), shared=True, size=rows * d_model, dtype=torch.float32,
+        ).reshape(rows, d_model)
+    return result
+
+
+def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len, move_encoding, batch_size, state_prompt_mode, feature_directory, split):
+    features = _mapped_features(
+        feature_directory, split, sources, len(examples), model.config.d_model,
+    )
+    target_chunks = []
     metadata = {"position_scope": [], "trajectory_scope": [], "history_distance": [], "start_ply": []}
     model.eval()
-    with torch.inference_mode():
-        for example in examples:
-            tokens = ["<BOS>"] + list(example["state_prompt_tokens"]) + ["<MOVES>"] + [move_token(move) for move in example["history_moves"]]
-            if len(tokens) > max_seq_len: continue
-            ids = torch.tensor([[vocabulary[token] for token in tokens]], device=device)
-            output = model(ids, attention_mask=torch.ones_like(ids, dtype=torch.bool))
-            position = ids.shape[1] - 1
-            for source in sources:
-                layer = int(source.split("_", 1)[1])
-                chunks[source].append(output.hidden_states[layer][0, position].detach().cpu())
+    prepared_batch = []
+    written = 0
+
+    def consume(batch):
+        nonlocal written
+        if not batch:
+            return
+        lengths = torch.tensor([len(ids) for _, ids in batch], device=device)
+        width = int(lengths.max())
+        input_ids = torch.full((len(batch), width), vocabulary["<PAD>"], dtype=torch.long, device=device)
+        attention_mask = torch.arange(width, device=device)[None, :] < lengths[:, None]
+        for row, (_, ids) in enumerate(batch):
+            input_ids[row, : len(ids)] = torch.tensor(ids, device=device)
+        output = model(input_ids, attention_mask=attention_mask)
+        rows = torch.arange(len(batch), device=device)
+        positions = lengths - 1
+        end = written + len(batch)
+        for source in sources:
+            layer = int(source.split("_", 1)[1])
+            selected = output.hidden_states[layer][rows, positions].detach().cpu()
+            features[source][written:end].copy_(selected)
+        for example, _ in batch:
             target_chunks.append(target_from_mapping(example["probe_targets"], board_map, hand_names))
             metadata["position_scope"].append(str(example.get("position_scope", "unknown_position_scope")))
             metadata["trajectory_scope"].append(str(example.get("trajectory_scope", "unknown_position_scope")))
             metadata["history_distance"].append(int(example["ply"]) - int(example["start_ply"]))
             metadata["start_ply"].append(int(example["start_ply"]))
+        written = end
+
+    with torch.inference_mode():
+        for example in examples:
+            history = []
+            for move in example["history_moves"]:
+                history.extend(factorize_usi(move) if move_encoding == "factorized_v2" else [move_token(move)])
+            state = [] if state_prompt_mode == "implicit_initial" else list(example["state_prompt_tokens"])
+            tokens = ["<BOS>"] + state + ["<MOVES>"] + history
+            if len(tokens) > max_seq_len:
+                continue
+            prepared_batch.append((example, [vocabulary[token] for token in tokens]))
+            if len(prepared_batch) >= batch_size:
+                consume(prepared_batch)
+                prepared_batch = []
+        consume(prepared_batch)
     if not target_chunks: raise ValueError("all probe examples exceeded max_seq_len")
-    return {source: torch.stack(values) for source, values in chunks.items()}, concat_targets(target_chunks), metadata
+    return {source: values[:written] for source, values in features.items()}, concat_targets(target_chunks), metadata
 
 
 def fit_probe(train_x, train_y, validation_x, validation_y, d_model, args, device, seed):
@@ -180,7 +228,9 @@ def metric(probe, x, targets, device):
         logits = probe(x.to(device)); board, hands, turn = predictions_from_logits(logits)
     result = state_metrics(targets, board.cpu(), hands.cpu(), turn.cpu())
     if targets.in_check is not None:
-        result["in_check_accuracy"] = float((logits.in_check.argmax(dim=-1).cpu() == targets.in_check).float().mean())
+        check_prediction = logits.in_check.argmax(dim=-1).cpu()
+        check_metrics = binary_classification_metrics(targets.in_check, check_prediction)
+        result.update({"in_check_{}".format(name): value for name, value in check_metrics.items()})
         result["in_check_positive_rate"] = float(targets.in_check.float().mean())
     return result
 
@@ -215,18 +265,50 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = ModelConfig(**checkpoint["config"])
     model_type = str(checkpoint.get("model_type", "vanilla"))
+    move_encoding = str(checkpoint.get("new_prompt", {}).get("move_encoding", "atomic_v1"))
+    state_prompt_mode = str(checkpoint.get("new_prompt", {}).get("state_prompt_mode", "explicit"))
+    start_selection = str(checkpoint.get("new_prompt", {}).get("start_selection", "random_candidates"))
     model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
+    del checkpoint
     board_map, hand_names = label_maps(); sources = expand_sources(args.sources, config.n_layers)
+    output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
+    feature_cache = tempfile.TemporaryDirectory(prefix=".probe-features-", dir=str(output))
     raw = {
-        "train": read_examples(args.train_jsonl, args.max_train_samples, args.history_distances),
-        "validation": read_examples(args.validation_jsonl, args.max_validation_samples, args.history_distances),
-        "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples, args.history_distances),
+        "train": read_examples(args.train_jsonl, args.max_train_samples, args.history_distances, start_selection),
+        "validation": read_examples(args.validation_jsonl, args.max_validation_samples, args.history_distances, start_selection),
+        "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples, args.history_distances, start_selection),
     }
-    extracted = {name: extract(model, examples, vocabulary, sources, board_map, hand_names, device, config.max_seq_len) for name, examples in raw.items()}
+    feature_bytes = sum(len(examples) for examples in raw.values()) * len(sources) * config.d_model * 4
+    disk_free = shutil.disk_usage(output).free
+    if feature_bytes + 2**30 > disk_free:
+        feature_cache.cleanup()
+        raise OSError(
+            "insufficient disk space for mmap probe features: need {} bytes plus 1 GiB, free {}".format(
+                feature_bytes, disk_free,
+            )
+        )
+    print(json.dumps({
+        "event": "probe_feature_store",
+        "backend": "mmap",
+        "bytes": feature_bytes,
+        "disk_free_bytes": disk_free,
+        "directory": feature_cache.name,
+    }), flush=True)
+    extracted = {
+        name: extract(
+            model, examples, vocabulary, sources, board_map, hand_names, device,
+            config.max_seq_len, move_encoding, args.batch_size, state_prompt_mode,
+            feature_cache.name, name,
+        )
+        for name, examples in raw.items()
+    }
     majority = majority_predictions(extracted["train"][1], extracted["evaluation"][1].board.shape[0])
     result = {
         "checkpoint": args.checkpoint,
         "model_type": model_type,
+        "move_encoding": move_encoding,
+        "state_prompt_mode": state_prompt_mode,
+        "start_selection": start_selection,
         "settings": vars(args),
         "history_distances": list(args.history_distances),
         "sources": sources,
@@ -264,10 +346,10 @@ def main():
             ),
         }
         states[source] = probe.cpu().state_dict()
-    output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
     (output / "probe_metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     torch.save({"checkpoint": args.checkpoint, "sources": sources, "probe_state_dicts": states, "board_label_map": board_map, "hand_names": hand_names}, output / "linear_probes.pt")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    feature_cache.cleanup()
 
 
 if __name__ == "__main__": main()

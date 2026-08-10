@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""新しい状態prompt artifactだけを使うVanilla decoderの学習器。"""
+"""状態prompt artifactを使うVanilla／LLaMA型decoderの共通学習器。"""
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -18,14 +19,18 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt_data import ANNOTATION_MODES, NewPromptSequenceDataset, collate_new_prompt_sequences
+from factorized_prompt_data import FactorizedPromptSequenceDataset
 from train_model import amp_context, resolve_amp, resolve_device
 
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # --no-tensorboardのsmoke環境を許す。
+    SummaryWriter = None
 
 
 MODEL_SIZES = {
@@ -41,6 +46,35 @@ LLAMA_MODEL_SIZES = {
     "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 1920},
 }
+
+
+class LengthBucketBatchSampler(Sampler):
+    """近い系列長をまとめ，paddingによる二乗attention計算を減らす。"""
+
+    def __init__(self, lengths, batch_size, seed, pool_batches=50):
+        self.lengths = lengths
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.pool_size = max(self.batch_size, self.batch_size * int(pool_batches))
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __len__(self):
+        return math.ceil(len(self.lengths) / self.batch_size)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        indices = list(range(len(self.lengths)))
+        rng.shuffle(indices)
+        batches = []
+        for start in range(0, len(indices), self.pool_size):
+            pool = indices[start : start + self.pool_size]
+            pool.sort(key=self.lengths.__getitem__)
+            batches.extend(pool[index : index + self.batch_size] for index in range(0, len(pool), self.batch_size))
+        rng.shuffle(batches)
+        yield from batches
 
 
 def runtime_marker(event: str, **fields: object) -> None:
@@ -68,7 +102,7 @@ def validate_output_dir_model_label(output: Path, model_type: str, model_size: s
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="新prompt用Vanilla decoderを学習する")
+    parser = argparse.ArgumentParser(description="新prompt用decoderを学習する")
     parser.add_argument("--train-jsonl", required=True)
     parser.add_argument("--validation-jsonl", required=True)
     parser.add_argument("--vocab", required=True)
@@ -76,6 +110,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     # 既存呼出しとの互換性のため，既定値は従来どおりvanillaに保つ。
     parser.add_argument("--model-type", choices=("vanilla", "llama"), default="vanilla")
+    parser.add_argument(
+        "--move-encoding",
+        choices=("atomic_v1", "factorized_v2"),
+        default="atomic_v1",
+        help="factorized_v2は指手をsource/drop, destination, [PROMOTE], EOMへ分解する",
+    )
+    parser.add_argument(
+        "--state-prompt-mode", choices=("explicit", "implicit_initial"), default="explicit",
+        help="implicit_initialは平手初期局面を暗黙に仮定し，状態promptを入力しない",
+    )
+    parser.add_argument(
+        "--start-selection", choices=("random_candidates", "fixed_initial"), default="random_candidates",
+        help="2x2 ablationではfixed_initialを使い，開始ply=0へ固定する",
+    )
     parser.add_argument("--resume", action="store_true", help="output-dir/last.ptからモデルとoptimizerを再開する")
     parser.add_argument("--model-size", choices=tuple(MODEL_SIZES), required=True)
     parser.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="vanilla")
@@ -91,8 +139,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stopping-patience", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument("--fused-optimizer", choices=("auto", "on", "off"), default="auto")
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--length-bucket-pool-batches", type=int, default=50)
     parser.add_argument(
         "--num-workers",
         type=int,
@@ -126,6 +176,7 @@ def loss_for_batch(model, batch, device):
         batch["input_ids"].to(device, non_blocking=non_blocking),
         attention_mask=batch["attention_mask"].to(device, non_blocking=non_blocking),
         recurrent_mask=batch["recurrent_mask"].to(device, non_blocking=non_blocking),
+        output_hidden_states=False,
     )
     labels = batch["labels"].to(device, non_blocking=non_blocking)
     weights = batch["loss_weights"].to(device, non_blocking=non_blocking)
@@ -142,7 +193,31 @@ def loss_for_batch(model, batch, device):
     weight_sum = effective_weights.sum()
     if not bool(weight_sum > 0):
         raise ValueError("batch has no active prediction targets")
-    loss = (per_token * effective_weights).sum() / weight_sum
+    if "move_unit_weight" in batch:
+        move_units = batch["move_unit_weight"].to(
+            device, non_blocking=non_blocking
+        ).to(per_token.dtype)
+        move_count = batch["move_boundary_mask"].to(
+            device, non_blocking=non_blocking
+        ).sum()
+        if not bool(move_count > 0):
+            raise ValueError("factorized batch has no move targets")
+        move_loss = (per_token * move_units).sum() / move_count
+        hint_count = hint_mask.sum()
+        hint_loss = (
+            per_token.masked_select(hint_mask).mean()
+            if bool(hint_count > 0)
+            else per_token.new_zeros(())
+        )
+        hint_weights = effective_weights.masked_select(hint_mask)
+        hint_scale = hint_weights[0] if hint_weights.numel() else per_token.new_zeros(())
+        loss = move_loss + hint_scale * hint_loss
+        combined_nll_sum = loss.detach() * move_count.detach()
+        combined_weight = move_count.detach()
+    else:
+        loss = (per_token * effective_weights).sum() / weight_sum
+        combined_nll_sum = (per_token * effective_weights).sum().detach()
+        combined_weight = weight_sum.detach()
 
     # 注釈の有無が平均lossに埋もれないよう，重み付け前のCEと実トークン数を返す。
     # move_mask/hint_maskはlabelsと同じ位置で，それぞれ排他的に定義される。
@@ -154,8 +229,8 @@ def loss_for_batch(model, batch, device):
         }
 
     return loss, {
-        "combined_nll_sum": (per_token * effective_weights).sum().detach(),
-        "combined_weight": weight_sum.detach(),
+        "combined_nll_sum": combined_nll_sum,
+        "combined_weight": combined_weight,
         "move": totals(move_mask),
         "hint": totals(hint_mask),
     }
@@ -200,18 +275,24 @@ def write_step_scalars(writer: Optional["SummaryWriter"], step: int, loss, metri
         writer.add_scalar("system/max_memory_allocated_mib", torch.cuda.max_memory_allocated(device) / 2**20, step)
 
 
-def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss):
-    torch.save({
+def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss, include_optimizer=True):
+    payload = {
         "model_type": args.model_type, "config": model.config.to_dict(),
         "model_state_dict": model.state_dict(), "epoch": epoch, "step": step,
         "best_validation_loss": best_loss, "new_prompt": {
-            "model_size": args.model_size, "annotation_mode": args.annotation_mode,
+            "model_size": args.model_size, "move_encoding": args.move_encoding,
+            "state_prompt_mode": args.state_prompt_mode,
+            "start_selection": args.start_selection,
+            "annotation_mode": args.annotation_mode,
             "annotation_probability": args.annotation_probability,
             "hint_loss_weight": args.hint_loss_weight, "max_hints": args.max_hints,
             "max_moves": args.max_moves, "seed": args.seed,
         },
-        "optimizer_state_dict": optimizer.state_dict(),
-    }, path)
+    }
+    # 評価用best checkpointへAdamWのmomentを複製しない。再開に使うlastだけ保持する。
+    if include_optimizer:
+        payload["optimizer_state_dict"] = optimizer.state_dict()
+    torch.save(payload, path)
 
 
 def git_commit() -> str:
@@ -249,12 +330,28 @@ def main() -> None:
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
                   max_moves=args.max_moves, max_seq_len=args.max_seq_len,
                   return_metadata=False, validate_records=False)
-    train_dataset = NewPromptSequenceDataset(args.train_jsonl, vocabulary, seed=args.seed, randomize_each_epoch=True, **common)
+    dataset_class = (
+        FactorizedPromptSequenceDataset
+        if args.move_encoding == "factorized_v2"
+        else NewPromptSequenceDataset
+    )
+    if args.move_encoding != "factorized_v2" and (
+        args.state_prompt_mode != "explicit" or args.start_selection != "random_candidates"
+    ):
+        raise ValueError("state prompt/start ablation is implemented only for factorized_v2")
+    if args.state_prompt_mode == "implicit_initial" and args.start_selection != "fixed_initial":
+        raise ValueError("implicit_initial requires --start-selection fixed_initial")
+    if args.move_encoding == "factorized_v2":
+        common.update(
+            state_prompt_mode=args.state_prompt_mode,
+            start_selection=args.start_selection,
+        )
+    train_dataset = dataset_class(args.train_jsonl, vocabulary, seed=args.seed, randomize_each_epoch=True, **common)
     runtime_marker("train_dataset_ready", **train_dataset.storage_statistics())
     # early stoppingも運用時と同じ，注釈を除いた入力で測る。主比較の制約付き
     # 指手評価はevaluate_new_prompt_moves.pyで別に実行する。
     validation_common = dict(common, annotation_mode="vanilla", annotation_probability=0.0)
-    validation_dataset = NewPromptSequenceDataset(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
+    validation_dataset = dataset_class(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
     runtime_marker("validation_dataset_ready", **validation_dataset.storage_statistics())
     collate = partial(collate_new_prompt_sequences, pad_token_id=vocabulary["<PAD>"], max_seq_len=args.max_seq_len)
     loader_options = {
@@ -267,14 +364,43 @@ def main() -> None:
         # worker数×prefetch_factor個のbatchがCPU/Pinned memoryに滞留する。
         # 長い系列を扱うため既定の2ではなく1に固定する。
         loader_options["prefetch_factor"] = 1
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
+    bucket_sampler = None
+    if getattr(train_dataset, "length_estimates", None) is not None and args.length_bucket_pool_batches > 0:
+        bucket_sampler = LengthBucketBatchSampler(
+            train_dataset.length_estimates, args.batch_size, args.seed,
+            args.length_bucket_pool_batches,
+        )
+        train_loader = DataLoader(train_dataset, batch_sampler=bucket_sampler, **loader_options)
+        runtime_marker(
+            "length_bucketing_enabled",
+            pool_batches=args.length_bucket_pool_batches,
+            indexed_records=len(train_dataset.length_estimates),
+        )
+    else:
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, **loader_options)
     validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, **loader_options)
     runtime_marker("loaders_ready", batch_size=args.batch_size, num_workers=args.num_workers)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else output / "tensorboard"
     # resume時も既存eventを消さず，checkpointのglobal step以降へ追記する。
-    writer = None if args.no_tensorboard else SummaryWriter(log_dir=str(tensorboard_dir))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    if not args.no_tensorboard and SummaryWriter is None:
+        runtime_marker("tensorboard_unavailable", action="disabled")
+    writer = None if args.no_tensorboard or SummaryWriter is None else SummaryWriter(log_dir=str(tensorboard_dir))
+    optimizer_kwargs = {"lr": args.learning_rate, "weight_decay": args.weight_decay}
+    use_fused = args.fused_optimizer == "on" or (
+        args.fused_optimizer == "auto" and device.type == "cuda"
+    )
+    if use_fused:
+        optimizer_kwargs["fused"] = True
+    try:
+        optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+    except (RuntimeError, TypeError) as exc:
+        if args.fused_optimizer == "on":
+            raise
+        runtime_marker("fused_optimizer_unavailable", reason=str(exc))
+        optimizer_kwargs.pop("fused", None)
+        optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+    runtime_marker("optimizer_ready", fused=bool(optimizer_kwargs.get("fused", False)))
     start_epoch = step = 0; best_loss = float("inf")
     if args.resume:
         resume_path = output / "last.pt"
@@ -288,6 +414,9 @@ def main() -> None:
         model.load_state_dict(resume["model_state_dict"])
         if "optimizer_state_dict" in resume: optimizer.load_state_dict(resume["optimizer_state_dict"])
         start_epoch = int(resume.get("epoch", 0)); step = int(resume.get("step", 0)); best_loss = float(resume.get("best_validation_loss", best_loss))
+        # load_state_dict後もcheckpoint辞書を残すとmodel/optimizer stateを二重保持する。
+        del resume
+        gc.collect()
     run = {"format_version": 1, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit(), "tensorboard": None if writer is None else str(tensorboard_dir.resolve())}
     if args.dataset_manifest:
         dataset_manifest = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
@@ -309,6 +438,8 @@ def main() -> None:
     for epoch in range(start_epoch + 1, args.epochs + 1):
         print(json.dumps({"event": "epoch_start", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
         train_dataset.set_epoch(epoch)
+        if bucket_sampler is not None:
+            bucket_sampler.set_epoch(epoch)
         model.train()
         epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
         for batch_index, batch in enumerate(train_loader, 1):
@@ -369,12 +500,12 @@ def main() -> None:
             writer.flush()
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
         print(json.dumps({"event": "checkpoint_save_start", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
-        save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss)
+        save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss, include_optimizer=True)
         print(json.dumps({"event": "checkpoint_save_complete", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         if validation["loss"] < best_loss - 1e-4:
             best_loss, wait = validation["loss"], 0
             print(json.dumps({"event": "checkpoint_save_start", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
-            save_checkpoint(output / "best.pt", model, optimizer, args, epoch, step, best_loss)
+            save_checkpoint(output / "best.pt", model, optimizer, args, epoch, step, best_loss, include_optimizer=False)
             print(json.dumps({"event": "checkpoint_save_complete", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         else:
             wait += 1

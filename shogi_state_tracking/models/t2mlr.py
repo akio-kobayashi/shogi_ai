@@ -22,7 +22,7 @@ import torch
 from torch import nn
 
 from .config import T2MLRConfig
-from .layers import RMSNorm
+from .layers import RMSNorm, prepare_sdpa_mask
 from .outputs import DecoderOutput
 from .transformer import KeyValue, VanillaTransformer
 
@@ -148,6 +148,7 @@ class T2MLRTransformer(VanillaTransformer):
             return self.forward_exact(input_ids, recurrent_mask)
 
         x = self._embed(input_ids)
+        attention_mask = prepare_sdpa_mask(attention_mask)
         hidden_states: List[torch.Tensor] = [x]
 
         # l_startより前はVanillaと同一で、一度だけ計算する。

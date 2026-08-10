@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from .config import ModelConfig
-from .layers import DecoderBlock, RMSNorm
+from .layers import DecoderBlock, RMSNorm, prepare_sdpa_mask
 from .outputs import DecoderOutput
 
 
@@ -63,17 +63,20 @@ class VanillaTransformer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         recurrent_mask: Optional[torch.Tensor] = None,
         exact_recurrence: bool = False,
+        output_hidden_states: bool = True,
     ) -> DecoderOutput:
         del recurrent_mask
         if exact_recurrence:
             return self.forward_exact(input_ids)
         x = self._embed(input_ids)
-        hidden_states = [x]
+        attention_mask = prepare_sdpa_mask(attention_mask)
+        hidden_states = [x] if output_hidden_states else None
         for layer in self.layers:
             x = layer(x, attention_mask)
-            hidden_states.append(x)
+            if hidden_states is not None:
+                hidden_states.append(x)
         logits = self.lm_head(self.final_norm(x))
-        return DecoderOutput(logits=logits, hidden_states=tuple(hidden_states))
+        return DecoderOutput(logits=logits, hidden_states=tuple(hidden_states or ()))
 
     def step(
         self,
@@ -99,6 +102,18 @@ class VanillaTransformer(nn.Module):
         # traceのprefix再生では指定位置以外のvocab projectionを省略できる。
         logits = self.lm_head(self.final_norm(x)) if return_logits else None
         return logits, tuple(next_key_values), None, tuple(layer_states), None
+
+    def prefill(self, input_ids: torch.Tensor):
+        """paddingなしprefixを並列計算し，末尾logitsとKV cacheを返す。"""
+        if input_ids.ndim != 2:
+            raise ValueError("input_ids must have shape [batch, seq_len]")
+        x = self._embed(input_ids)
+        key_values = []
+        for layer in self.layers:
+            x, key_value = layer.forward_with_cache(x)
+            key_values.append(key_value)
+        logits = self.lm_head(self.final_norm(x[:, -1:]))
+        return logits, tuple(key_values)
 
     def forward_exact(
         self,
