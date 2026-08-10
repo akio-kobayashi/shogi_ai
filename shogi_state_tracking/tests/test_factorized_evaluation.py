@@ -26,7 +26,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
         ]
         return {
             "game_id": "g",
-            "initial_sfen": "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "initial_sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
             "move_tokens": ["7g7f"],
             "move_annotations": [{"eligible": True, "piece": "<B_P>", "source": "<SQ_7g>"}],
             "start_candidates": [{"start_ply": 0, "state_prompt_tokens": state, "position_scope": "unseen_position"}],
@@ -54,6 +54,14 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual(implicit["start_ply"], 0)
         self.assertGreater(len(explicit["input_ids"]), len(implicit["input_ids"]))
         self.assertEqual(int(explicit["move_boundary_mask"].sum()), int(implicit["move_boundary_mask"].sum()))
+
+    def test_standard_initial_sfen_requires_all_nine_pawns(self):
+        from factorized_prompt_data import is_standard_initial_sfen
+
+        self.assertTrue(is_standard_initial_sfen(self.record()["initial_sfen"]))
+        self.assertFalse(is_standard_initial_sfen(
+            "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 1"
+        ))
 
     def test_ablation_builder_keeps_only_standard_initial_candidate(self):
         from build_initial_position_ablation_dataset import build_split

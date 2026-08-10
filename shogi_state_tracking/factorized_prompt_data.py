@@ -15,7 +15,7 @@ from new_prompt_data import NewPromptSequenceDataset, _seeded_rng
 
 
 STANDARD_INITIAL_SFEN_POSITION = (
-    "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b -"
+    "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -"
 )
 
 
