@@ -179,6 +179,42 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual(statistics["queries"], 5)
         self.assertLessEqual(max(map(len, batches)), args.batch_size)
 
+    def test_batched_beam_matches_single_query_beam(self):
+        from evaluate_factorized_moves import beam_batch_cached, beam_single_cached
+        from factorized_prompt import factorized_vocabulary_tokens
+        from models import ModelConfig, build_model
+
+        vocabulary = {
+            token: index for index, token in enumerate(factorized_vocabulary_tokens())
+        }
+        prefixes = [
+            [vocabulary["<BOS>"], vocabulary["<MOVES>"]],
+            [vocabulary["<BOS>"], vocabulary["<MOVES>"]],
+        ]
+        for model_type in ("vanilla", "llama"):
+            torch.manual_seed(7)
+            config = ModelConfig(
+                vocab_size=len(vocabulary), max_seq_len=16, d_model=16,
+                n_layers=1, n_heads=4, d_ff=32, dropout=0.0,
+            )
+            model = build_model(model_type, config).eval()
+            expected = [
+                beam_single_cached(model, prefix, vocabulary, torch.device("cpu"), 5)
+                for prefix in prefixes
+            ]
+            actual = beam_batch_cached(
+                model, prefixes, vocabulary, torch.device("cpu"),
+                beam_size=5, micro_batch_size=2,
+            )
+            self.assertEqual(
+                [[move for move, _ in values] for values in actual],
+                [[move for move, _ in values] for values in expected],
+            )
+            for actual_query, expected_query in zip(actual, expected):
+                self.assertEqual(len(actual_query), len(expected_query))
+                for (_, actual_score), (_, expected_score) in zip(actual_query, expected_query):
+                    self.assertAlmostEqual(actual_score, expected_score, places=5)
+
     def test_best_checkpoint_can_omit_optimizer_state(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from models import ModelConfig, build_model

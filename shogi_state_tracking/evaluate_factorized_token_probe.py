@@ -15,11 +15,20 @@ from evaluate_factorized_moves import padded_forward, parse_distances, resolve_d
 from factorized_prompt import factorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
+from train_model import amp_context, resolve_amp
 
 
 def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_selection, distances, statistics):
-    """評価queryを全件materializeせず，固定batchで逐次返す。"""
+    """評価queryを小さなpool内で長さ順に並べ，paddingを抑えて返す。"""
     batch = []
+    pool_batches = max(1, int(getattr(args, "length_bucket_pool_batches", 0) or 1))
+    pool_size = args.batch_size * pool_batches
+
+    def flush_pool(values):
+        if pool_batches > 1:
+            values.sort(key=lambda query: max(len(query["start_ids"]), len(query["end_ids"])))
+        return [values[index : index + args.batch_size] for index in range(0, len(values), args.batch_size)]
+
     with Path(args.evaluation_jsonl).open(encoding="utf-8") as handle:
         for line in handle:
             if statistics["games"] >= args.max_games or statistics["queries"] >= args.max_queries:
@@ -67,8 +76,8 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                                 "distance": distance,
                             })
                             statistics["queries"] += 1
-                            if len(batch) >= args.batch_size:
-                                yield batch
+                            if len(batch) >= pool_size:
+                                yield from flush_pool(batch)
                                 batch = []
                             if statistics["queries"] >= args.max_queries:
                                 break
@@ -76,7 +85,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                 if statistics["queries"] >= args.max_queries:
                     break
     if batch:
-        yield batch
+        yield from flush_pool(batch)
 
 
 def main():
@@ -90,6 +99,8 @@ def main():
     parser.add_argument("--candidates-per-game", type=int, default=3)
     parser.add_argument("--max-queries", type=int, default=30000)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--length-bucket-pool-batches", type=int, default=16)
+    parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="auto")
     parser.add_argument("--progress-every", type=int, default=2000)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
@@ -103,6 +114,7 @@ def main():
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
     device = resolve_device(args.device)
+    amp_dtype, _, amp_name = resolve_amp(args.amp, device)
     model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)
     model.load_state_dict(payload["model_state_dict"])
     del payload
@@ -119,7 +131,7 @@ def main():
     by_distance = {}
     started = time.perf_counter()
     statistics = {"games": 0, "queries": 0}
-    with torch.inference_mode():
+    with torch.inference_mode(), amp_context(device, amp_dtype):
         for batch in iter_query_batches(
             args, vocabulary, config, state_prompt_mode, start_selection,
             distances, statistics,
@@ -170,6 +182,7 @@ def main():
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
         "settings": vars(args),
+        "amp": amp_name,
         "metrics": summary(totals),
         "by_history_distance": {key: summary(value) for key, value in by_distance.items()},
         "note": "Start inserts a piece token and is in-distribution only for RAP-trained conditions. End supplies the actual source coordinate and is available for every factorized model.",

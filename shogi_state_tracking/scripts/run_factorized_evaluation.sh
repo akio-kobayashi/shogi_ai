@@ -25,6 +25,9 @@ if [[ "${STAGE}" == moves || "${STAGE}" == all ]]; then
     --vocab "${VOCAB}" \
     --output "${OUTPUT_DIR}/move_metrics.json" \
     --batch-size "${EVAL_BATCH_SIZE:-64}" \
+    --length-bucket-pool-batches "${EVAL_LENGTH_BUCKET_POOL_BATCHES:-16}" \
+    --beam-micro-batch-size "${BEAM_MICRO_BATCH_SIZE:-8}" \
+    --amp "${EVAL_AMP:-auto}" \
     --max-queries "${MAX_EVAL_QUERIES:-30000}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/move_evaluation.log"
 fi
@@ -36,6 +39,8 @@ if [[ "${STAGE}" == token || "${STAGE}" == all ]]; then
     --vocab "${VOCAB}" \
     --output "${OUTPUT_DIR}/token_probe_metrics.json" \
     --batch-size "${TOKEN_PROBE_BATCH_SIZE:-128}" \
+    --length-bucket-pool-batches "${EVAL_LENGTH_BUCKET_POOL_BATCHES:-16}" \
+    --amp "${EVAL_AMP:-auto}" \
     --max-queries "${MAX_TOKEN_PROBE_QUERIES:-30000}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/token_probe.log"
 fi
@@ -49,6 +54,8 @@ if [[ "${STAGE}" == probes || "${STAGE}" == all ]]; then
     --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
     --output-dir "${OUTPUT_DIR}/probes" \
     --batch-size "${PROBE_BATCH_SIZE:-128}" \
+    --length-bucket-pool-batches "${PROBE_LENGTH_BUCKET_POOL_BATCHES:-16}" \
+    --amp "${EVAL_AMP:-auto}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/probe_evaluation.log"
 fi
 

@@ -20,6 +20,7 @@ from data import load_vocabulary
 from factorized_prompt import DROP_TOKENS, EOM_TOKEN, PROMOTE_TOKEN, factorize_usi, unfactorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
+from train_model import amp_context, resolve_amp
 
 
 def parse_args():
@@ -34,6 +35,15 @@ def parse_args():
     parser.add_argument("--candidates-per-game", type=int, default=3)
     parser.add_argument("--max-queries", type=int, default=30000)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--length-bucket-pool-batches", type=int, default=16,
+        help="このbatch数分のqueryを長さ順に並べてpaddingを減らす。0で無効",
+    )
+    parser.add_argument(
+        "--beam-micro-batch-size", type=int, default=8,
+        help="同じprefix長のqueryを同時にbeam生成する上限。1で逐次相当",
+    )
+    parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="auto")
     parser.add_argument("--progress-every", type=int, default=1000)
     parser.add_argument("--device", default="auto")
     return parser.parse_args()
@@ -61,8 +71,16 @@ def position_scope(record, candidate, ply):
 
 
 def iter_query_batches(args, vocabulary, max_seq_len, statistics):
-    """JSONLを逐次走査し，評価queryをbatch以上保持しない。"""
+    """JSONLを逐次走査し，小さなpool内で長さを揃えてbatch化する。"""
     batch = []
+    pool_batches = max(1, int(getattr(args, "length_bucket_pool_batches", 0) or 1))
+    pool_size = args.batch_size * pool_batches
+
+    def flush_pool(values):
+        if pool_batches > 1:
+            values.sort(key=lambda query: len(query["prefix_ids"]))
+        return [values[index : index + args.batch_size] for index in range(0, len(values), args.batch_size)]
+
     wanted = set(args.history_distances)
     with Path(args.evaluation_jsonl).open(encoding="utf-8") as handle:
         for line in handle:
@@ -99,8 +117,8 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                                 "trajectory_scope": str(record.get("trajectory_scope", "unknown_position_scope")),
                             })
                             statistics["queries"] += 1
-                            if len(batch) >= args.batch_size:
-                                yield batch
+                            if len(batch) >= pool_size:
+                                yield from flush_pool(batch)
                                 batch = []
                             if statistics["queries"] >= args.max_queries:
                                 break
@@ -110,7 +128,7 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                 if statistics["queries"] >= args.max_queries:
                     break
     if batch:
-        yield batch
+        yield from flush_pool(batch)
 
 
 def padded_forward(model, sequences, pad_id, device):
@@ -120,9 +138,11 @@ def padded_forward(model, sequences, pad_id, device):
     ids_cpu = torch.full((len(sequences), width), pad_id, dtype=torch.long)
     for row, values in enumerate(sequences):
         ids_cpu[row, : len(values)] = torch.as_tensor(values, dtype=torch.long)
-    mask_cpu = torch.arange(width)[None, :] < lengths_cpu[:, None]
     ids = ids_cpu.to(device, non_blocking=device.type == "cuda")
-    mask = mask_cpu.to(device, non_blocking=device.type == "cuda")
+    mask = None
+    if not bool((lengths_cpu == width).all()):
+        mask_cpu = torch.arange(width)[None, :] < lengths_cpu[:, None]
+        mask = mask_cpu.to(device, non_blocking=device.type == "cuda")
     return model(ids, attention_mask=mask, output_hidden_states=False).logits, lengths
 
 
@@ -158,7 +178,7 @@ def beam_single_cached(model, prefix_ids, vocabulary, device, beam_size=5):
             log_probabilities = torch.log_softmax(vector.float(), dim=-1)
             for token in constrained_top(log_probabilities, allowed, beam_size):
                 values = current + [token]
-                new_score = score + float(log_probabilities[token])
+                new_score = score + float(log_probabilities[token].detach())
                 if token == eom_id:
                     candidates.append((values, new_score, True, cache, vector))
                 else:
@@ -182,11 +202,131 @@ def beam_single_cached(model, prefix_ids, vocabulary, device, beam_size=5):
 
 
 def beam_batch(model, prefix_ids, vocabulary, device, beam_size=5):
-    # query間でcacheを保持しないため，ピークは1 query×beam数に制限される。
-    return [
-        beam_single_cached(model, values, vocabulary, device, beam_size)
-        for values in prefix_ids
+    return beam_batch_cached(
+        model, prefix_ids, vocabulary, device, beam_size=beam_size,
+        micro_batch_size=8,
+    )
+
+
+def _slice_cache(cache, index):
+    return tuple((key[index : index + 1], value[index : index + 1]) for key, value in cache)
+
+
+def _stack_caches(caches):
+    return tuple(
+        (
+            torch.cat([cache[layer][0] for cache in caches], dim=0),
+            torch.cat([cache[layer][1] for cache in caches], dim=0),
+        )
+        for layer in range(len(caches[0]))
+    )
+
+
+def beam_equal_length_cached(model, prefix_ids, vocabulary, device, beam_size=5):
+    """同じ長さのprefix群を，query×beam方向にまとめて生成する。"""
+    if not prefix_ids:
+        return []
+    prefix_length = len(prefix_ids[0])
+    if any(len(values) != prefix_length for values in prefix_ids):
+        raise ValueError("beam_equal_length_cached requires equal prefix lengths")
+    square_ids = [vocabulary[token] for token in square_tokens()]
+    drop_ids = [vocabulary[token] for token in DROP_TOKENS]
+    promote_id, eom_id = vocabulary[PROMOTE_TOKEN], vocabulary[EOM_TOKEN]
+    prefix = torch.tensor(prefix_ids, dtype=torch.long, device=device)
+    next_logits, prefix_cache = model.prefill(prefix)
+    beams = [
+        [{"tokens": [], "score": 0.0, "finished": False,
+          "cache": _slice_cache(prefix_cache, row), "vector": next_logits[row, -1]}]
+        for row in range(len(prefix_ids))
     ]
+
+    for _ in range(4):
+        selected_by_query = []
+        active = []
+        for query_index, query_beams in enumerate(beams):
+            candidates = []
+            for beam in query_beams:
+                if beam["finished"]:
+                    candidates.append(beam)
+                    continue
+                current = beam["tokens"]
+                if not current:
+                    allowed = square_ids + drop_ids
+                elif len(current) == 1:
+                    allowed = square_ids
+                elif current[0] in drop_ids:
+                    allowed = [eom_id]
+                elif len(current) == 2:
+                    allowed = [promote_id, eom_id]
+                else:
+                    allowed = [eom_id]
+                log_probabilities = torch.log_softmax(beam["vector"].float(), dim=-1)
+                for token in constrained_top(log_probabilities, allowed, beam_size):
+                    candidates.append({
+                        "tokens": current + [token],
+                        "score": beam["score"] + float(log_probabilities[token].detach()),
+                        "finished": token == eom_id,
+                        "cache": beam["cache"],
+                        "vector": beam["vector"],
+                    })
+            selected = sorted(candidates, key=lambda value: value["score"], reverse=True)[:beam_size]
+            selected_by_query.append(selected)
+            for beam_index, candidate in enumerate(selected):
+                if not candidate["finished"]:
+                    active.append((query_index, beam_index, candidate))
+
+        if active:
+            step_tokens = torch.tensor(
+                [[candidate["tokens"][-1]] for _, _, candidate in active],
+                dtype=torch.long, device=device,
+            )
+            past = _stack_caches([candidate["cache"] for _, _, candidate in active])
+            generated_length = len(active[0][2]["tokens"])
+            logits, next_cache, _, _, _ = model.step(
+                step_tokens, prefix_length + generated_length - 1, past,
+            )
+            for row, (query_index, beam_index, candidate) in enumerate(active):
+                candidate["cache"] = _slice_cache(next_cache, row)
+                candidate["vector"] = logits[row, -1]
+                selected_by_query[query_index][beam_index] = candidate
+        beams = selected_by_query
+        if all(all(value["finished"] for value in query_beams) for query_beams in beams):
+            break
+
+    id_to_token = {index: token for token, index in vocabulary.items()}
+    result = []
+    for query_beams in beams:
+        decoded = []
+        for beam in query_beams:
+            if beam["finished"]:
+                try:
+                    decoded.append((
+                        unfactorize_usi([id_to_token[value] for value in beam["tokens"]]),
+                        beam["score"],
+                    ))
+                except ValueError:
+                    pass
+        result.append(decoded)
+    return result
+
+
+def beam_batch_cached(model, prefix_ids, vocabulary, device, beam_size=5, micro_batch_size=8):
+    """prefix長ごとに分け，出力順を保ったまま実バッチbeamを行う。"""
+    if micro_batch_size <= 0:
+        raise ValueError("beam micro-batch size must be positive")
+    result = [None] * len(prefix_ids)
+    by_length = defaultdict(list)
+    for index, values in enumerate(prefix_ids):
+        by_length[len(values)].append((index, values))
+    for entries in by_length.values():
+        for start in range(0, len(entries), micro_batch_size):
+            chunk = entries[start : start + micro_batch_size]
+            decoded = beam_equal_length_cached(
+                model, [values for _, values in chunk], vocabulary, device, beam_size,
+            )
+            for (index, _), values in zip(chunk, decoded):
+                result[index] = values
+    return result
 
 
 def empty_total():
@@ -237,6 +377,7 @@ def main():
     if config.vocab_size != len(vocabulary):
         raise ValueError("checkpoint and vocabulary sizes differ")
     device = resolve_device(args.device)
+    amp_dtype, _, amp_name = resolve_amp(args.amp, device)
     model_type = str(checkpoint.get("model_type", "vanilla"))
     model = build_model(model_type, config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -252,13 +393,16 @@ def main():
     by_position = defaultdict(empty_total)
     started = time.perf_counter()
     statistics = {"games": 0, "queries": 0}
-    with torch.inference_mode():
+    with torch.inference_mode(), amp_context(device, amp_dtype):
         for batch in iter_query_batches(args, vocabulary, config.max_seq_len, statistics):
             targets = [factorize_usi(query["target"]) for query in batch]
             target_ids = [[vocabulary[token] for token in values] for values in targets]
             sequences = [query["prefix_ids"] + values for query, values in zip(batch, target_ids)]
             logits, _ = padded_forward(model, sequences, vocabulary["<PAD>"], device)
-            beam_moves = beam_batch(model, [query["prefix_ids"] for query in batch], vocabulary, device)
+            beam_moves = beam_batch_cached(
+                model, [query["prefix_ids"] for query in batch], vocabulary, device,
+                micro_batch_size=args.beam_micro_batch_size,
+            )
             for row, (query, tokens, ids, generated) in enumerate(zip(batch, targets, target_ids, beam_moves)):
                 prefix_length = len(query["prefix_ids"])
                 nll = 0.0
@@ -327,6 +471,7 @@ def main():
         "model_type": model_type,
         "move_encoding": "factorized_v2",
         "settings": vars(args),
+        "amp": amp_name,
         "metrics": {
             "games": statistics["games"],
             "primary": summarize(totals["primary"]),

@@ -20,6 +20,7 @@ from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
 from factorized_prompt import factorize_usi
 from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, state_metrics
+from train_model import amp_context, resolve_amp
 
 
 def parse_args():
@@ -40,11 +41,16 @@ def parse_args():
         help="プローブの学習・主評価へ含める開始局面からの指手距離。0はprompt再読出しになるため既定では除外する。",
     )
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument(
+        "--length-bucket-pool-batches", type=int, default=16,
+        help="このbatch数分の系列を長さ順に並べ，特徴抽出時のpaddingを減らす",
+    )
     parser.add_argument("--probe-epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="auto")
     return parser.parse_args()
 
 
@@ -134,14 +140,14 @@ def _mapped_features(directory, split, sources, rows, d_model):
     return result
 
 
-def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len, move_encoding, batch_size, state_prompt_mode, feature_directory, split):
+def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len, move_encoding, batch_size, state_prompt_mode, feature_directory, split, amp_dtype=None, length_bucket_pool_batches=16):
     features = _mapped_features(
         feature_directory, split, sources, len(examples), model.config.d_model,
     )
     target_chunks = []
     metadata = {"position_scope": [], "trajectory_scope": [], "history_distance": [], "start_ply": []}
     model.eval()
-    prepared_batch = []
+    prepared_pool = []
     written = 0
 
     def consume(batch):
@@ -151,7 +157,9 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
         lengths = torch.tensor([len(ids) for _, ids in batch], device=device)
         width = int(lengths.max())
         input_ids = torch.full((len(batch), width), vocabulary["<PAD>"], dtype=torch.long, device=device)
-        attention_mask = torch.arange(width, device=device)[None, :] < lengths[:, None]
+        attention_mask = None
+        if not bool((lengths == width).all()):
+            attention_mask = torch.arange(width, device=device)[None, :] < lengths[:, None]
         for row, (_, ids) in enumerate(batch):
             input_ids[row, : len(ids)] = torch.tensor(ids, device=device)
         output = model(input_ids, attention_mask=attention_mask)
@@ -170,7 +178,15 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
             metadata["start_ply"].append(int(example["start_ply"]))
         written = end
 
-    with torch.inference_mode():
+    def flush_pool():
+        nonlocal prepared_pool
+        prepared_pool.sort(key=lambda value: len(value[1]))
+        for start in range(0, len(prepared_pool), batch_size):
+            consume(prepared_pool[start : start + batch_size])
+        prepared_pool = []
+
+    pool_size = batch_size * max(1, int(length_bucket_pool_batches))
+    with torch.inference_mode(), amp_context(device, amp_dtype):
         for example in examples:
             history = []
             for move in example["history_moves"]:
@@ -179,11 +195,10 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
             tokens = ["<BOS>"] + state + ["<MOVES>"] + history
             if len(tokens) > max_seq_len:
                 continue
-            prepared_batch.append((example, [vocabulary[token] for token in tokens]))
-            if len(prepared_batch) >= batch_size:
-                consume(prepared_batch)
-                prepared_batch = []
-        consume(prepared_batch)
+            prepared_pool.append((example, [vocabulary[token] for token in tokens]))
+            if len(prepared_pool) >= pool_size:
+                flush_pool()
+        flush_pool()
     if not target_chunks: raise ValueError("all probe examples exceeded max_seq_len")
     return {source: values[:written] for source, values in features.items()}, concat_targets(target_chunks), metadata
 
@@ -262,6 +277,7 @@ def main():
     args = parse_args(); args.history_distances = parse_history_distances(args.history_distances)
     random.seed(args.seed); torch.manual_seed(args.seed)
     vocabulary = load_vocabulary(args.vocab); device = resolve_device(args.device)
+    amp_dtype, _, amp_name = resolve_amp(args.amp, device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     config = ModelConfig(**checkpoint["config"])
     model_type = str(checkpoint.get("model_type", "vanilla"))
@@ -298,7 +314,7 @@ def main():
         name: extract(
             model, examples, vocabulary, sources, board_map, hand_names, device,
             config.max_seq_len, move_encoding, args.batch_size, state_prompt_mode,
-            feature_cache.name, name,
+            feature_cache.name, name, amp_dtype, args.length_bucket_pool_batches,
         )
         for name, examples in raw.items()
     }
@@ -312,6 +328,7 @@ def main():
         "settings": vars(args),
         "history_distances": list(args.history_distances),
         "sources": sources,
+        "amp": amp_name,
         "majority_baseline": state_metrics(extracted["evaluation"][1], *majority),
         "probe_results": {},
     }
