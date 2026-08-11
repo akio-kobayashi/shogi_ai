@@ -443,6 +443,11 @@ def main() -> None:
         print(json.dumps({"event": "max_steps_already_reached", "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
         if writer is not None:
             writer.close()
+        if not (output / "best.pt").is_file():
+            raise FileNotFoundError(
+                "max_steps was already reached but best.pt is absent; "
+                "use a fresh output directory or resume a checkpoint that has completed validation"
+            )
         return
     for epoch in range(start_epoch + 1, args.epochs + 1):
         print(json.dumps({"event": "epoch_start", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
@@ -480,6 +485,12 @@ def main() -> None:
                 break
         print(json.dumps({"event": "validation_start", "epoch": epoch, "step": step, "max_validation_batches": args.max_validation_batches}, ensure_ascii=False), flush=True)
         validation = evaluate(model, validation_loader, device, amp_dtype, args.max_validation_batches)
+        if not math.isfinite(validation["loss"]):
+            raise RuntimeError(
+                "validation loss is not finite; refusing to finish without a valid best.pt: {}".format(
+                    validation["loss"]
+                )
+            )
         training_loss = epoch_totals["combined_nll_sum"] / max(1.0, epoch_totals["combined_weight"])
         row = {
             "epoch": epoch, "step": step,
@@ -512,9 +523,6 @@ def main() -> None:
             writer.add_scalar("epoch/validation_perplexity", row["validation_perplexity"], epoch)
             writer.flush()
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
-        print(json.dumps({"event": "checkpoint_save_start", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
-        save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss, include_optimizer=True)
-        print(json.dumps({"event": "checkpoint_save_complete", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         if validation["loss"] < best_loss - 1e-4:
             best_loss, wait = validation["loss"], 0
             print(json.dumps({"event": "checkpoint_save_start", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
@@ -522,12 +530,20 @@ def main() -> None:
             print(json.dumps({"event": "checkpoint_save_complete", "kind": "best", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
         else:
             wait += 1
-            if args.early_stopping_patience and wait >= args.early_stopping_patience:
-                break
+        # best_lossを更新してからlast.ptへ保存し，resume時にも最新の最良値を使う．
+        print(json.dumps({"event": "checkpoint_save_start", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
+        save_checkpoint(output / "last.pt", model, optimizer, args, epoch, step, best_loss, include_optimizer=True)
+        print(json.dumps({"event": "checkpoint_save_complete", "kind": "last", "epoch": epoch, "step": step}, ensure_ascii=False), flush=True)
+        if args.early_stopping_patience and wait >= args.early_stopping_patience:
+            break
         if args.max_steps and step >= args.max_steps:
             print(json.dumps({"event": "max_steps_reached", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
             break
     history_path.write_text(json.dumps({"best_validation_loss": best_loss, "history": history}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not (output / "best.pt").is_file():
+        raise FileNotFoundError(
+            "training ended without best.pt; refusing to report run_complete"
+        )
     print(json.dumps({"event": "run_complete", "step": step, "epochs_recorded": len(history)}, ensure_ascii=False), flush=True)
     if writer is not None:
         writer.close()

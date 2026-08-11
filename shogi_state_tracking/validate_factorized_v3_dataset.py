@@ -74,6 +74,18 @@ def main():
     manifest = json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))
     if manifest.get("schema_version") != FACTORIZED_SCHEMA_VERSION or manifest.get("move_encoding") != MOVE_ENCODING:
         raise ValueError("dataset manifest is obsolete")
+    if manifest.get("stage_1_2_input_mode") != "implicit_standard_initial":
+        raise ValueError(
+            "dataset manifest does not declare stage_1_2_input_mode=implicit_standard_initial; "
+            "rebuild the factorized_v3 dataset"
+        )
+    if manifest.get("probe_annotations") != [
+        "legal_drop_available_by_ply", "promotion_choice_available_by_ply"
+    ]:
+        raise ValueError(
+            "dataset manifest does not declare the current probe annotations; "
+            "rebuild the factorized_v3 dataset"
+        )
     summary = {}
     for split in (value.strip() for value in args.splits.split(",") if value.strip()):
         records = moves = 0

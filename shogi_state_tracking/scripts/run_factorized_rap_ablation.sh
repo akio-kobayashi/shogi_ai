@@ -24,6 +24,9 @@ done
 grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${MANIFEST}" || {
   echo "obsolete dataset: rebuild factorized_v3 first" >&2; exit 2;
 }
+grep -q '"stage_1_2_input_mode"[[:space:]]*:[[:space:]]*"implicit_standard_initial"' "${MANIFEST}" || {
+  echo "obsolete dataset: rebuild factorized_v3 with implicit standard-initial manifest" >&2; exit 2;
+}
 
 IFS=',' read -r -a rates <<< "${RAP_RATES}"
 IFS=',' read -r -a seeds <<< "${SEEDS}"
@@ -39,6 +42,10 @@ for seed in "${seeds[@]}"; do
         EPOCHS="${EPOCHS:-50}" "${SCRIPT_DIR}/scripts/run_factorized_baseline.sh" \
         "${DATASET_DIR}" "${RESULTS_DIR}" --seed "${seed}" "$@"
     fi
+    [[ -f "${output}/best.pt" ]] || {
+      echo "training did not produce ${output}/best.pt; evaluation is aborted. Use a fresh results directory and rerun training." >&2
+      exit 1
+    }
     DEVICE="${DEVICE:-auto}" "${SCRIPT_DIR}/scripts/run_factorized_evaluation.sh" \
       "${output}/best.pt" "${DATASET_DIR}" "${VOCAB}" "${output}/evaluation" "${EVAL_STAGE}"
   done

@@ -41,10 +41,12 @@ VOCAB="${DATASET_DIR}/vocab.json"
 mkdir -p "${OUTPUT_DIR}"
 [[ -f "${VOCAB}" ]] || { echo "missing ${VOCAB}; run build_factorized_prompt_dataset.sh first" >&2; exit 2; }
 MANIFEST_ARGS=()
-if [[ -f "${DATASET_DIR}/dataset_manifest.json" ]] && grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${DATASET_DIR}/dataset_manifest.json"; then
+if [[ -f "${DATASET_DIR}/dataset_manifest.json" ]] \
+  && grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${DATASET_DIR}/dataset_manifest.json" \
+  && grep -q '"stage_1_2_input_mode"[[:space:]]*:[[:space:]]*"implicit_standard_initial"' "${DATASET_DIR}/dataset_manifest.json"; then
   MANIFEST_ARGS=(--dataset-manifest "${DATASET_DIR}/dataset_manifest.json")
 else
-  echo "missing or obsolete factorized_v3 dataset_manifest.json" >&2
+  echo "missing or obsolete factorized_v3 dataset_manifest.json; rebuild with scripts/setup_factorized_v3_data.sh" >&2
   exit 2
 fi
 

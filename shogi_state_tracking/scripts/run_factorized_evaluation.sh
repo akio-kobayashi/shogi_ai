@@ -16,6 +16,10 @@ VOCAB="${3:?factorized vocabulary is required}"
 OUTPUT_DIR="${4:?output directory is required}"
 STAGE="${5:-all}"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
+[[ -f "${CHECKPOINT}" ]] || {
+  echo "checkpoint does not exist: ${CHECKPOINT}; evaluation is aborted" >&2
+  exit 2
+}
 mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${STAGE}" == moves || "${STAGE}" == main || "${STAGE}" == all ]]; then
