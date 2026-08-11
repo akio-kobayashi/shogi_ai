@@ -13,7 +13,15 @@ if [[ -f "${INPUT}" && "${INPUT}" == *.csv ]]; then
   NEW_PROMPT_DIR="${BUILD_ROOT}/new-prompt"
   mkdir -p "${BUILD_ROOT}" "${OUTPUT_DIR}"
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/create_dataset.py" build --metadata-csv "${INPUT}" --output-dir "${SOURCE_DIR}" "$@"
-  "${SCRIPT_DIR}/scripts/build_new_prompt_dataset.sh" "${SOURCE_DIR}" "${NEW_PROMPT_DIR}"
+  # create_dataset.py buildはOUTPUT_DIR/datasets/{train,validation,evaluation}.jsonlへ出力する．
+  SOURCE_JSONL_DIR="${SOURCE_DIR}/datasets"
+  for split in train validation evaluation; do
+    [[ -f "${SOURCE_JSONL_DIR}/${split}.jsonl" ]] || {
+      echo "create_dataset output is missing: ${SOURCE_JSONL_DIR}/${split}.jsonl" >&2
+      exit 2
+    }
+  done
+  "${SCRIPT_DIR}/scripts/build_new_prompt_dataset.sh" "${SOURCE_JSONL_DIR}" "${NEW_PROMPT_DIR}"
   INPUT_DIR="${NEW_PROMPT_DIR}"
 else
   [[ $# -eq 0 ]] || { echo "extra build options require metadata.csv" >&2; exit 2; }
