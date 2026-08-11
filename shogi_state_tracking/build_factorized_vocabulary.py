@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""既存のnew-prompt JSONLに対応するfactorized_v2語彙を生成する。"""
+"""factorized_v3の固定125語彙を生成する．"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from factorized_prompt import write_factorized_vocabulary
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="factorized_v2 vocabularyを生成する")
+    parser = argparse.ArgumentParser(description="factorized_v3 vocabularyを生成する")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     payload = write_factorized_vocabulary(args.output)
@@ -25,4 +25,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

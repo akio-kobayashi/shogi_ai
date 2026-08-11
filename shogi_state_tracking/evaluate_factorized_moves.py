@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""factorized_v2 checkpointの高速な指手評価。
+"""factorized_v3 checkpointの高速な指手評価．
 
 正解接頭辞を使う構成要素評価と，自律的な文法制約greedy生成を分離して報告する。
 全合法手の系列確率を列挙する ``legal probability mass`` は本軽量評価には含めない。
@@ -17,14 +17,14 @@ from pathlib import Path
 import torch
 
 from data import load_vocabulary
-from factorized_prompt import DROP_TOKENS, EOM_TOKEN, PROMOTE_TOKEN, factorize_usi, unfactorize_usi
+from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, factorize_usi, unfactorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="factorized_v2指手評価")
+    parser = argparse.ArgumentParser(description="factorized_v3指手評価")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--evaluation-jsonl", required=True)
     parser.add_argument("--vocab", required=True)
@@ -90,8 +90,7 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                 continue
             record = json.loads(line)
             candidates = list(record.get("start_candidates", []))
-            if args.start_selection == "fixed_initial":
-                candidates = [value for value in candidates if int(value.get("start_ply", -1)) == 0]
+            candidates = [value for value in candidates if int(value.get("start_ply", -1)) == 0]
             candidates = candidates[: args.candidates_per_game]
             if not candidates:
                 continue
@@ -99,7 +98,7 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
             steps = {int(step["ply"]): step for step in record.get("evaluation_steps", [])}
             for candidate in candidates:
                 start = int(candidate["start_ply"])
-                state = [] if args.state_prompt_mode == "implicit_initial" else list(candidate["state_prompt_tokens"])
+                state = list(candidate["state_prompt_tokens"])
                 base = ["<BOS>", *state, "<MOVES>"]
                 history = []
                 for distance in range(max(wanted) + 1):
@@ -107,7 +106,7 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                     if distance in wanted and ply < len(record["move_tokens"]):
                         step = steps.get(ply)
                         prefix = base + history
-                        if step is not None and len(prefix) + 4 <= max_seq_len:
+                        if step is not None and len(prefix) + 3 <= max_seq_len:
                             batch.append({
                                 "prefix_ids": [vocabulary[token] for token in prefix],
                                 "target": str(record["move_tokens"][ply]),
@@ -152,34 +151,56 @@ def constrained_top(logits, allowed, k):
     return [allowed[int(index)] for index in indices]
 
 
+def grammar_allowed(current, vocabulary):
+    squares = [vocabulary[token] for token in square_tokens()]
+    if not current:
+        return squares + [vocabulary[DROP_TOKEN]]
+    if current[0] == vocabulary[DROP_TOKEN]:
+        if len(current) == 1:
+            return [vocabulary[token] for token in BASIC_PIECE_TOKENS]
+        if len(current) == 2:
+            return squares
+    else:
+        if len(current) == 1:
+            return squares + [vocabulary[PROMOTE_TOKEN]]
+        if len(current) == 2 and current[1] == vocabulary[PROMOTE_TOKEN]:
+            return squares
+    return []
+
+
+def grammar_finished(current, vocabulary):
+    if not current:
+        return False
+    square_set = {vocabulary[token] for token in square_tokens()}
+    return current[-1] in square_set and (
+        (len(current) == 2 and current[0] in square_set)
+        or (len(current) == 3 and (current[0] == vocabulary[DROP_TOKEN] or current[1] == vocabulary[PROMOTE_TOKEN]))
+    )
+
+
+def restricted_candidates(vector, allowed, k):
+    """文法上許されたtoken内で正規化した候補とlog確率を返す．"""
+    selected = vector[allowed].float()
+    log_probabilities = torch.log_softmax(selected, dim=-1)
+    local = torch.topk(log_probabilities, min(k, len(allowed))).indices
+    return [(allowed[int(index)], float(log_probabilities[int(index)].detach())) for index in local]
+
+
 def beam_single_cached(model, prefix_ids, vocabulary, device, beam_size=5):
-    square_ids = [vocabulary[token] for token in square_tokens()]
-    drop_ids = [vocabulary[token] for token in DROP_TOKENS]
-    promote_id, eom_id = vocabulary[PROMOTE_TOKEN], vocabulary[EOM_TOKEN]
     prefix = torch.tensor([prefix_ids], dtype=torch.long, device=device)
     next_logits, prefix_cache = model.prefill(prefix)
     beams = [([], 0.0, False, prefix_cache, next_logits[0, -1])]
-    for _ in range(4):
+    for _ in range(3):
         candidates = []
         for current, score, finished, cache, vector in beams:
             if finished:
                 candidates.append((current, score, True, cache, vector))
                 continue
-            if not current:
-                allowed = square_ids + drop_ids
-            elif len(current) == 1:
-                allowed = square_ids
-            elif current[0] in drop_ids:
-                allowed = [eom_id]
-            elif len(current) == 2:
-                allowed = [promote_id, eom_id]
-            else:
-                allowed = [eom_id]
-            log_probabilities = torch.log_softmax(vector.float(), dim=-1)
-            for token in constrained_top(log_probabilities, allowed, beam_size):
+            allowed = grammar_allowed(current, vocabulary)
+            for token, token_score in restricted_candidates(vector, allowed, beam_size):
                 values = current + [token]
-                new_score = score + float(log_probabilities[token].detach())
-                if token == eom_id:
+                new_score = score + token_score
+                if grammar_finished(values, vocabulary):
                     candidates.append((values, new_score, True, cache, vector))
                 else:
                     token_tensor = torch.tensor([[token]], dtype=torch.long, device=device)
@@ -229,9 +250,6 @@ def beam_equal_length_cached(model, prefix_ids, vocabulary, device, beam_size=5)
     prefix_length = len(prefix_ids[0])
     if any(len(values) != prefix_length for values in prefix_ids):
         raise ValueError("beam_equal_length_cached requires equal prefix lengths")
-    square_ids = [vocabulary[token] for token in square_tokens()]
-    drop_ids = [vocabulary[token] for token in DROP_TOKENS]
-    promote_id, eom_id = vocabulary[PROMOTE_TOKEN], vocabulary[EOM_TOKEN]
     prefix = torch.tensor(prefix_ids, dtype=torch.long, device=device)
     next_logits, prefix_cache = model.prefill(prefix)
     beams = [
@@ -240,7 +258,7 @@ def beam_equal_length_cached(model, prefix_ids, vocabulary, device, beam_size=5)
         for row in range(len(prefix_ids))
     ]
 
-    for _ in range(4):
+    for _ in range(3):
         selected_by_query = []
         active = []
         for query_index, query_beams in enumerate(beams):
@@ -250,22 +268,13 @@ def beam_equal_length_cached(model, prefix_ids, vocabulary, device, beam_size=5)
                     candidates.append(beam)
                     continue
                 current = beam["tokens"]
-                if not current:
-                    allowed = square_ids + drop_ids
-                elif len(current) == 1:
-                    allowed = square_ids
-                elif current[0] in drop_ids:
-                    allowed = [eom_id]
-                elif len(current) == 2:
-                    allowed = [promote_id, eom_id]
-                else:
-                    allowed = [eom_id]
-                log_probabilities = torch.log_softmax(beam["vector"].float(), dim=-1)
-                for token in constrained_top(log_probabilities, allowed, beam_size):
+                allowed = grammar_allowed(current, vocabulary)
+                for token, token_score in restricted_candidates(beam["vector"], allowed, beam_size):
+                    values = current + [token]
                     candidates.append({
-                        "tokens": current + [token],
-                        "score": beam["score"] + float(log_probabilities[token].detach()),
-                        "finished": token == eom_id,
+                        "tokens": values,
+                        "score": beam["score"] + token_score,
+                        "finished": grammar_finished(values, vocabulary),
                         "cache": beam["cache"],
                         "vector": beam["vector"],
                     })
@@ -347,18 +356,15 @@ def summarize(total):
     for key, value in total.items():
         if key != "queries":
             result[key] = value / n
-    if total.get("promotion_or_end_applicable", 0):
-        result["promotion_or_end_top1"] = (
-            total["promotion_or_end_correct"] / total["promotion_or_end_applicable"]
+    if total.get("promotion_decision_applicable", 0):
+        result["promotion_decision_top1"] = (
+            total["promotion_decision_correct"] / total["promotion_decision_applicable"]
         )
-        result["promotion_or_end_examples"] = int(total["promotion_or_end_applicable"])
-    if total.get("eom_targets", 0):
-        result["eom_unconstrained_top1"] = total["eom_correct"] / total["eom_targets"]
-        result["eom_targets"] = int(total["eom_targets"])
-    result.pop("promotion_or_end_correct", None)
-    result.pop("promotion_or_end_applicable", None)
-    result.pop("eom_correct", None)
+        result["promotion_decision_examples"] = int(total["promotion_decision_applicable"])
+    result.pop("promotion_decision_correct", None)
+    result.pop("promotion_decision_applicable", None)
     result["move_perplexity"] = math.exp(min(result["move_nll"], 20.0))
+    result["grammar_normalized_move_perplexity"] = math.exp(min(result["grammar_normalized_move_nll"], 20.0))
     return result
 
 
@@ -368,12 +374,14 @@ def main():
     args.primary_history_distances = parse_distances(args.primary_history_distances)
     vocabulary = load_vocabulary(args.vocab)
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    if checkpoint.get("new_prompt", {}).get("move_encoding") != "factorized_v2":
-        raise ValueError("checkpoint is not marked as factorized_v2")
+    if checkpoint.get("new_prompt", {}).get("move_encoding") != MOVE_ENCODING:
+        raise ValueError("checkpoint is not marked as {}".format(MOVE_ENCODING))
     config = ModelConfig(**checkpoint["config"])
     checkpoint_settings = checkpoint.get("new_prompt", {})
     args.state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     args.start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
+    if args.state_prompt_mode != "explicit" or args.start_selection != "fixed_initial":
+        raise ValueError("factorized_v3 evaluation requires explicit fixed-initial input")
     if config.vocab_size != len(vocabulary):
         raise ValueError("checkpoint and vocabulary sizes differ")
     device = resolve_device(args.device)
@@ -386,8 +394,6 @@ def main():
     model.eval()
 
     square_ids = [vocabulary[token] for token in square_tokens()]
-    source_ids = square_ids + [vocabulary[token] for token in DROP_TOKENS]
-    promote_ids = [vocabulary[PROMOTE_TOKEN], vocabulary[EOM_TOKEN]]
     totals = {"all": empty_total(), "primary": empty_total()}
     by_distance = defaultdict(empty_total)
     by_position = defaultdict(empty_total)
@@ -405,31 +411,29 @@ def main():
             )
             for row, (query, tokens, ids, generated) in enumerate(zip(batch, targets, target_ids, beam_moves)):
                 prefix_length = len(query["prefix_ids"])
-                nll = 0.0
+                nll = grammar_nll = 0.0
                 component_top1 = component_top5 = True
                 source_top1 = source_top5 = destination_top1 = destination_top5 = 0
                 promotion_correct = promotion_applicable = 0
-                eom_correct = eom_targets = 0
+                current_ids = []
                 for offset, target_id in enumerate(ids):
                     vector = logits[row, prefix_length + offset - 1].float()
                     nll -= float(torch.log_softmax(vector, dim=-1)[target_id])
-                    if tokens[offset] == EOM_TOKEN:
-                        eom_targets += 1
-                        eom_correct += int(int(vector.argmax()) == target_id)
+                    allowed = grammar_allowed(current_ids, vocabulary)
+                    allowed_logits = vector[allowed]
+                    grammar_nll -= float(torch.log_softmax(allowed_logits, dim=-1)[allowed.index(target_id)])
+                    top = constrained_top(vector, allowed, 5)
                     if offset == 0:
-                        top = constrained_top(vector, source_ids, 5)
                         source_top1, source_top5 = int(top[0] == target_id), int(target_id in top)
-                    elif offset == 1:
-                        top = constrained_top(vector, square_ids, 5)
+                    if tokens[offset].startswith("<SQ_") and offset > 0:
                         destination_top1, destination_top5 = int(top[0] == target_id), int(target_id in top)
-                    elif tokens[offset] in (PROMOTE_TOKEN, EOM_TOKEN) and tokens[0] not in DROP_TOKENS:
-                        top = constrained_top(vector, promote_ids, 2)
+                    if offset == 1 and tokens[0].startswith("<SQ_"):
                         promotion_applicable = 1
-                        promotion_correct = int(top[0] == target_id)
-                    else:
-                        top = constrained_top(vector, [vocabulary[EOM_TOKEN]], 1)
+                        predicted_promote = top[0] == vocabulary[PROMOTE_TOKEN]
+                        promotion_correct = int(predicted_promote == (tokens[offset] == PROMOTE_TOKEN))
                     component_top1 = component_top1 and top[0] == target_id
                     component_top5 = component_top5 and target_id in top
+                    current_ids.append(target_id)
                 predicted = generated[0][0] if generated else None
                 generated_moves = [move for move, _ in generated]
                 legal_beam_mass = sum(
@@ -437,13 +441,12 @@ def main():
                 )
                 values = {
                     "move_nll": nll,
+                    "grammar_normalized_move_nll": grammar_nll,
                     "source_top1": source_top1, "source_top5": source_top5,
                     "destination_given_source_top1": destination_top1,
                     "destination_given_source_top5": destination_top5,
-                    "promotion_or_end_correct": promotion_correct,
-                    "promotion_or_end_applicable": promotion_applicable,
-                    "eom_correct": eom_correct,
-                    "eom_targets": eom_targets,
+                    "promotion_decision_correct": promotion_correct,
+                    "promotion_decision_applicable": promotion_applicable,
                     "teacher_forced_full_top1": int(component_top1),
                     "teacher_forced_full_top5": int(component_top5),
                     "greedy_full_move_top1": int(predicted == query["target"]),
@@ -466,10 +469,10 @@ def main():
         raise ValueError("no evaluation queries")
 
     output = {
-        "format_version": 2,
+        "format_version": 3,
         "checkpoint": args.checkpoint,
         "model_type": model_type,
-        "move_encoding": "factorized_v2",
+        "move_encoding": MOVE_ENCODING,
         "settings": vars(args),
         "amp": amp_name,
         "metrics": {
@@ -481,7 +484,7 @@ def main():
         },
         "notes": {
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
-            "greedy_and_beam": "autonomous decoding is constrained only by the factorized USI grammar, not by shogi legality",
+            "greedy_and_beam": "autonomous decoding is normalized within the factorized move grammar, not shogi legality",
             "legal_probability_mass": "beam_legal_probability_lower_bound sums only legal moves retained by beam search; exact mass requires scoring every legal move sequence",
         },
     }

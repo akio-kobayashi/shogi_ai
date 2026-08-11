@@ -15,13 +15,22 @@ except ImportError:
 
 
 class NewPromptSchemaTest(unittest.TestCase):
+    def test_factorized_v3_vocabulary_is_fixed_to_125_tokens(self):
+        from factorized_prompt import factorized_vocabulary_tokens
+
+        tokens = factorized_vocabulary_tokens()
+        self.assertEqual(len(tokens), 125)
+        self.assertEqual(len(set(tokens)), 125)
+        self.assertNotIn("<EOM>", tokens)
+
     def test_factorized_move_round_trip(self):
         from factorized_prompt import factorize_usi, unfactorize_usi
 
         for move in ("7g7f", "2b3c+", "P*5e"):
             tokens = factorize_usi(move)
-            self.assertEqual(tokens[-1], "<EOM>")
+            self.assertTrue(tokens[-1].startswith("<SQ_"))
             self.assertEqual(unfactorize_usi(tokens), move)
+        self.assertEqual(factorize_usi("2b3c+"), ["<SQ_2b>", "<PROMOTE>", "<SQ_3c>"])
 
     def test_prompt_and_move_annotation_validation(self):
         from new_prompt import validate_move_annotations, validate_state_prompt_tokens
@@ -57,29 +66,29 @@ class NewPromptDatasetTest(unittest.TestCase):
         from factorized_prompt_data import FactorizedPromptSequenceDataset
         from new_prompt_data import collate_new_prompt_sequences
 
-        state = [
-            "<STATE>", "<BOARD>", "<W_K>", "<SQ_5a>", "<B_K>", "<SQ_5i>",
-            "<B_P>", "<SQ_7g>", "</BOARD>", "<HANDS>", "</HANDS>", "<TURN_BLACK>",
-        ]
+        state = ["<TURN_BLACK>", "<BOARD_BLACK>", "<K>", "<SQ_5i>", "<P>", "<SQ_7g>",
+                 "<BOARD_WHITE>", "<K>", "<SQ_5a>", "<HAND_BLACK>", "<HAND_WHITE>"]
         record = {
-            "game_id": "factorized", "state_prompt_tokens": state, "start_ply": 0,
+            "game_id": "factorized", "initial_sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "state_prompt_tokens": state, "start_ply": 0,
             "move_tokens": ["7g7f", "P*5e"],
             "move_annotations": [
-                {"eligible": True, "piece": "<B_P>", "source": "<SQ_7g>"},
+                {"eligible": True, "piece": "<P>", "source": "<SQ_7g>"},
                 {"eligible": False},
             ],
+            "start_candidates": [{"start_ply": 0, "state_prompt_tokens": state}],
         }
         vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "records.jsonl"
             path.write_text(json.dumps(record) + "\n", encoding="utf-8")
             dataset = FactorizedPromptSequenceDataset(
-                str(path), vocab, annotation_mode="partial_action", annotation_probability=1.0,
+                str(path), vocab, annotation_mode="rap", annotation_probability=1.0,
                 randomize_each_epoch=False,
             )
             batch = collate_new_prompt_sequences([dataset[0]], vocab["<PAD>"], max_seq_len=64)
-        self.assertEqual(int(batch["move_target_mask"].sum()), 6)
-        self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 6.0)
+        self.assertEqual(int(batch["move_target_mask"].sum()), 5)
+        self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 5.0)
         self.assertEqual(int(batch["move_boundary_mask"].sum()), 2)
         self.assertEqual(int(batch["hint_target_mask"].sum()), 1)
 

@@ -23,8 +23,9 @@ from torch.utils.data import DataLoader, Sampler
 
 from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
-from new_prompt_data import ANNOTATION_MODES, NewPromptSequenceDataset, collate_new_prompt_sequences
+from new_prompt_data import collate_new_prompt_sequences
 from factorized_prompt_data import FactorizedPromptSequenceDataset
+from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING
 from train_model import amp_context, resolve_amp, resolve_device
 
 try:
@@ -112,28 +113,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-type", choices=("vanilla", "llama"), default="vanilla")
     parser.add_argument(
         "--move-encoding",
-        choices=("atomic_v1", "factorized_v2"),
-        default="atomic_v1",
-        help="factorized_v2は指手をsource/drop, destination, [PROMOTE], EOMへ分解する",
+        choices=(MOVE_ENCODING,),
+        default=MOVE_ENCODING,
+        help="factorized_v3は125語彙を用い，指手を移動先座標で終える",
     )
     parser.add_argument(
-        "--state-prompt-mode", choices=("explicit", "implicit_initial"), default="explicit",
-        help="implicit_initialは平手初期局面を暗黙に仮定し，状態promptを入力しない",
+        "--state-prompt-mode", choices=("explicit",), default="explicit",
+        help="factorized_v3では開始局面を必ず明示する",
     )
     parser.add_argument(
-        "--start-selection", choices=("random_candidates", "fixed_initial"), default="random_candidates",
-        help="2x2 ablationではfixed_initialを使い，開始ply=0へ固定する",
+        "--start-selection", choices=("fixed_initial",), default="fixed_initial",
+        help="factorized_v3では平手初期局面へ固定する",
     )
     parser.add_argument("--resume", action="store_true", help="output-dir/last.ptからモデルとoptimizerを再開する")
     parser.add_argument("--model-size", choices=tuple(MODEL_SIZES), required=True)
-    parser.add_argument("--annotation-mode", choices=ANNOTATION_MODES, default="vanilla")
+    parser.add_argument("--annotation-mode", choices=("vanilla", "rap"), default="vanilla")
     parser.add_argument("--annotation-probability", type=float, default=0.0)
     parser.add_argument("--hint-loss-weight", type=float, default=1.0)
     # 最大開始prompt約90 token，512指手，320個の2-token注釈を含めても
     # 90 + 512 + 2*320 = 1242 tokenであり，1280 token文脈に収まる。
-    parser.add_argument("--max-hints", type=int, default=320)
+    parser.add_argument("--max-hints", type=int, default=512)
     parser.add_argument("--max-moves", type=int, default=512)
-    parser.add_argument("--max-seq-len", type=int, default=1280)
+    parser.add_argument("--max-seq-len", type=int, default=2560)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--early-stopping-patience", type=int, default=5)
@@ -215,6 +216,7 @@ def loss_for_batch(model, batch, device):
         combined_nll_sum = loss.detach() * move_count.detach()
         combined_weight = move_count.detach()
     else:
+        move_count = move_mask.sum()
         loss = (per_token * effective_weights).sum() / weight_sum
         combined_nll_sum = (per_token * effective_weights).sum().detach()
         combined_weight = weight_sum.detach()
@@ -233,12 +235,13 @@ def loss_for_batch(model, batch, device):
         "combined_weight": combined_weight,
         "move": totals(move_mask),
         "hint": totals(hint_mask),
+        "move_count": move_count.detach(),
     }
 
 
 def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
     model.eval()
-    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "batches": 0}
+    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "batches": 0}
     with torch.inference_mode():
         for batch_index, batch in enumerate(loader, 1):
             with amp_context(device, amp_dtype):
@@ -247,6 +250,7 @@ def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
             totals["combined_weight"] += float(metrics["combined_weight"])
             totals["move_nll_sum"] += float(metrics["move"]["nll_sum"])
             totals["move_targets"] += int(metrics["move"]["targets"])
+            totals["move_count"] += int(metrics["move_count"])
             totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             totals["hint_targets"] += int(metrics["hint"]["targets"])
             totals["batches"] += 1
@@ -257,6 +261,7 @@ def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
         "move_cross_entropy": totals["move_nll_sum"] / max(1, totals["move_targets"]),
         "hint_cross_entropy": None if not totals["hint_targets"] else totals["hint_nll_sum"] / totals["hint_targets"],
         "move_targets": totals["move_targets"],
+        "move_count": totals["move_count"],
         "hint_targets": totals["hint_targets"],
         "batches": totals["batches"],
     }
@@ -269,6 +274,8 @@ def write_step_scalars(writer: Optional["SummaryWriter"], step: int, loss, metri
     writer.add_scalar("train/combined_cross_entropy", float(loss.detach()), step)
     writer.add_scalar("train/move_targets_per_batch", int(metrics["move"]["targets"]), step)
     writer.add_scalar("train/hint_targets_per_batch", int(metrics["hint"]["targets"]), step)
+    writer.add_scalar("train/moves_per_batch", int(metrics["move_count"]), step)
+    writer.add_scalar("train/hints_per_move", int(metrics["hint"]["targets"]) / max(1, int(metrics["move_count"])), step)
     writer.add_scalar("train/sequence_length", int(batch["input_ids"].shape[1]), step)
     if device.type == "cuda":
         writer.add_scalar("system/memory_allocated_mib", torch.cuda.memory_allocated(device) / 2**20, step)
@@ -318,6 +325,15 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     vocabulary = load_vocabulary(args.vocab)
+    if args.move_encoding == MOVE_ENCODING:
+        vocab_payload = json.loads(Path(args.vocab).read_text(encoding="utf-8"))
+        if vocab_payload.get("move_encoding") != MOVE_ENCODING or len(vocabulary) != 125:
+            raise ValueError("factorized_v3 requires its canonical 125-token vocab.json")
+        if not args.dataset_manifest:
+            raise ValueError("factorized_v3 requires --dataset-manifest")
+        dataset_payload = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
+        if dataset_payload.get("move_encoding") != MOVE_ENCODING or int(dataset_payload.get("schema_version", -1)) != FACTORIZED_SCHEMA_VERSION:
+            raise ValueError("dataset manifest is not factorized_v3")
     runtime_marker("vocabulary_loaded", vocab_size=len(vocabulary))
     device = resolve_device(args.device)
     amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)
@@ -330,22 +346,11 @@ def main() -> None:
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
                   max_moves=args.max_moves, max_seq_len=args.max_seq_len,
                   return_metadata=False, validate_records=False)
-    dataset_class = (
-        FactorizedPromptSequenceDataset
-        if args.move_encoding == "factorized_v2"
-        else NewPromptSequenceDataset
+    dataset_class = FactorizedPromptSequenceDataset
+    common.update(
+        state_prompt_mode=args.state_prompt_mode,
+        start_selection=args.start_selection,
     )
-    if args.move_encoding != "factorized_v2" and (
-        args.state_prompt_mode != "explicit" or args.start_selection != "random_candidates"
-    ):
-        raise ValueError("state prompt/start ablation is implemented only for factorized_v2")
-    if args.state_prompt_mode == "implicit_initial" and args.start_selection != "fixed_initial":
-        raise ValueError("implicit_initial requires --start-selection fixed_initial")
-    if args.move_encoding == "factorized_v2":
-        common.update(
-            state_prompt_mode=args.state_prompt_mode,
-            start_selection=args.start_selection,
-        )
     train_dataset = dataset_class(args.train_jsonl, vocabulary, seed=args.seed, randomize_each_epoch=True, **common)
     runtime_marker("train_dataset_ready", **train_dataset.storage_statistics())
     # early stoppingも運用時と同じ，注釈を除いた入力で測る。主比較の制約付き
@@ -441,7 +446,7 @@ def main() -> None:
         if bucket_sampler is not None:
             bucket_sampler.set_epoch(epoch)
         model.train()
-        epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
+        epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
         for batch_index, batch in enumerate(train_loader, 1):
             optimizer.zero_grad(set_to_none=True)
             with amp_context(device, amp_dtype):
@@ -461,6 +466,7 @@ def main() -> None:
             epoch_totals["combined_weight"] += float(metrics["combined_weight"])
             epoch_totals["move_nll_sum"] += float(metrics["move"]["nll_sum"])
             epoch_totals["move_targets"] += int(metrics["move"]["targets"])
+            epoch_totals["move_count"] += int(metrics["move_count"])
             epoch_totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             epoch_totals["hint_targets"] += int(metrics["hint"]["targets"])
             if args.progress_every and (step == 1 or step % args.progress_every == 0):
@@ -478,14 +484,17 @@ def main() -> None:
             "training_hint_cross_entropy": None if not epoch_totals["hint_targets"] else epoch_totals["hint_nll_sum"] / epoch_totals["hint_targets"],
             "training_move_targets": epoch_totals["move_targets"],
             "training_hint_targets": epoch_totals["hint_targets"],
-            "training_hint_per_move": epoch_totals["hint_targets"] / max(1, epoch_totals["move_targets"]),
+            "training_hint_per_move": epoch_totals["hint_targets"] / max(1, epoch_totals["move_count"]),
             "validation_loss": validation["loss"],
             "validation_move_cross_entropy": validation["move_cross_entropy"],
             "validation_hint_cross_entropy": validation["hint_cross_entropy"],
             "validation_move_targets": validation["move_targets"],
+            "validation_move_count": validation["move_count"],
             "validation_hint_targets": validation["hint_targets"],
             "validation_batches": validation["batches"],
             "validation_perplexity": math.exp(min(validation["loss"], 20.0)),
+            "validation_move_perplexity": math.exp(min(validation["loss"], 20.0)),
+            "validation_subtoken_perplexity": math.exp(min(validation["move_cross_entropy"], 20.0)),
             "elapsed_sec": round(time.perf_counter()-started, 1),
         }
         if writer is not None:

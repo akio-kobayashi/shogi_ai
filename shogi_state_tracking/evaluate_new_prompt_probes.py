@@ -18,7 +18,7 @@ from create_dataset import HAND_ORDER, PIECE_NAMES
 from data import load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
-from factorized_prompt import factorize_usi
+from factorized_prompt import MOVE_ENCODING, factorize_usi
 from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, state_metrics
 from train_model import amp_context, resolve_amp
 
@@ -190,8 +190,8 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
         for example in examples:
             history = []
             for move in example["history_moves"]:
-                history.extend(factorize_usi(move) if move_encoding == "factorized_v2" else [move_token(move)])
-            state = [] if state_prompt_mode == "implicit_initial" else list(example["state_prompt_tokens"])
+                history.extend(factorize_usi(move) if move_encoding == MOVE_ENCODING else [move_token(move)])
+            state = list(example["state_prompt_tokens"])
             tokens = ["<BOS>"] + state + ["<MOVES>"] + history
             if len(tokens) > max_seq_len:
                 continue
@@ -284,6 +284,8 @@ def main():
     move_encoding = str(checkpoint.get("new_prompt", {}).get("move_encoding", "atomic_v1"))
     state_prompt_mode = str(checkpoint.get("new_prompt", {}).get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint.get("new_prompt", {}).get("start_selection", "random_candidates"))
+    if move_encoding != MOVE_ENCODING or state_prompt_mode != "explicit" or start_selection != "fixed_initial":
+        raise ValueError("linear probe requires the current factorized_v3 fixed-initial checkpoint")
     model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
     del checkpoint
     board_map, hand_names = label_maps(); sources = expand_sources(args.sources, config.n_layers)

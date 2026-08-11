@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""factorized_v2のRAP駒種tokenから開始升を読む高速token probe。"""
+"""factorized_v3のRAP駒種tokenと指手接頭辞を用いるtoken probe．"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch
 
 from data import load_vocabulary
 from evaluate_factorized_moves import padded_forward, parse_distances, resolve_device
-from factorized_prompt import factorize_usi
+from factorized_prompt import MOVE_ENCODING, annotation_piece_token, factorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
@@ -37,8 +37,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                 continue
             record = json.loads(line)
             selected = list(record.get("start_candidates", []))
-            if start_selection == "fixed_initial":
-                selected = [value for value in selected if int(value.get("start_ply", -1)) == 0]
+            selected = [value for value in selected if int(value.get("start_ply", -1)) == 0]
             selected = selected[: args.candidates_per_game]
             if not selected:
                 continue
@@ -47,7 +46,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
             for candidate in selected:
                 start = int(candidate["start_ply"])
                 history = []
-                state = [] if state_prompt_mode == "implicit_initial" else list(candidate["state_prompt_tokens"])
+                state = list(candidate["state_prompt_tokens"])
                 base = ["<BOS>", *state, "<MOVES>"]
                 for distance in range(max(distances) + 1):
                     ply = start + distance
@@ -56,19 +55,20 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                     annotation = record["move_annotations"][ply]
                     step = steps.get(ply)
                     if distance in distances and annotation.get("eligible", False) and step is not None:
-                        piece = str(annotation["piece"])
+                        piece = annotation_piece_token(str(annotation["piece"]))
                         tokens = base + history + [piece]
                         if len(tokens) <= config.max_seq_len:
                             target_parts = factorize_usi(str(record["move_tokens"][ply]))
-                            source_token, destination_token = target_parts[:2]
+                            source_token, destination_token = target_parts[0], target_parts[-1]
+                            destination_prefix = target_parts[:-1]
                             legal_destinations = sorted({
-                                factorize_usi(move)[1]
+                                factorize_usi(move)[-1]
                                 for move in step["legal_moves"]
-                                if "*" not in move and factorize_usi(move)[0] == source_token
+                                if "*" not in move and factorize_usi(move)[:-1] == destination_prefix
                             })
                             batch.append({
                                 "start_ids": [vocabulary[token] for token in tokens],
-                                "end_ids": [vocabulary[token] for token in base + history + [source_token]],
+                                "end_ids": [vocabulary[token] for token in base + history + destination_prefix],
                                 "actual": vocabulary[str(annotation["source"])],
                                 "legal": [vocabulary[token] for token in step["legal_sources_by_piece"].get(piece, [])],
                                 "actual_destination": vocabulary[destination_token],
@@ -89,7 +89,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
 
 
 def main():
-    parser = argparse.ArgumentParser(description="factorized_v2 RAP token probe")
+    parser = argparse.ArgumentParser(description="factorized_v3 RAP token probe")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--evaluation-jsonl", required=True)
     parser.add_argument("--vocab", required=True)
@@ -107,12 +107,14 @@ def main():
     distances = parse_distances(args.history_distances)
     vocabulary = load_vocabulary(args.vocab)
     payload = torch.load(args.checkpoint, map_location="cpu")
-    if payload.get("new_prompt", {}).get("move_encoding") != "factorized_v2":
-        raise ValueError("checkpoint is not factorized_v2")
+    if payload.get("new_prompt", {}).get("move_encoding") != MOVE_ENCODING:
+        raise ValueError("checkpoint is not {}".format(MOVE_ENCODING))
     config = ModelConfig(**payload["config"])
     checkpoint_settings = payload.get("new_prompt", {})
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
+    if state_prompt_mode != "explicit" or start_selection != "fixed_initial":
+        raise ValueError("factorized_v3 token probe requires explicit fixed-initial input")
     device = resolve_device(args.device)
     amp_dtype, _, amp_name = resolve_amp(args.amp, device)
     model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)
@@ -125,8 +127,10 @@ def main():
         "queries": 0,
         "start_actual_top1": 0, "start_actual_top5": 0,
         "start_other_top1": 0, "start_other_top5": 0, "start_other_probability_mass": 0.0,
+        "start_legal_r_precision": 0.0,
         "end_actual_top1": 0, "end_actual_top5": 0,
         "end_other_top1": 0, "end_other_top5": 0, "end_other_probability_mass": 0.0,
+        "end_legal_r_precision": 0.0,
     }
     by_distance = {}
     started = time.perf_counter()
@@ -159,11 +163,15 @@ def main():
                     group["start_other_top1"] += int(predicted[0] in legal)
                     group["start_other_top5"] += int(any(value in legal for value in predicted))
                     group["start_other_probability_mass"] += float(probabilities[row, [square_index[value] for value in legal]].sum())
+                    start_r = [square_ids[int(index)] for index in torch.topk(values[row], len(legal)).indices]
+                    group["start_legal_r_precision"] += len(set(start_r) & set(legal)) / len(legal)
                     group["end_actual_top1"] += int(predicted_destinations[0] == query["actual_destination"])
                     group["end_actual_top5"] += int(query["actual_destination"] in predicted_destinations)
                     group["end_other_top1"] += int(predicted_destinations[0] in legal_destinations)
                     group["end_other_top5"] += int(any(value in legal_destinations for value in predicted_destinations))
                     group["end_other_probability_mass"] += float(end_probabilities[row, [square_index[value] for value in legal_destinations]].sum())
+                    end_r = [square_ids[int(index)] for index in torch.topk(end_values[row], len(legal_destinations)).indices]
+                    group["end_legal_r_precision"] += len(set(end_r) & set(legal_destinations)) / len(legal_destinations)
             done = statistics["queries"]
             completed = totals["queries"]
             if args.progress_every and completed // args.progress_every != max(0, completed - len(batch)) // args.progress_every:
@@ -177,8 +185,9 @@ def main():
         return {"queries": n, **{key: number / n for key, number in value.items() if key != "queries"}}
 
     output = {
-        "format_version": 2,
+        "format_version": 3,
         "checkpoint": args.checkpoint,
+        "move_encoding": MOVE_ENCODING,
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
         "settings": vars(args),

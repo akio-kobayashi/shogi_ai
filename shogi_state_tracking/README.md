@@ -1,5 +1,24 @@
 # 将棋状態追跡Transformer用データセット
 
+## 現行実験（factorized_v3）
+
+現行実験は125語彙，明示的な平手初期局面，移動先座標終端の指手文法を用いる．`<EOM>`，開始局面なし，random control，旧A–D ablationは廃止した．旧datasetとcheckpointは再利用しない．詳細は[`NEW_EXPERIMENT_DESIGN.md`](NEW_EXPERIMENT_DESIGN.md)を参照する．
+
+```bash
+# データのある計算機で構築・全件検査
+scripts/setup_factorized_v3_data.sh metadata.csv factorized_v3_data [build options]
+
+# 主実験：RAPなし／あり（Linuxではメモリ上限を必須とする）
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  scripts/run_factorized_main_experiment.sh factorized_v3_data factorized_v3_results
+```
+
+`RAP_PROBABILITY`の既定値は0.15である．挿入率比較は主実験とは分離し，必要な場合だけ`run_factorized_rap_ablation.sh`で実行する．
+
+実験順は，①RAPなし／あり，②RAPレートablation，③開始局面変更である．③は別dataset・別manifestとして実装し，平手固定の主実験へ混在させない．
+
+以下には旧実験の再現・保守情報も残るが，新規実験の入口にはしない．
+
 学生向けのColab実験は
 [`notebooks/shogi_state_tracking_colab.ipynb`](notebooks/shogi_state_tracking_colab.ipynb)から開始できる．
 任意CSA対局における飛・角・竜・馬・玉の推定確率を追う場合は，

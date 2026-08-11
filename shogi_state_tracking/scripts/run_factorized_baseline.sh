@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# factorized_v2 baselineをLLaMA型またはVanilla decoderで学習する。
+# factorized_v3 baselineをLLaMA型またはVanilla decoderで学習する．
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,7 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-2560}"
 MAX_MOVES="${MAX_MOVES:-512}"
-MAX_HINTS="${MAX_HINTS:-192}"
+MAX_HINTS="${MAX_HINTS:-512}"
 EPOCHS="${EPOCHS:-50}"
 EXTRA_ARGS=()
 
@@ -36,13 +36,16 @@ done
 case "${MODEL_TYPE}" in llama|vanilla) ;; *) echo "--model-type must be llama or vanilla" >&2; exit 2 ;; esac
 case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small, base, or large" >&2; exit 2 ;; esac
 
-OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/${ANNOTATION_MODE}/p${ANNOTATION_PROBABILITY}"
-VOCAB="${RESULTS_DIR}/factorized_v2_vocab.json"
+OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}/seed-${SEED:-20260802}"
+VOCAB="${DATASET_DIR}/vocab.json"
 mkdir -p "${OUTPUT_DIR}"
-"${PYTHON_BIN}" "${SCRIPT_DIR}/build_factorized_vocabulary.py" --output "${VOCAB}"
+[[ -f "${VOCAB}" ]] || { echo "missing ${VOCAB}; run build_factorized_prompt_dataset.sh first" >&2; exit 2; }
 MANIFEST_ARGS=()
-if [[ -f "${DATASET_DIR}/dataset_manifest.json" ]] && grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v2"' "${DATASET_DIR}/dataset_manifest.json"; then
+if [[ -f "${DATASET_DIR}/dataset_manifest.json" ]] && grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${DATASET_DIR}/dataset_manifest.json"; then
   MANIFEST_ARGS=(--dataset-manifest "${DATASET_DIR}/dataset_manifest.json")
+else
+  echo "missing or obsolete factorized_v3 dataset_manifest.json" >&2
+  exit 2
 fi
 
 set +e
@@ -54,7 +57,9 @@ set +e
   --output-dir "${OUTPUT_DIR}" \
   --model-type "${MODEL_TYPE}" \
   --model-size "${MODEL_SIZE}" \
-  --move-encoding factorized_v2 \
+  --move-encoding factorized_v3_no_eom \
+  --state-prompt-mode explicit \
+  --start-selection fixed_initial \
   --annotation-mode "${ANNOTATION_MODE}" \
   --annotation-probability "${ANNOTATION_PROBABILITY}" \
   --max-seq-len "${MAX_SEQ_LEN}" \

@@ -1,15 +1,28 @@
 #!/usr/bin/env python3
-"""既存new-prompt artifactを検査し，factorized_v2 datasetとして包装する。"""
+"""旧new-prompt JSONLからfactorized_v3の固定初期局面datasetを作る．"""
 
 from __future__ import annotations
 
 import argparse
+from array import array
 import hashlib
 import json
 from pathlib import Path
 
-from factorized_prompt import FACTORIZED_SCHEMA_VERSION, factorize_usi, unfactorize_usi, write_factorized_vocabulary
-from new_prompt import validate_move_annotations, validate_state_prompt_tokens
+from create_dataset import import_cshogi
+from build_new_prompt_dataset import state_targets
+from factorized_prompt import (
+    FACTORIZED_SCHEMA_VERSION,
+    MOVE_ENCODING,
+    annotation_piece_token,
+    encode_state_prompt,
+    factorize_usi,
+    unfactorize_usi,
+    validate_state_prompt_tokens,
+    write_factorized_vocabulary,
+)
+from factorized_prompt_data import is_standard_initial_sfen
+from new_prompt import validate_move_annotations
 
 
 def sha256(path: Path) -> str:
@@ -20,45 +33,137 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_record(record, split, line_number):
+def _canonical_evaluation_steps(steps):
+    result = []
+    for source in steps or ():
+        step = dict(source)
+        step["legal_sources_by_piece"] = {
+            annotation_piece_token(piece): list(squares)
+            for piece, squares in dict(step.get("legal_sources_by_piece", {})).items()
+        }
+        result.append(step)
+    return result
+
+
+def transform_record(record, split, line_number, cshogi_module, token_to_id):
     moves = record.get("move_tokens")
     annotations = record.get("move_annotations")
     if not isinstance(moves, list) or not isinstance(annotations, list):
         raise ValueError("{}:{} missing move_tokens/move_annotations".format(split, line_number))
+    if not is_standard_initial_sfen(str(record.get("initial_sfen", ""))):
+        raise ValueError("{}:{} is not a standard-initial game".format(split, line_number))
     validate_move_annotations([str(value) for value in moves], [dict(value) for value in annotations])
+    factorized = []
     for move in moves:
         tokens = factorize_usi(str(move))
         if unfactorize_usi(tokens) != str(move):
             raise ValueError("{}:{} USI round trip failed: {}".format(split, line_number, move))
-    candidates = record.get("start_candidates", [])
-    if not candidates:
-        raise ValueError("{}:{} has no start candidates".format(split, line_number))
-    for candidate in candidates:
-        validate_state_prompt_tokens([str(value) for value in candidate["state_prompt_tokens"]])
-        if not 0 <= int(candidate["start_ply"]) < len(moves):
-            raise ValueError("{}:{} candidate start_ply is invalid".format(split, line_number))
-    if split == "evaluation" and not record.get("evaluation_steps"):
-        raise ValueError("evaluation:{} has no evaluation_steps".format(line_number))
+        factorized.append(tokens)
+
+    board = cshogi_module.Board(str(record["initial_sfen"]))
+    state_tokens = encode_state_prompt(board, cshogi_module)
+    validate_state_prompt_tokens(state_tokens)
+    candidate = {
+        "start_ply": 0,
+        "start_sfen": str(record["initial_sfen"]),
+        "state_prompt_tokens": state_tokens,
+        "state_prompt_token_ids": [token_to_id[token] for token in state_tokens],
+        "probe_targets": state_targets(board, cshogi_module),
+        "position_scope": (record.get("position_scope_by_ply") or [record.get("position_scope", "unknown_position_scope")])[0],
+    }
+
+    normalized_annotations = []
+    for annotation in annotations:
+        value = dict(annotation)
+        if bool(value.get("eligible", False)):
+            value["piece"] = annotation_piece_token(str(value["piece"]))
+        normalized_annotations.append(value)
+
+    # 状態プローブは全て初期局面から当該plyまでの履歴に正規化する．
+    probe_by_ply = {}
+    for source in record.get("probe_examples", ()):
+        ply = int(source.get("ply", -1))
+        if not 0 <= ply <= len(moves) or ply in probe_by_ply:
+            continue
+        probe_by_ply[ply] = {
+            "start_ply": 0,
+            "ply": ply,
+            "state_prompt_tokens": state_tokens,
+            "state_prompt_token_ids": candidate["state_prompt_token_ids"],
+            "history_moves": [str(move) for move in moves[:ply]],
+            "probe_targets": source.get("probe_targets"),
+            "position_scope": source.get("position_scope", "unknown_position_scope"),
+            "trajectory_scope": source.get("trajectory_scope", record.get("trajectory_scope", "unknown_position_scope")),
+        }
+    scopes = list(record.get("position_scope_by_ply", ()))
+    replay = cshogi_module.Board(str(record["initial_sfen"]))
+    for ply in range(len(moves) + 1):
+        if ply in {8, 32} and ply not in probe_by_ply:
+            probe_by_ply[ply] = {
+                "start_ply": 0,
+                "ply": ply,
+                "state_prompt_tokens": state_tokens,
+                "state_prompt_token_ids": candidate["state_prompt_token_ids"],
+                "history_moves": [str(move) for move in moves[:ply]],
+                "probe_targets": state_targets(replay, cshogi_module),
+                "position_scope": scopes[ply] if ply < len(scopes) else "unknown_position_scope",
+                "trajectory_scope": record.get("trajectory_scope", "unknown_position_scope"),
+            }
+        if ply < len(moves):
+            move = replay.move_from_usi(str(moves[ply]))
+            if not replay.is_legal(move):
+                raise ValueError("{}:{} illegal move at ply {}".format(split, line_number, ply + 1))
+            replay.push(move)
+
+    output = dict(record)
+    output.update({
+        "schema_version": FACTORIZED_SCHEMA_VERSION,
+        "move_encoding": MOVE_ENCODING,
+        "state_prompt_tokens": state_tokens,
+        "state_prompt_token_ids": candidate["state_prompt_token_ids"],
+        "move_annotations": normalized_annotations,
+        "factorized_move_ids": [[token_to_id[token] for token in tokens] for tokens in factorized],
+        "start_candidates": [candidate],
+        "probe_examples": [probe_by_ply[ply] for ply in sorted(probe_by_ply)],
+    })
+    if split == "evaluation":
+        output["evaluation_steps"] = _canonical_evaluation_steps(record.get("evaluation_steps"))
+        if not output["evaluation_steps"]:
+            raise ValueError("evaluation:{} has no evaluation_steps".format(line_number))
+    return output
 
 
-def copy_split(source: Path, destination: Path, split: str):
-    records = moves = candidates = probe_examples = 0
+def copy_split(source: Path, destination: Path, split: str, cshogi_module=None, token_to_id=None):
+    cshogi_module = cshogi_module or import_cshogi()
+    if token_to_id is None:
+        token_to_id = write_factorized_vocabulary(destination.parent / "vocab.json")["token_to_id"]
+    records = moves = probe_examples = rejected_nonstandard = 0
+    lengths = array("I")
     with source.open(encoding="utf-8") as input_handle, destination.open("w", encoding="utf-8") as output_handle:
         for line_number, line in enumerate(input_handle, 1):
             if not line.strip():
                 continue
-            record = json.loads(line)
-            validate_record(record, split, line_number)
+            source_record = json.loads(line)
+            if not is_standard_initial_sfen(str(source_record.get("initial_sfen", ""))):
+                rejected_nonstandard += 1
+                continue
+            record = transform_record(source_record, split, line_number, cshogi_module, token_to_id)
             output_handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             records += 1
             moves += len(record["move_tokens"])
-            candidates += len(record.get("start_candidates", []))
             probe_examples += len(record.get("probe_examples", []))
-    return {"records": records, "moves": moves, "start_candidates": candidates, "probe_examples": probe_examples, "sha256": sha256(destination)}
+            hint_count = sum(bool(value.get("eligible", False)) for value in record["move_annotations"])
+            lengths.append(3 + len(record["state_prompt_token_ids"]) + sum(len(value) for value in record["factorized_move_ids"]) + hint_count)
+    length_path = destination.with_suffix(".lengths.u32")
+    with length_path.open("wb") as handle:
+        lengths.tofile(handle)
+    if records == 0:
+        raise ValueError("{} contains no standard-initial records".format(source))
+    return {"records": records, "rejected_nonstandard": rejected_nonstandard, "moves": moves, "start_candidates": records, "probe_examples": probe_examples, "length_index": length_path.name, "sha256": sha256(destination)}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="factorized_v2 datasetを構築する")
+    parser = argparse.ArgumentParser(description="factorized_v3 datasetを構築する")
     parser.add_argument("--input-dir", required=True, help="既存new-prompt dataset")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--splits", default="train,validation,evaluation")
@@ -67,18 +172,20 @@ def main():
     output_root.mkdir(parents=True, exist_ok=True)
     vocab_path = output_root / "vocab.json"
     vocabulary = write_factorized_vocabulary(vocab_path)
+    cshogi_module = import_cshogi()
     split_metrics = {}
     for split in (value.strip() for value in args.splits.split(",") if value.strip()):
         source = source_root / (split + ".jsonl")
         if not source.is_file():
             raise FileNotFoundError(source)
-        split_metrics[split] = copy_split(source, output_root / (split + ".jsonl"), split)
+        split_metrics[split] = copy_split(source, output_root / (split + ".jsonl"), split, cshogi_module, vocabulary["token_to_id"])
         print(json.dumps({"event": "split_complete", "split": split, **split_metrics[split]}, ensure_ascii=False), flush=True)
     source_manifest = source_root / "dataset_manifest.json"
     manifest = {
         "schema_version": FACTORIZED_SCHEMA_VERSION,
-        "format": "shogi_piece_coordinate_prompt_factorized_moves",
-        "move_encoding": "factorized_v2",
+        "format": "shogi_canonical_state_prompt_factorized_moves",
+        "move_encoding": MOVE_ENCODING,
+        "state_prompt": "explicit_standard_initial_canonical",
         "source_dataset": str(source_root.resolve()),
         "source_manifest": str(source_manifest.resolve()) if source_manifest.is_file() else None,
         "vocab_sha256": sha256(vocab_path),
@@ -91,4 +198,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

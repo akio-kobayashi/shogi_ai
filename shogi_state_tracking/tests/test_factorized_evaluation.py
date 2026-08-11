@@ -20,21 +20,19 @@ except ImportError:
 class FactorizedEvaluationTest(unittest.TestCase):
     @staticmethod
     def record():
-        state = [
-            "<STATE>", "<BOARD>", "<W_K>", "<SQ_5a>", "<B_K>", "<SQ_5i>",
-            "<B_P>", "<SQ_7g>", "</BOARD>", "<HANDS>", "</HANDS>", "<TURN_BLACK>",
-        ]
+        state = ["<TURN_BLACK>", "<BOARD_BLACK>", "<K>", "<SQ_5i>", "<P>", "<SQ_7g>",
+                 "<BOARD_WHITE>", "<K>", "<SQ_5a>", "<HAND_BLACK>", "<HAND_WHITE>"]
         return {
             "game_id": "g",
             "initial_sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
             "move_tokens": ["7g7f"],
-            "move_annotations": [{"eligible": True, "piece": "<B_P>", "source": "<SQ_7g>"}],
+            "move_annotations": [{"eligible": True, "piece": "<P>", "source": "<SQ_7g>"}],
             "start_candidates": [{"start_ply": 0, "state_prompt_tokens": state, "position_scope": "unseen_position"}],
-            "evaluation_steps": [{"ply": 0, "target_move": "7g7f", "legal_moves": ["7g7f"], "legal_sources_by_piece": {"<B_P>": ["<SQ_7g>"]}}],
+            "evaluation_steps": [{"ply": 0, "target_move": "7g7f", "legal_moves": ["7g7f"], "legal_sources_by_piece": {"<P>": ["<SQ_7g>"]}}],
             "position_scope_by_ply": ["unseen_position"], "trajectory_scope": "strict_unseen_position",
         }
 
-    def test_explicit_and_implicit_initial_use_the_same_ply_zero_game(self):
+    def test_implicit_initial_is_rejected(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from factorized_prompt_data import FactorizedPromptSequenceDataset
 
@@ -42,18 +40,11 @@ class FactorizedEvaluationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "train.jsonl"
             path.write_text(json.dumps(self.record()) + "\n", encoding="utf-8")
-            explicit = FactorizedPromptSequenceDataset(
-                str(path), vocab, state_prompt_mode="explicit", start_selection="fixed_initial",
-                randomize_each_epoch=False,
-            )[0]
-            implicit = FactorizedPromptSequenceDataset(
-                str(path), vocab, state_prompt_mode="implicit_initial", start_selection="fixed_initial",
-                randomize_each_epoch=False,
-            )[0]
-        self.assertEqual(explicit["start_ply"], 0)
-        self.assertEqual(implicit["start_ply"], 0)
-        self.assertGreater(len(explicit["input_ids"]), len(implicit["input_ids"]))
-        self.assertEqual(int(explicit["move_boundary_mask"].sum()), int(implicit["move_boundary_mask"].sum()))
+            with self.assertRaises(ValueError):
+                FactorizedPromptSequenceDataset(
+                    str(path), vocab, state_prompt_mode="implicit_initial", start_selection="fixed_initial",
+                    randomize_each_epoch=False,
+                )
 
     def test_standard_initial_sfen_requires_all_nine_pawns(self):
         from factorized_prompt_data import is_standard_initial_sfen
@@ -62,24 +53,6 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertFalse(is_standard_initial_sfen(
             "lnsgkgsnl/1r5b1/p1ppppppp/9/9/9/P1PPPPPPP/1B5R1/LNSGKGSNL b - 1"
         ))
-
-    def test_ablation_builder_keeps_only_standard_initial_candidate(self):
-        from build_initial_position_ablation_dataset import build_split
-
-        standard = self.record()
-        standard["start_candidates"].append(dict(standard["start_candidates"][0], start_ply=1))
-        nonstandard = self.record()
-        nonstandard["game_id"] = "handicap"
-        nonstandard["initial_sfen"] = "9/9/9/9/9/9/9/9/9 b - 1"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source, destination = root / "train.jsonl", root / "out.jsonl"
-            source.write_text(json.dumps(standard) + "\n" + json.dumps(nonstandard) + "\n", encoding="utf-8")
-            metrics = build_split(source, destination, "train")
-            output = json.loads(destination.read_text(encoding="utf-8").strip())
-        self.assertEqual(metrics["input_records"], 2)
-        self.assertEqual(metrics["records"], 1)
-        self.assertEqual([value["start_ply"] for value in output["start_candidates"]], [0])
 
     def test_dataset_builder_validates_and_packages_jsonl(self):
         from build_factorized_prompt_dataset import copy_split
@@ -116,7 +89,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
             loss, metrics = loss_for_batch(model, batch, torch.device("cpu"))
             loss.backward()
             self.assertTrue(torch.isfinite(loss))
-            self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 3.0)
+            self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 2.0)
             self.assertEqual(int(batch["move_boundary_mask"].sum()), 1)
             self.assertEqual(int(metrics["hint"]["targets"]), 1)
 
@@ -140,7 +113,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 torch.save({
                     "model_type": model_type, "config": config.to_dict(),
                     "model_state_dict": model.state_dict(),
-                    "new_prompt": {"move_encoding": "factorized_v2"},
+                    "new_prompt": {"move_encoding": "factorized_v3_no_eom", "state_prompt_mode": "explicit", "start_selection": "fixed_initial"},
                 }, checkpoint)
                 output = root / (model_type + ".json")
                 argv = [
@@ -227,7 +200,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
         model = build_model("vanilla", config)
         optimizer = torch.optim.AdamW(model.parameters())
         args = SimpleNamespace(
-            model_type="vanilla", model_size="small", move_encoding="factorized_v2",
+            model_type="vanilla", model_size="small", move_encoding="factorized_v3_no_eom",
             state_prompt_mode="explicit", start_selection="fixed_initial",
             annotation_mode="vanilla", annotation_probability=0.0,
             hint_loss_weight=1.0, max_hints=0, max_moves=1, seed=1,

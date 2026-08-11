@@ -1,17 +1,16 @@
-"""factorized_v2用のストリーミングDataset。"""
+"""factorized_v3用のストリーミングDataset．"""
 
 from __future__ import annotations
 
 from array import array
-import json
 from typing import Mapping
 
 import torch
 
 from data import IGNORE_INDEX
-from factorized_prompt import factorize_usi
-from new_prompt import validate_move_annotations, validate_state_prompt_tokens
-from new_prompt_data import NewPromptSequenceDataset, _seeded_rng
+from factorized_prompt import annotation_piece_token, factorize_usi, validate_state_prompt_tokens
+from new_prompt import source_square_from_usi, square_token
+from new_prompt_data import NewPromptSequenceDataset
 
 
 STANDARD_INITIAL_SFEN_POSITION = (
@@ -35,15 +34,11 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
         self,
         *args,
         state_prompt_mode: str = "explicit",
-        start_selection: str = "random_candidates",
+        start_selection: str = "fixed_initial",
         **kwargs,
     ):
-        if state_prompt_mode not in {"explicit", "implicit_initial"}:
-            raise ValueError("state_prompt_mode must be explicit or implicit_initial")
-        if start_selection not in {"random_candidates", "fixed_initial"}:
-            raise ValueError("start_selection must be random_candidates or fixed_initial")
-        if state_prompt_mode == "implicit_initial" and start_selection != "fixed_initial":
-            raise ValueError("implicit_initial requires fixed_initial start selection")
+        if state_prompt_mode != "explicit" or start_selection != "fixed_initial":
+            raise ValueError("factorized_v3 requires explicit state prompt and fixed initial start")
         self.state_prompt_mode = state_prompt_mode
         self.start_selection = start_selection
         super().__init__(*args, **kwargs)
@@ -58,8 +53,6 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             self.length_estimates = values
 
     def _materialize_candidate(self, record: Mapping[str, object], index: int):
-        if self.start_selection == "random_candidates":
-            return super()._materialize_candidate(record, index)
         if not is_standard_initial_sfen(str(record.get("initial_sfen", ""))):
             raise ValueError("fixed_initial requires a standard initial SFEN")
         candidates = [
@@ -71,35 +64,13 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
         return record, candidates[0]
 
     def _make_control_pool(self):
-        """Random control用に，色別の異なる駒種IDだけを保持する。"""
-        values = {"B": set(), "W": set()}
-        with self.jsonl_path.open("rb") as handle:
-            for offset in self._offsets:
-                handle.seek(offset)
-                annotations = json.loads(handle.readline())["move_annotations"]
-                for annotation in annotations:
-                    if not bool(annotation.get("eligible", False)):
-                        continue
-                    piece = str(annotation["piece"])
-                    values[piece[1]].add(self._token_id(piece))
-        pools = {color: array("I", sorted(piece_ids)) for color, piece_ids in values.items()}
-        if any(len(pool) < 2 for pool in pools.values()):
-            raise ValueError("factorized random control needs at least two piece types per side")
-        return pools
+        raise ValueError("random_control was retired from factorized_v3")
 
     def _hint_pair(self, record: Mapping[str, object], move_index: int, index: int):
         original = record["_annotation_ids"][move_index]
         if original is None:
             raise ValueError("move {} has no eligible annotation".format(move_index))
-        if self.annotation_mode != "random_control":
-            return original
-        epoch = self._epoch.value if self.randomize_each_epoch else 0
-        rng = _seeded_rng(self.seed, epoch, index, record["game_id"], move_index, "control")
-        pool = self._control_pool[record["_annotation_colors"][move_index]]
-        candidates = [int(piece_id) for piece_id in pool if int(piece_id) != original[0]]
-        if not candidates:
-            raise ValueError("random control has no different same-side piece type")
-        return candidates[rng.randrange(len(candidates))], original[1]
+        return original
 
     def _prepare_record(self, record: Mapping[str, object]):
         prepared = dict(record)
@@ -115,11 +86,11 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
         annotation_colors = []
         for move_index, annotation in enumerate(record["move_annotations"]):
             if bool(annotation.get("eligible", False)):
-                piece_id = self._token_id(str(annotation["piece"]))
+                piece_id = self._token_id(annotation_piece_token(str(annotation["piece"])))
                 source_id = self._token_id(str(annotation["source"]))
                 annotation_ids.append((piece_id, source_id))
                 eligible_indices.append(move_index)
-                annotation_colors.append(str(annotation["piece"])[1])
+                annotation_colors.append(None)
             else:
                 annotation_ids.append(None)
                 annotation_colors.append(None)
@@ -153,7 +124,16 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
         if not isinstance(annotations, list) or (not isinstance(moves, list) and not isinstance(factorized_ids, list)):
             raise ValueError("record needs move_tokens and move_annotations lists")
         if moves is not None:
-            validate_move_annotations([str(move) for move in moves], [dict(value) for value in annotations])
+            if len(moves) != len(annotations):
+                raise ValueError("move_tokens and move_annotations lengths differ")
+            for move, annotation in zip(moves, annotations):
+                move = str(move)
+                eligible = bool(annotation.get("eligible", False))
+                if "*" in move:
+                    if eligible:
+                        raise ValueError("drop move must not have a RAP annotation")
+                elif not eligible or str(annotation.get("source", "")) != square_token(source_square_from_usi(move)):
+                    raise ValueError("normal move needs a matching RAP annotation")
             for move in moves:
                 for token in factorize_usi(str(move)):
                     self._token_id(token)
@@ -161,7 +141,7 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             raise ValueError("factorized_move_ids and move_annotations lengths differ")
         for annotation in annotations:
             if bool(annotation.get("eligible", False)):
-                self._token_id(str(annotation["piece"]))
+                self._token_id(annotation_piece_token(str(annotation["piece"])))
         if candidates is not None:
             if not isinstance(candidates, list) or not candidates:
                 raise ValueError("start_candidates must be a nonempty list")
@@ -195,27 +175,29 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
     def _encode_record(self, record: Mapping[str, object], index: int):
         record, candidate = self._materialize_candidate(record, index)
         state_ids = candidate["_state_prompt_ids"] if candidate is not None else record["_state_prompt_ids"]
-        if self.state_prompt_mode == "implicit_initial":
-            state_ids = ()
         start_ply = int(candidate.get("start_ply", 0) if candidate is not None else record.get("start_ply", 0))
         end_ply = self._end_ply(record, len(state_ids), start_ply)
         selected = self._selected_hint_indices(record, start_ply, end_ply, index)
         token_ids = [self._bos_id, *state_ids, self._moves_id]
         categories = ["prompt"] * len(token_ids)
         move_weights = [0.0] * len(token_ids)
+        move_end = [False] * len(token_ids)
         for move_index in range(start_ply, end_ply):
             if move_index in selected:
                 token_ids.append(self._hint_pair(record, move_index, index)[0])
                 categories.append("hint")
                 move_weights.append(0.0)
+                move_end.append(False)
             ids = record["_move_ids"][move_index]
             token_ids.extend(ids)
             categories.extend(["move"] * len(ids))
-            # 指手内の全subtoken NLLを合計し，後段でEOM数（指手数）で割る。
+            # 指手内の全subtoken NLLを合計し，後段で移動先座標数（指手数）で割る．
             move_weights.extend([1.0] * len(ids))
+            move_end.extend([False] * (len(ids) - 1) + [True])
         token_ids.append(self._eos_id)
         categories.append("eos")
         move_weights.append(0.0)
+        move_end.append(False)
 
         input_ids = torch.tensor(token_ids, dtype=torch.long)
         labels = torch.full((len(token_ids),), IGNORE_INDEX, dtype=torch.long)
@@ -231,7 +213,7 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
                 loss_weights[position] = move_weights[position + 1]
                 move_unit_weight[position] = move_weights[position + 1]
                 move_target_mask[position] = True
-                move_boundary_mask[position] = input_ids[position + 1] == self._token_id("<EOM>")
+                move_boundary_mask[position] = move_end[position + 1]
             elif target == "hint":
                 labels[position] = input_ids[position + 1]
                 loss_weights[position] = self.hint_loss_weight
