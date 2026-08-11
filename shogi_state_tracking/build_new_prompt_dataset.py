@@ -107,6 +107,25 @@ def legal_sources_by_piece(board, cshogi_module) -> Dict[str, List[str]]:
     return {piece: sorted(squares) for piece, squares in sorted(values.items())}
 
 
+def normalize_position_scopes(record: Mapping[str, object], move_count: int) -> List[str]:
+    """局面列のscopeを，各指手を指す直前の局面へ揃える．
+
+    ``create_dataset.py``の現行形式は初期局面から終局面までを含むため
+    ``move_count + 1``要素である．new-prompt側はtarget plyごとの入力局面だけを
+    保存するので，最後の終局面を除いた``move_count``要素を用いる．
+    """
+    raw = [str(value) for value in record.get("position_scope_by_ply", [])]
+    if len(raw) == move_count + 1:
+        return raw[:-1]
+    if len(raw) == move_count:
+        return raw
+    if not raw:
+        return [str(record.get("position_scope", "unknown_position_scope"))] * move_count
+    raise ValueError(
+        "position_scope_by_ply has {} entries for {} moves".format(len(raw), move_count)
+    )
+
+
 def materialize_record(
     record: Mapping[str, object],
     cshogi_module,
@@ -130,7 +149,7 @@ def materialize_record(
     candidate_by_ply: Dict[int, Dict[str, object]] = {}
     evaluation_steps: List[Dict[str, object]] = []
     probe_examples: List[Dict[str, object]] = []
-    scopes = list(record.get("position_scope_by_ply", []))
+    scopes = normalize_position_scopes(record, len(moves))
     for ply in range(len(moves)):
         if ply in wanted:
             candidate = {

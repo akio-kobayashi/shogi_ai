@@ -15,6 +15,18 @@ except ImportError:
 
 
 class NewPromptSchemaTest(unittest.TestCase):
+    def test_position_scope_terminal_state_is_removed(self):
+        from build_new_prompt_dataset import normalize_position_scopes
+
+        record = {"position_scope_by_ply": ["s0", "s1", "s2"]}
+        self.assertEqual(normalize_position_scopes(record, 2), ["s0", "s1"])
+
+    def test_legacy_position_scope_length_is_preserved(self):
+        from build_new_prompt_dataset import normalize_position_scopes
+
+        record = {"position_scope_by_ply": ["s0", "s1"]}
+        self.assertEqual(normalize_position_scopes(record, 2), ["s0", "s1"])
+
     def test_factorized_v3_vocabulary_is_fixed_to_125_tokens(self):
         from factorized_prompt import factorized_vocabulary_tokens
 

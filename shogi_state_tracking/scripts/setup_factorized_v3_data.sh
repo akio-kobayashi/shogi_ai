@@ -12,9 +12,16 @@ if [[ -f "${INPUT}" && "${INPUT}" == *.csv ]]; then
   SOURCE_DIR="${BUILD_ROOT}/source-jsonl"
   NEW_PROMPT_DIR="${BUILD_ROOT}/new-prompt"
   mkdir -p "${BUILD_ROOT}" "${OUTPUT_DIR}"
-  "${PYTHON_BIN}" -u "${SCRIPT_DIR}/create_dataset.py" build --metadata-csv "${INPUT}" --output-dir "${SOURCE_DIR}" "$@"
   # create_dataset.py buildはOUTPUT_DIR/datasets/{train,validation,evaluation}.jsonlへ出力する．
   SOURCE_JSONL_DIR="${SOURCE_DIR}/datasets"
+  if [[ "${REUSE_SOURCE_DATASET:-0}" == 1 ]] \
+    && [[ -f "${SOURCE_JSONL_DIR}/train.jsonl" ]] \
+    && [[ -f "${SOURCE_JSONL_DIR}/validation.jsonl" ]] \
+    && [[ -f "${SOURCE_JSONL_DIR}/evaluation.jsonl" ]]; then
+    echo "reusing source JSONL: ${SOURCE_JSONL_DIR}" >&2
+  else
+    "${PYTHON_BIN}" -u "${SCRIPT_DIR}/create_dataset.py" build --metadata-csv "${INPUT}" --output-dir "${SOURCE_DIR}" "$@"
+  fi
   for split in train validation evaluation; do
     [[ -f "${SOURCE_JSONL_DIR}/${split}.jsonl" ]] || {
       echo "create_dataset output is missing: ${SOURCE_JSONL_DIR}/${split}.jsonl" >&2
