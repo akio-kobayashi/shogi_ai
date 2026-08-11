@@ -18,6 +18,24 @@ SEEDS="${SEEDS:-20260802}"
 EVAL_STAGE="${EVAL_STAGE:-main}"
 VOCAB="${DATASET_DIR}/vocab.json"
 MANIFEST="${DATASET_DIR}/dataset_manifest.json"
+
+# 出力パスを組み立てる前にモデル指定を解釈する．従来はこれらをそのまま
+# 学習シェルへ渡していたため，学習はsmall，評価パスはbaseという不整合が
+# 起こり得た．その他の学習引数だけをEXTRA_ARGSとして転送する．
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model-type) MODEL_TYPE="$2"; shift 2 ;;
+    --model-type=*) MODEL_TYPE="${1#*=}"; shift ;;
+    --model-size) MODEL_SIZE="$2"; shift 2 ;;
+    --model-size=*) MODEL_SIZE="${1#*=}"; shift ;;
+    *) EXTRA_ARGS+=("$1"); shift ;;
+  esac
+done
+case "${MODEL_TYPE}" in llama|vanilla) ;; *) echo "--model-type must be llama or vanilla" >&2; exit 2 ;; esac
+case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small, base, or large" >&2; exit 2 ;; esac
+echo "factorized experiment configuration: model_type=${MODEL_TYPE} model_size=${MODEL_SIZE} rap_rates=${RAP_RATES} seeds=${SEEDS}" >&2
+
 for path in "${DATASET_DIR}/train.jsonl" "${DATASET_DIR}/validation.jsonl" "${DATASET_DIR}/evaluation.jsonl" "${VOCAB}" "${MANIFEST}"; do
   [[ -f "${path}" ]] || { echo "missing ${path}" >&2; exit 2; }
 done
@@ -40,7 +58,7 @@ for seed in "${seeds[@]}"; do
         ANNOTATION_PROBABILITY="${rate}" BATCH_SIZE="${BATCH_SIZE:-8}" NUM_WORKERS="${NUM_WORKERS:-0}" \
         MAX_SEQ_LEN="${MAX_SEQ_LEN:-2560}" MAX_MOVES="${MAX_MOVES:-512}" MAX_HINTS="${MAX_HINTS:-512}" \
         EPOCHS="${EPOCHS:-50}" "${SCRIPT_DIR}/scripts/run_factorized_baseline.sh" \
-        "${DATASET_DIR}" "${RESULTS_DIR}" --seed "${seed}" "$@"
+        "${DATASET_DIR}" "${RESULTS_DIR}" --seed "${seed}" "${EXTRA_ARGS[@]}"
     fi
     [[ -f "${output}/best.pt" ]] || {
       echo "training did not produce ${output}/best.pt; evaluation is aborted. Use a fresh results directory and rerun training." >&2
