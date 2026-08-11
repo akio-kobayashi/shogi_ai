@@ -33,12 +33,12 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
     def __init__(
         self,
         *args,
-        state_prompt_mode: str = "explicit",
+        state_prompt_mode: str = "implicit_initial",
         start_selection: str = "fixed_initial",
         **kwargs,
     ):
-        if state_prompt_mode != "explicit" or start_selection != "fixed_initial":
-            raise ValueError("factorized_v3 requires explicit state prompt and fixed initial start")
+        if state_prompt_mode not in {"implicit_initial", "explicit"} or start_selection != "fixed_initial":
+            raise ValueError("factorized_v3 requires fixed initial start")
         self.state_prompt_mode = state_prompt_mode
         self.start_selection = start_selection
         super().__init__(*args, **kwargs)
@@ -175,6 +175,8 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
     def _encode_record(self, record: Mapping[str, object], index: int):
         record, candidate = self._materialize_candidate(record, index)
         state_ids = candidate["_state_prompt_ids"] if candidate is not None else record["_state_prompt_ids"]
+        if self.state_prompt_mode == "implicit_initial":
+            state_ids = ()
         start_ply = int(candidate.get("start_ply", 0) if candidate is not None else record.get("start_ply", 0))
         end_ply = self._end_ply(record, len(state_ids), start_ply)
         selected = self._selected_hint_indices(record, start_ply, end_ply, index)

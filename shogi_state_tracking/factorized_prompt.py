@@ -202,7 +202,7 @@ def write_factorized_vocabulary(path: str | Path) -> Dict[str, object]:
         "token_to_id": {token: index for index, token in enumerate(tokens)},
         "move_encoding": MOVE_ENCODING,
         "move_grammar": "source destination | source PROMOTE destination | DROP piece destination",
-        "probe_position": "destination_square",
+        "probe_position": "h_pre_at_moves_or_previous_destination; h_post_at_current_destination",
         "syntactic_usi_actions": len(all_usi_move_tokens()),
     }
     path = Path(path)

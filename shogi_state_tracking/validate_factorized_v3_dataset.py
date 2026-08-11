@@ -31,12 +31,22 @@ def validate_record(record, vocabulary, split, line_number):
     moves = [str(move) for move in record.get("move_tokens", ())]
     annotations = list(record.get("move_annotations", ()))
     ids = list(record.get("factorized_move_ids", ()))
+    legal_drop = record.get("legal_drop_available_by_ply")
+    promotion_choice = record.get("promotion_choice_available_by_ply")
     if not moves or len(moves) != len(annotations) or len(moves) != len(ids):
         raise ValueError("{} move arrays differ in length".format(where))
+    if not isinstance(legal_drop, list) or len(legal_drop) != len(moves) or any(not isinstance(value, bool) for value in legal_drop):
+        raise ValueError("{} legal_drop_available_by_ply must be a boolean per move".format(where))
+    if not isinstance(promotion_choice, list) or len(promotion_choice) != len(moves) or any(not isinstance(value, bool) for value in promotion_choice):
+        raise ValueError("{} promotion_choice_available_by_ply must be a boolean per move".format(where))
     for index, (move, annotation, stored_ids) in enumerate(zip(moves, annotations, ids)):
         tokens = factorize_usi(move)
         if [vocabulary[token] for token in tokens] != list(stored_ids):
             raise ValueError("{} move {} IDs disagree with vocab".format(where, index))
+        if bool(promotion_choice[index]) and "*" in move:
+            raise ValueError("{} drop move {} cannot have an optional-promotion label".format(where, index))
+        if "*" in move and not legal_drop[index]:
+            raise ValueError("{} actual drop move {} contradicts legal_drop_available".format(where, index))
         if "*" in move:
             if bool(annotation.get("eligible", False)):
                 raise ValueError("{} drop {} has a RAP annotation".format(where, index))

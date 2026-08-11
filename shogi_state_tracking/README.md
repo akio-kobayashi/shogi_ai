@@ -2,7 +2,7 @@
 
 ## 現行実験（factorized_v3）
 
-現行実験は125語彙，明示的な平手初期局面，移動先座標終端の指手文法を用いる．`<EOM>`，開始局面なし，random control，旧A–D ablationは廃止した．旧datasetとcheckpointは再利用しない．詳細は[`NEW_EXPERIMENT_DESIGN.md`](NEW_EXPERIMENT_DESIGN.md)を参照する．
+現行の第1・第2段階は125語彙，暗黙の平手初期局面，移動先座標終端の指手文法を用いる．入力は`<BOS> <MOVES> 指手系列`であり，開始局面promptは与えない．明示的な開始局面は第3段階で導入する．`<EOM>`，random control，旧A–D ablationは廃止した．旧datasetとcheckpointは再利用しない．詳細は[`NEW_EXPERIMENT_DESIGN.md`](NEW_EXPERIMENT_DESIGN.md)と[`PROBE_DESIGN.md`](PROBE_DESIGN.md)を参照する．
 
 ```bash
 # データのある計算機で構築・全件検査
@@ -16,6 +16,8 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 `RAP_PROBABILITY`の既定値は0.15である．挿入率比較は主実験とは分離し，必要な場合だけ`run_factorized_rap_ablation.sh`で実行する．
 
 実験順は，①RAPなし／あり，②RAPレートablation，③開始局面変更である．③は別dataset・別manifestとして実装し，平手固定の主実験へ混在させない．
+
+factorized_v3 datasetには，各ply直前の`legal_drop_available_by_ply`と`promotion_choice_available_by_ply`も保存する．これは学習時の合法手maskではなく，後段の`drop_available`診断probeと任意成り選択probe用の教師ラベルである．
 
 以下には旧実験の再現・保守情報も残るが，新規実験の入口にはしない．
 

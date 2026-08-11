@@ -81,6 +81,10 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
 
     # 状態プローブは全て初期局面から当該plyまでの履歴に正規化する．
     probe_by_ply = {}
+    # 駒打ち可能性は現在局面の合法手集合から得る派生ラベルである．
+    # train/validationにも保存し，評価時に同じ定義の線形probeを学習できるようにする．
+    legal_drop_available_by_ply = []
+    promotion_choice_available_by_ply = []
     for source in record.get("probe_examples", ()):
         ply = int(source.get("ply", -1))
         if not 0 <= ply <= len(moves) or ply in probe_by_ply:
@@ -110,6 +114,14 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
                 "trajectory_scope": record.get("trajectory_scope", "unknown_position_scope"),
             }
         if ply < len(moves):
+            legal_usi = [cshogi_module.move_to_usi(legal_move) for legal_move in replay.legal_moves]
+            legal_drop_available_by_ply.append(any("*" in value for value in legal_usi))
+            target_move = str(moves[ply])
+            promotion_choice_available_by_ply.append(
+                "*" not in target_move
+                and target_move[:4] in legal_usi
+                and target_move[:4] + "+" in legal_usi
+            )
             move = replay.move_from_usi(str(moves[ply]))
             if not replay.is_legal(move):
                 raise ValueError("{}:{} illegal move at ply {}".format(split, line_number, ply + 1))
@@ -123,6 +135,8 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
         "state_prompt_token_ids": candidate["state_prompt_token_ids"],
         "move_annotations": normalized_annotations,
         "factorized_move_ids": [[token_to_id[token] for token in tokens] for tokens in factorized],
+        "legal_drop_available_by_ply": legal_drop_available_by_ply,
+        "promotion_choice_available_by_ply": promotion_choice_available_by_ply,
         "start_candidates": [candidate],
         "probe_examples": [probe_by_ply[ply] for ply in sorted(probe_by_ply)],
     })
@@ -185,7 +199,9 @@ def main():
         "schema_version": FACTORIZED_SCHEMA_VERSION,
         "format": "shogi_canonical_state_prompt_factorized_moves",
         "move_encoding": MOVE_ENCODING,
-        "state_prompt": "explicit_standard_initial_canonical",
+        "state_prompt": "stored_for_future_explicit_start_experiments",
+        "stage_1_2_input_mode": "implicit_standard_initial",
+        "probe_annotations": ["legal_drop_available_by_ply", "promotion_choice_available_by_ply"],
         "source_dataset": str(source_root.resolve()),
         "source_manifest": str(source_manifest.resolve()) if source_manifest.is_file() else None,
         "vocab_sha256": sha256(vocab_path),

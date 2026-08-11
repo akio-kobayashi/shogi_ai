@@ -46,7 +46,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
             for candidate in selected:
                 start = int(candidate["start_ply"])
                 history = []
-                state = list(candidate["state_prompt_tokens"])
+                state = [] if state_prompt_mode == "implicit_initial" else list(candidate["state_prompt_tokens"])
                 base = ["<BOS>", *state, "<MOVES>"]
                 for distance in range(max(distances) + 1):
                     ply = start + distance
@@ -113,8 +113,8 @@ def main():
     checkpoint_settings = payload.get("new_prompt", {})
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
-    if state_prompt_mode != "explicit" or start_selection != "fixed_initial":
-        raise ValueError("factorized_v3 token probe requires explicit fixed-initial input")
+    if state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
+        raise ValueError("current factorized_v3 token probe accepts only implicit fixed-initial checkpoints")
     device = resolve_device(args.device)
     amp_dtype, _, amp_name = resolve_amp(args.amp, device)
     model = build_model(str(payload.get("model_type", "vanilla")), config).to(device)

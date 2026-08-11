@@ -19,7 +19,7 @@ from data import load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
 from factorized_prompt import MOVE_ENCODING, factorize_usi
-from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, state_metrics
+from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, replay_probe_targets, state_metrics
 from train_model import amp_context, resolve_amp
 
 
@@ -51,6 +51,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="auto")
+    parser.add_argument("--alignment-check-samples", type=int, default=8,
+                        help="splitごとのprefix/full causal consistency検査数")
     return parser.parse_args()
 
 
@@ -119,13 +121,133 @@ def read_examples(path, limit, history_distances, start_selection="random_candid
                 if start_selection == "fixed_initial" and int(example.get("start_ply", -1)) != 0:
                     continue
                 example.setdefault("trajectory_scope", record.get("trajectory_scope", "unknown_position_scope"))
+                # alignment検査とprefix/full-sequence比較のため，元対局の開始局面と
+                # 切り捨てていない全指し手系列を保持する。
+                example["initial_sfen"] = str(record.get("initial_sfen", ""))
+                example["full_move_tokens"] = [str(move) for move in record.get("move_tokens", [])]
+                example["game_id"] = str(record.get("game_id", ""))
                 distance = int(example["ply"]) - int(example["start_ply"])
-                if distance not in history_distances:
+                # ply=0は全例が同一の平手初期局面であり，主状態集計から除外する。
+                if distance <= 0 or distance not in history_distances:
                     continue
                 examples.append(example)
                 if len(examples) >= limit: return examples
     if not examples: raise ValueError("no probe_examples in {}".format(path))
     return examples
+
+
+def verify_probe_alignment(examples, vocabulary, max_seq_len, state_prompt_mode):
+    """h_preと教師局面の時間対応を，系列構文とcshogi再生で検証する．"""
+    checked = 0
+    for example in examples:
+        start_ply = int(example.get("start_ply", -1))
+        ply = int(example.get("ply", -1))
+        history_moves = [str(move) for move in example.get("history_moves", [])]
+        if start_ply != 0:
+            raise ValueError("state probe alignment requires start_ply=0")
+        if ply <= 0:
+            raise ValueError("ply=0 is excluded from the main state-probe aggregate")
+        if len(history_moves) != ply:
+            raise ValueError("history length {} does not match ply {} for {}".format(len(history_moves), ply, example.get("game_id", "")))
+        factorized_history = []
+        for move in history_moves:
+            tokens = factorize_usi(move) if MOVE_ENCODING == "factorized_v3_no_eom" else [move_token(move)]
+            if not tokens or not tokens[-1].startswith("<SQ_"):
+                raise ValueError("history move does not end at a destination square: {}".format(move))
+            factorized_history.extend(tokens)
+        state = [] if state_prompt_mode == "implicit_initial" else list(example.get("state_prompt_tokens", []))
+        prefix = ["<BOS>"] + state + ["<MOVES>"] + factorized_history
+        if len(prefix) > max_seq_len:
+            raise ValueError("probe prefix exceeds max_seq_len; series must not be truncated: {}".format(example.get("game_id", "")))
+        board_map, hand_names = label_maps()
+        actual = target_from_mapping(example["probe_targets"], board_map, hand_names)
+        replayed = replay_probe_targets(str(example["initial_sfen"]), history_moves)
+        expected = ProbeTargets(
+            board=replayed.board[-1:].clone(), hands=replayed.hands[-1:].clone(),
+            turn=replayed.turn[-1:].clone(), in_check=replayed.in_check[-1:].clone(),
+        )
+        for name in ("board", "hands", "turn", "in_check"):
+            if not torch.equal(getattr(actual, name), getattr(expected, name)):
+                raise ValueError("probe label is not the state immediately before ply {} for {}".format(ply, example.get("game_id", "")))
+        checked += 1
+    return {"examples": checked, "truncated": 0, "ply_zero_excluded": True}
+
+
+def check_causal_prefix_consistency(model, examples, vocabulary, sources, device, max_seq_len, state_prompt_mode, max_samples):
+    """prefix単独と未来を含むfull sequenceのprefix位置を比較する．"""
+    checked = 0
+    skipped = 0
+    max_abs_diff = {source: 0.0 for source in sources}
+    # 長い対局をskipしても，後続の比較可能な例を探し続ける．先頭max_samples件
+    # だけを調べると，そこがすべてmax_seq_len超過の場合に誤って検査不能となる．
+    for example in examples:
+        if checked >= max_samples:
+            break
+        history = [str(move) for move in example.get("history_moves", [])]
+        full_moves = [str(move) for move in example.get("full_move_tokens", [])]
+        if full_moves[: len(history)] != history:
+            raise ValueError(
+                "probe history is not a prefix of the full game for {}".format(
+                    example.get("game_id", "")
+                )
+            )
+        state = [] if state_prompt_mode == "implicit_initial" else list(example.get("state_prompt_tokens", []))
+        prefix_tokens = ["<BOS>", *state, "<MOVES>"]
+        for move in history:
+            prefix_tokens.extend(factorize_usi(move))
+        # 対局全体ではなく，max_seq_len内に収まる未来をprefixへ追加する．
+        # causal maskの検査には1手以上の未来があればよく，長い対局全体が
+        # contextへ収まることを要求する必要はない．
+        full_tokens = list(prefix_tokens)
+        for move in full_moves[len(history) :]:
+            future = factorize_usi(move)
+            if len(full_tokens) + len(future) > max_seq_len:
+                break
+            full_tokens.extend(future)
+        if len(full_tokens) <= len(prefix_tokens):
+            skipped += 1
+            continue
+        prefix_ids = torch.tensor([[vocabulary[token] for token in prefix_tokens]], dtype=torch.long, device=device)
+        full_ids = torch.tensor([[vocabulary[token] for token in full_tokens]], dtype=torch.long, device=device)
+        with torch.inference_mode():
+            prefix_output = model(prefix_ids, output_hidden_states=True)
+            full_output = model(full_ids, output_hidden_states=True)
+        position = len(prefix_tokens) - 1
+        for source in sources:
+            layer = int(source.split("_", 1)[1])
+            difference = float((prefix_output.hidden_states[layer][0, -1] - full_output.hidden_states[layer][0, position]).abs().max().cpu())
+            max_abs_diff[source] = max(max_abs_diff[source], difference)
+            if difference > 2e-4:
+                raise AssertionError("causal prefix/full mismatch at {}: {}".format(source, difference))
+        checked += 1
+    return {"checked": checked, "skipped": skipped, "max_abs_diff": max_abs_diff, "passed": checked > 0}
+
+
+def assert_disjoint_game_ids(paths):
+    """probeの学習・検証・評価間で対局が重複していないことを確認する．"""
+    game_ids = {}
+    for split, path in paths.items():
+        values = set()
+        with Path(path).open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                game_id = str(json.loads(line).get("game_id", ""))
+                if not game_id:
+                    raise ValueError("{}:{} has no game_id".format(path, line_number))
+                values.add(game_id)
+        game_ids[split] = values
+    split_names = list(paths)
+    for left_index, left in enumerate(split_names):
+        for right in split_names[left_index + 1 :]:
+            overlap = game_ids[left] & game_ids[right]
+            if overlap:
+                raise ValueError(
+                    "game_id overlap between {} and {}: {} examples (e.g. {})".format(
+                        left, right, len(overlap), sorted(overlap)[0]
+                    )
+                )
+    return {split: len(values) for split, values in game_ids.items()}
 
 
 def _mapped_features(directory, split, sources, rows, d_model):
@@ -191,10 +313,14 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
             history = []
             for move in example["history_moves"]:
                 history.extend(factorize_usi(move) if move_encoding == MOVE_ENCODING else [move_token(move)])
-            state = list(example["state_prompt_tokens"])
+            state = [] if state_prompt_mode == "implicit_initial" else list(example["state_prompt_tokens"])
             tokens = ["<BOS>"] + state + ["<MOVES>"] + history
             if len(tokens) > max_seq_len:
-                continue
+                raise ValueError(
+                    "probe prefix exceeds max_seq_len; refusing to truncate {} at ply {}".format(
+                        example.get("game_id", ""), example.get("ply", "?")
+                    )
+                )
             prepared_pool.append((example, [vocabulary[token] for token in tokens]))
             if len(prepared_pool) >= pool_size:
                 flush_pool()
@@ -284,18 +410,39 @@ def main():
     move_encoding = str(checkpoint.get("new_prompt", {}).get("move_encoding", "atomic_v1"))
     state_prompt_mode = str(checkpoint.get("new_prompt", {}).get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint.get("new_prompt", {}).get("start_selection", "random_candidates"))
-    if move_encoding != MOVE_ENCODING or state_prompt_mode != "explicit" or start_selection != "fixed_initial":
-        raise ValueError("linear probe requires the current factorized_v3 fixed-initial checkpoint")
-    model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"])
+    if move_encoding != MOVE_ENCODING or state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
+        raise ValueError("linear probe requires the current implicit fixed-initial factorized_v3 checkpoint")
+    model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"]); model.eval()
     del checkpoint
     board_map, hand_names = label_maps(); sources = expand_sources(args.sources, config.n_layers)
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
     feature_cache = tempfile.TemporaryDirectory(prefix=".probe-features-", dir=str(output))
-    raw = {
-        "train": read_examples(args.train_jsonl, args.max_train_samples, args.history_distances, start_selection),
-        "validation": read_examples(args.validation_jsonl, args.max_validation_samples, args.history_distances, start_selection),
-        "evaluation": read_examples(args.evaluation_jsonl, args.max_evaluation_samples, args.history_distances, start_selection),
+    split_paths = {
+        "train": args.train_jsonl,
+        "validation": args.validation_jsonl,
+        "evaluation": args.evaluation_jsonl,
     }
+    split_game_counts = assert_disjoint_game_ids(split_paths)
+    raw = {
+        split: read_examples(path, getattr(args, "max_{}_samples".format(split)), args.history_distances, start_selection)
+        for split, path in split_paths.items()
+    }
+    print(json.dumps({"event": "probe_alignment_check_start", "examples": {name: len(values) for name, values in raw.items()}}, ensure_ascii=False), flush=True)
+    alignment = {
+        split: verify_probe_alignment(examples, vocabulary, config.max_seq_len, state_prompt_mode)
+        for split, examples in raw.items()
+    }
+    causal_alignment = {
+        split: check_causal_prefix_consistency(
+            model, examples, vocabulary, sources, device, config.max_seq_len,
+            state_prompt_mode, args.alignment_check_samples,
+        )
+        for split, examples in raw.items()
+    }
+    missing_causal_checks = [split for split, report in causal_alignment.items() if not report["passed"]]
+    if missing_causal_checks:
+        raise ValueError("causal prefix/full-sequence check produced no comparable example: {}".format(", ".join(missing_causal_checks)))
+    print(json.dumps({"event": "probe_alignment_check_complete", "alignment": alignment, "causal_prefix_full_alignment": causal_alignment}, ensure_ascii=False), flush=True)
     feature_bytes = sum(len(examples) for examples in raw.values()) * len(sources) * config.d_model * 4
     disk_free = shutil.disk_usage(output).free
     if feature_bytes + 2**30 > disk_free:
@@ -327,10 +474,15 @@ def main():
         "move_encoding": move_encoding,
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
+        "evaluation_input_rap": False,
+        "split_game_counts": split_game_counts,
+        "game_splits_disjoint": True,
         "settings": vars(args),
         "history_distances": list(args.history_distances),
         "sources": sources,
         "amp": amp_name,
+        "alignment": alignment,
+        "causal_prefix_full_alignment": causal_alignment,
         "majority_baseline": state_metrics(extracted["evaluation"][1], *majority),
         "probe_results": {},
     }

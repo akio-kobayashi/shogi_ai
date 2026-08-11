@@ -132,6 +132,22 @@ class ModelTest(unittest.TestCase):
             first.recurrent_states[:, :9], second.recurrent_states[:, :9]
         )
 
+    def test_prefix_hidden_state_matches_full_sequence_at_same_position(self):
+        """未来tokenを追加しても，因果mask以前のh_preは変わらないことを確認する。"""
+        prefix = self.input_ids[:, :7]
+        full = self.input_ids
+        position = prefix.shape[1] - 1
+        for model_type in ("vanilla", "llama"):
+            model = __import__("models", fromlist=["build_model"]).build_model(
+                model_type, self.vanilla_config
+            ).eval()
+            prefix_output = model(prefix)
+            full_output = model(full)
+            for layer_prefix, layer_full in zip(prefix_output.hidden_states, full_output.hidden_states):
+                torch.testing.assert_close(
+                    layer_prefix[:, -1], layer_full[:, position], rtol=1e-5, atol=1e-6
+                )
+
     def test_parameter_count_is_reported(self):
         from models import (
             T2MLRTransformer,

@@ -118,8 +118,8 @@ def parse_args() -> argparse.Namespace:
         help="factorized_v3は125語彙を用い，指手を移動先座標で終える",
     )
     parser.add_argument(
-        "--state-prompt-mode", choices=("explicit",), default="explicit",
-        help="factorized_v3では開始局面を必ず明示する",
+        "--state-prompt-mode", choices=("implicit_initial",), default="implicit_initial",
+        help="現行の第1・第2段階はimplicit_initialだけを許可する",
     )
     parser.add_argument(
         "--start-selection", choices=("fixed_initial",), default="fixed_initial",
@@ -334,6 +334,10 @@ def main() -> None:
         dataset_payload = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
         if dataset_payload.get("move_encoding") != MOVE_ENCODING or int(dataset_payload.get("schema_version", -1)) != FACTORIZED_SCHEMA_VERSION:
             raise ValueError("dataset manifest is not factorized_v3")
+        if dataset_payload.get("stage_1_2_input_mode") != "implicit_standard_initial":
+            raise ValueError(
+                "dataset manifest does not declare the current implicit-standard-initial experiment"
+            )
     runtime_marker("vocabulary_loaded", vocab_size=len(vocabulary))
     device = resolve_device(args.device)
     amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)

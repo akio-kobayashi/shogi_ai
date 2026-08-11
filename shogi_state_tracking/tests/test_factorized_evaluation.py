@@ -29,10 +29,12 @@ class FactorizedEvaluationTest(unittest.TestCase):
             "move_annotations": [{"eligible": True, "piece": "<P>", "source": "<SQ_7g>"}],
             "start_candidates": [{"start_ply": 0, "state_prompt_tokens": state, "position_scope": "unseen_position"}],
             "evaluation_steps": [{"ply": 0, "target_move": "7g7f", "legal_moves": ["7g7f"], "legal_sources_by_piece": {"<P>": ["<SQ_7g>"]}}],
+            "legal_drop_available_by_ply": [False],
+            "promotion_choice_available_by_ply": [False],
             "position_scope_by_ply": ["unseen_position"], "trajectory_scope": "strict_unseen_position",
         }
 
-    def test_implicit_initial_is_rejected(self):
+    def test_stage_1_implicit_initial_omits_the_stored_prompt(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from factorized_prompt_data import FactorizedPromptSequenceDataset
 
@@ -40,11 +42,17 @@ class FactorizedEvaluationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "train.jsonl"
             path.write_text(json.dumps(self.record()) + "\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                FactorizedPromptSequenceDataset(
-                    str(path), vocab, state_prompt_mode="implicit_initial", start_selection="fixed_initial",
-                    randomize_each_epoch=False,
-                )
+            implicit = FactorizedPromptSequenceDataset(
+                str(path), vocab, state_prompt_mode="implicit_initial", start_selection="fixed_initial",
+                randomize_each_epoch=False,
+            )[0]
+            explicit = FactorizedPromptSequenceDataset(
+                str(path), vocab, state_prompt_mode="explicit", start_selection="fixed_initial",
+                randomize_each_epoch=False,
+            )[0]
+        self.assertEqual(implicit["start_ply"], 0)
+        self.assertLess(len(implicit["input_ids"]), len(explicit["input_ids"]))
+        self.assertEqual(int(implicit["move_boundary_mask"].sum()), 1)
 
     def test_standard_initial_sfen_requires_all_nine_pawns(self):
         from factorized_prompt_data import is_standard_initial_sfen
@@ -113,7 +121,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 torch.save({
                     "model_type": model_type, "config": config.to_dict(),
                     "model_state_dict": model.state_dict(),
-                    "new_prompt": {"move_encoding": "factorized_v3_no_eom", "state_prompt_mode": "explicit", "start_selection": "fixed_initial"},
+                    "new_prompt": {"move_encoding": "factorized_v3_no_eom", "state_prompt_mode": "implicit_initial", "start_selection": "fixed_initial"},
                 }, checkpoint)
                 output = root / (model_type + ".json")
                 argv = [
@@ -129,6 +137,79 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 self.assertEqual(payload["model_type"], model_type)
                 self.assertEqual(payload["metrics"]["primary"]["queries"], 1)
                 self.assertEqual(payload["metrics"]["primary"]["greedy_syntactic_rate"], 1.0)
+
+    def test_action_probe_queries_use_correct_postfix_positions(self):
+        from evaluate_factorized_action_probes import read_queries
+        from factorized_prompt import factorized_vocabulary_tokens
+
+        vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
+        record = {
+            "game_id": "action-probe",
+            "start_candidates": [{"start_ply": 0, "state_prompt_tokens": []}],
+            "move_tokens": ["7g7f", "2b3c+", "P*5e"],
+            "legal_drop_available_by_ply": [False, True, True],
+            "promotion_choice_available_by_ply": [False, True, False],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            queries = read_queries(path, vocab, "implicit_initial", (0, 1, 2), 100, 512)
+
+        self.assertEqual(queries["actual_destination_nonpromote"][0]["tokens"], ["<BOS>", "<MOVES>", "<SQ_7g>"])
+        self.assertEqual(queries["actual_destination_promote"][0]["tokens"], ["<BOS>", "<MOVES>", "<SQ_7g>", "<SQ_7f>", "<SQ_2b>", "<PROMOTE>"])
+        self.assertEqual(queries["actual_drop_destination"][0]["tokens"], ["<BOS>", "<MOVES>", "<SQ_7g>", "<SQ_7f>", "<SQ_2b>", "<PROMOTE>", "<SQ_3c>", "<DROP>", "<P>"])
+        self.assertEqual(queries["actual_destination_promote"][0]["target"], 20)
+        self.assertEqual([item["target"] for item in queries["actual_promote_optional"]], [1])
+        self.assertEqual(queries["actual_drop_destination"][0]["target"], 40)
+        self.assertEqual([item["target"] for item in queries["drop_available"]], [0, 1, 1])
+
+    def test_action_probe_length_bucketing_keeps_labels_aligned(self):
+        from evaluate_factorized_action_probes import extract_features
+
+        class FakeModel:
+            config = SimpleNamespace(d_model=1)
+
+            def __call__(self, input_ids, **kwargs):
+                # 最終入力tokenを特徴量とし，queryの順序を直接観測可能にする．
+                hidden = input_ids.to(torch.float32).unsqueeze(-1)
+                return SimpleNamespace(hidden_states=(hidden,))
+
+        vocabulary = {"<PAD>": 0, "<BOS>": 1, "<MOVES>": 2, "<SQ_1a>": 3}
+        queries = [
+            {"tokens": ["<BOS>", "<MOVES>", "<SQ_1a>"], "target": 30, "recurrent_start": 2},
+            {"tokens": ["<BOS>", "<MOVES>"], "target": 20, "recurrent_start": 2},
+        ]
+        features, labels = extract_features(
+            FakeModel(), queries, vocabulary, ["layer_0"], torch.device("cpu"),
+            batch_size=2, amp_dtype=None, pool_batches=8, progress=0, label="test",
+        )
+        self.assertEqual(labels.tolist(), [20, 30])
+        self.assertEqual(features["layer_0"].flatten().tolist(), [2.0, 3.0])
+
+    def test_optional_promotion_fallback_is_for_the_target_move(self):
+        from evaluate_factorized_action_probes import _promotion_choice_available_by_ply
+
+        record = {
+            "evaluation_steps": [{
+                "target_move": "7g7f",
+                # 別の指手だけが成り／不成りを選べても，targetは任意成りではない．
+                "legal_moves": ["7g7f", "2b3c", "2b3c+"],
+            }]
+        }
+        self.assertEqual(_promotion_choice_available_by_ply(record, 1), [False])
+
+    def test_game_split_overlap_is_rejected(self):
+        from evaluate_factorized_action_probes import assert_disjoint_game_ids
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {}
+            for split, game_id in (("train", "same"), ("validation", "valid"), ("evaluation", "same")):
+                path = root / (split + ".jsonl")
+                path.write_text(json.dumps({"game_id": game_id}) + "\n", encoding="utf-8")
+                paths[split] = path
+            with self.assertRaisesRegex(ValueError, "game_id overlap"):
+                assert_disjoint_game_ids(paths)
 
     def test_move_query_reader_is_bounded_by_batch_size(self):
         from evaluate_factorized_moves import iter_query_batches

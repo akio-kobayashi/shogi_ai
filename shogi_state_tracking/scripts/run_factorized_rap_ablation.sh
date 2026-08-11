@@ -15,7 +15,7 @@ MODEL_TYPE="${MODEL_TYPE:-llama}"
 MODEL_SIZE="${MODEL_SIZE:-base}"
 RAP_RATES="${RAP_RATES:-0.0,0.05,0.15,0.30,1.0}"
 SEEDS="${SEEDS:-20260802}"
-EVAL_STAGE="${EVAL_STAGE:-moves}"
+EVAL_STAGE="${EVAL_STAGE:-main}"
 VOCAB="${DATASET_DIR}/vocab.json"
 MANIFEST="${DATASET_DIR}/dataset_manifest.json"
 for path in "${DATASET_DIR}/train.jsonl" "${DATASET_DIR}/validation.jsonl" "${DATASET_DIR}/evaluation.jsonl" "${VOCAB}" "${MANIFEST}"; do
@@ -31,7 +31,7 @@ for seed in "${seeds[@]}"; do
   for rate in "${rates[@]}"; do
     mode=rap
     [[ "${rate}" == 0 || "${rate}" == 0.0 || "${rate}" == 0.00 ]] && mode=vanilla
-    output="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/${mode}-p${rate}/seed-${seed}"
+    output="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${mode}-p${rate}/seed-${seed}"
     if [[ "${FORCE_TRAIN:-0}" == 1 || ! -f "${output}/best.pt" ]]; then
       SEED="${seed}" MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" ANNOTATION_MODE="${mode}" \
         ANNOTATION_PROBABILITY="${rate}" BATCH_SIZE="${BATCH_SIZE:-8}" NUM_WORKERS="${NUM_WORKERS:-0}" \

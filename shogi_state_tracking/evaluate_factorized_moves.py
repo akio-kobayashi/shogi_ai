@@ -98,7 +98,7 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
             steps = {int(step["ply"]): step for step in record.get("evaluation_steps", [])}
             for candidate in candidates:
                 start = int(candidate["start_ply"])
-                state = list(candidate["state_prompt_tokens"])
+                state = [] if args.state_prompt_mode == "implicit_initial" else list(candidate["state_prompt_tokens"])
                 base = ["<BOS>", *state, "<MOVES>"]
                 history = []
                 for distance in range(max(wanted) + 1):
@@ -380,8 +380,8 @@ def main():
     checkpoint_settings = checkpoint.get("new_prompt", {})
     args.state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     args.start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
-    if args.state_prompt_mode != "explicit" or args.start_selection != "fixed_initial":
-        raise ValueError("factorized_v3 evaluation requires explicit fixed-initial input")
+    if args.state_prompt_mode != "implicit_initial" or args.start_selection != "fixed_initial":
+        raise ValueError("current factorized_v3 evaluation accepts only implicit fixed-initial checkpoints")
     if config.vocab_size != len(vocabulary):
         raise ValueError("checkpoint and vocabulary sizes differ")
     device = resolve_device(args.device)
@@ -473,6 +473,7 @@ def main():
         "checkpoint": args.checkpoint,
         "model_type": model_type,
         "move_encoding": MOVE_ENCODING,
+        "evaluation_input_rap": False,
         "settings": vars(args),
         "amp": amp_name,
         "metrics": {

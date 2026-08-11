@@ -36,7 +36,7 @@ done
 case "${MODEL_TYPE}" in llama|vanilla) ;; *) echo "--model-type must be llama or vanilla" >&2; exit 2 ;; esac
 case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small, base, or large" >&2; exit 2 ;; esac
 
-OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}/seed-${SEED:-20260802}"
+OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}/seed-${SEED:-20260802}"
 VOCAB="${DATASET_DIR}/vocab.json"
 mkdir -p "${OUTPUT_DIR}"
 [[ -f "${VOCAB}" ]] || { echo "missing ${VOCAB}; run build_factorized_prompt_dataset.sh first" >&2; exit 2; }
@@ -58,7 +58,7 @@ set +e
   --model-type "${MODEL_TYPE}" \
   --model-size "${MODEL_SIZE}" \
   --move-encoding factorized_v3_no_eom \
-  --state-prompt-mode explicit \
+  --state-prompt-mode implicit_initial \
   --start-selection fixed_initial \
   --annotation-mode "${ANNOTATION_MODE}" \
   --annotation-probability "${ANNOTATION_PROBABILITY}" \

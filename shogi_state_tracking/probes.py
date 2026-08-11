@@ -81,12 +81,14 @@ def replay_probe_targets(start_sfen: str, move_tokens: Sequence[str]) -> ProbeTa
     boards: List[List[int]] = []
     hands: List[List[int]] = []
     turns: List[int] = []
+    checks: List[int] = []
 
     def append_current() -> None:
         board_target, hand_target, turn_target = board_state_targets(board, cshogi)
         boards.append(board_target)
         hands.append(hand_target)
         turns.append(turn_target)
+        checks.append(int(bool(board.is_check())))
 
     append_current()
     for ply, move_usi in enumerate(move_tokens, 1):
@@ -102,6 +104,7 @@ def replay_probe_targets(start_sfen: str, move_tokens: Sequence[str]) -> ProbeTa
         board=torch.tensor(boards, dtype=torch.long),
         hands=torch.tensor(hands, dtype=torch.long),
         turn=torch.tensor(turns, dtype=torch.long),
+        in_check=torch.tensor(checks, dtype=torch.long),
     )
 
 
