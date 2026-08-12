@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -105,6 +106,60 @@ class FactorizedEvaluationTest(unittest.TestCase):
             self.assertEqual(int(metrics["hint"]["targets"]), 1)
             self.assertEqual(int(metrics["eos"]["targets"]), 1)
 
+    def test_factorized_loss_preserves_action_normalization_and_scales_rap_by_count(self):
+        """q=0の指手損失を保ち，RAP NLLの和だけを同じ分子へ加える．"""
+        from train_new_prompt import loss_for_batch
+
+        class PositionModel(torch.nn.Module):
+            def forward(self, input_ids, attention_mask=None, recurrent_mask=None, output_hidden_states=False):
+                del attention_mask, recurrent_mask, output_hidden_states
+                logits = torch.zeros((*input_ids.shape, 5), dtype=torch.float32)
+                logits[0, 0, 1] = 2.0
+                logits[0, 1, 2] = -1.0
+                logits[0, 2, 3] = 1.0
+                return SimpleNamespace(logits=logits)
+
+        labels = torch.tensor([[1, 2, 3]])
+        weights = torch.tensor([[1.0, 1.0, 0.25]])
+        batch = {
+            "input_ids": torch.tensor([[0, 1, 2]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.bool),
+            "recurrent_mask": torch.zeros((1, 3), dtype=torch.bool),
+            "labels": labels,
+            "loss_weights": weights,
+            "move_target_mask": torch.tensor([[True, True, False]]),
+            "hint_target_mask": torch.tensor([[False, False, True]]),
+            "eos_target_mask": torch.zeros((1, 3), dtype=torch.bool),
+            "move_unit_weight": torch.tensor([[1.0, 1.0, 0.0]]),
+            "move_boundary_mask": torch.tensor([[False, True, False]]),
+        }
+        model = PositionModel()
+        loss, metrics = loss_for_batch(model, batch, torch.device("cpu"))
+        token_nll = torch.nn.functional.cross_entropy(
+            model(batch["input_ids"]).logits.reshape(-1, 5), labels.reshape(-1), reduction="none"
+        ).reshape_as(labels)
+        # 2 subtokenで1指手，RAP重み0.25．分母は従来どおり指手数1である．
+        expected = (token_nll[0, :2].sum() + 0.25 * token_nll[0, 2]) / 1.0
+        self.assertTrue(torch.allclose(loss.detach(), expected))
+        self.assertTrue(torch.allclose(metrics["combined_weight"], torch.tensor(1.0)))
+
+    def test_canonical_nll_masks_rap_piece_logits_except_after_drop(self):
+        from evaluate_factorized_moves import canonical_nll_for_component
+        from factorized_prompt import DROP_TOKEN, PIECE_TOKENS, factorized_vocabulary_tokens
+
+        vocabulary = {
+            token: index for index, token in enumerate(factorized_vocabulary_tokens())
+        }
+        vector = torch.zeros(len(vocabulary))
+        square_target = vocabulary["<SQ_7g>"]
+        nll = canonical_nll_for_component(vector, square_target, [], vocabulary)
+        self.assertAlmostEqual(nll, math.log(len(vocabulary) - len(PIECE_TOKENS)), places=6)
+        drop_piece_target = vocabulary["<P>"]
+        drop_nll = canonical_nll_for_component(
+            vector, drop_piece_target, [vocabulary[DROP_TOKEN]], vocabulary
+        )
+        self.assertAlmostEqual(drop_nll, math.log(len(vocabulary)), places=6)
+
     def test_eos_is_supervised_only_for_complete_games(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from factorized_prompt_data import FactorizedPromptSequenceDataset
@@ -167,6 +222,8 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 self.assertEqual(payload["model_type"], model_type)
                 self.assertEqual(payload["metrics"]["primary"]["queries"], 1)
                 self.assertEqual(payload["metrics"]["primary"]["greedy_syntactic_rate"], 1.0)
+                self.assertIn("canonical_perplexity", payload["metrics"]["primary"])
+                self.assertIn("canonical_move_perplexity", payload["metrics"]["primary"])
 
     def test_action_probe_queries_use_correct_postfix_positions(self):
         from evaluate_factorized_action_probes import read_queries
@@ -325,6 +382,10 @@ class FactorizedEvaluationTest(unittest.TestCase):
             save_checkpoint(path, model, optimizer, args, 1, 1, 1.0, include_optimizer=False)
             payload = torch.load(path, map_location="cpu")
         self.assertNotIn("optimizer_state_dict", payload)
+        self.assertEqual(
+            payload["new_prompt"]["training_objective"],
+            "factorized_action_mle_proportional_rap_v1",
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from new_prompt import count_token, square_token, square_tokens
 FACTORIZED_SCHEMA_VERSION = 4
 MOVE_ENCODING = "factorized_v3_no_eom"
 TERMINAL_ENCODING = "eos_on_complete_decisive_game_v1"
+TRAINING_OBJECTIVE = "factorized_action_mle_proportional_rap_v1"
 DROP_TOKEN = "<DROP>"
 PROMOTE_TOKEN = "<PROMOTE>"
 DROP_PIECES = "PLNSGBR"

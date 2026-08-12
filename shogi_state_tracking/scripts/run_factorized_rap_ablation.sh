@@ -55,9 +55,25 @@ for seed in "${seeds[@]}"; do
   for rate in "${rates[@]}"; do
     mode=rap
     [[ "${rate}" == 0 || "${rate}" == 0.0 || "${rate}" == 0.00 ]] && mode=vanilla
-    output="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${mode}-p${rate}/seed-${seed}"
+    run_variant=""
+    [[ "${mode}" == rap ]] && run_variant="proportional-rap-v1"
+    condition="${mode}-p${rate}"
+    [[ -n "${run_variant}" ]] && condition="${condition}-${run_variant}"
+    output="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${condition}/seed-${seed}"
+    objective_current=0
+    if [[ -f "${output}/best.pt" && -f "${output}/run_manifest.json" ]] \
+      && grep -q '"training_objective"[[:space:]]*:[[:space:]]*"factorized_action_mle_proportional_rap_v1"' "${output}/run_manifest.json"; then
+      objective_current=1
+    fi
+    # q=0では修正前後の数式が完全に同じなので，既存vanilla checkpointを
+    # そのまま比較に使える．旧RAP checkpointだけは再利用を拒否する．
+    if [[ -f "${output}/best.pt" && "${objective_current}" != 1 && "${mode}" != vanilla ]]; then
+      echo "legacy-loss checkpoint exists at ${output}; use a fresh RESULTS_DIR (legacy checkpoints are never overwritten automatically)" >&2
+      exit 2
+    fi
     if [[ "${FORCE_TRAIN:-0}" == 1 || ! -f "${output}/best.pt" ]]; then
       SEED="${seed}" MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" ANNOTATION_MODE="${mode}" \
+        RUN_VARIANT="${run_variant}" \
         ANNOTATION_PROBABILITY="${rate}" BATCH_SIZE="${BATCH_SIZE:-8}" NUM_WORKERS="${NUM_WORKERS:-0}" \
         MAX_SEQ_LEN="${MAX_SEQ_LEN:-2560}" MAX_MOVES="${MAX_MOVES:-512}" MAX_HINTS="${MAX_HINTS:-512}" \
         EPOCHS="${EPOCHS:-50}" "${SCRIPT_DIR}/scripts/run_factorized_baseline.sh" \

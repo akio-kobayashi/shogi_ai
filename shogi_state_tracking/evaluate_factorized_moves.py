@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 from data import load_vocabulary
-from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, TERMINAL_ENCODING, factorize_usi, unfactorize_usi
+from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PIECE_TOKENS, PROMOTE_TOKEN, TERMINAL_ENCODING, TRAINING_OBJECTIVE, factorize_usi, unfactorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
@@ -176,6 +176,22 @@ def grammar_finished(current, vocabulary):
         (len(current) == 2 and current[0] in square_set)
         or (len(current) == 3 and (current[0] == vocabulary[DROP_TOKEN] or current[1] == vocabulary[PROMOTE_TOKEN]))
     )
+
+
+def canonical_nll_for_component(vector, target_id, current, vocabulary):
+    """評価入力に現れないRAP候補を除外した次token NLL．
+
+    Toshniwalらのcanonical perplexityに対応して，RAP用の駒種logitを
+    softmax前に除く．将棋では駒打ち本体が駒種tokenを必要とするため，
+    ``<DROP>`` 直後だけは駒種を除外しない．指手文法全体には制約しない．
+    """
+    drop_id = vocabulary[DROP_TOKEN]
+    if list(current) == [drop_id]:
+        canonical = vector.float()
+    else:
+        canonical = vector.float().clone()
+        canonical[[vocabulary[token] for token in PIECE_TOKENS]] = -torch.inf
+    return -float(torch.log_softmax(canonical, dim=-1)[target_id])
 
 
 def restricted_candidates(vector, allowed, k):
@@ -352,10 +368,17 @@ def summarize(total):
     n = int(total["queries"])
     if not n:
         return None
+    subtoken_count = int(total["move_subtokens"])
+    if not subtoken_count:
+        raise ValueError("move evaluation has no predicted subtokens")
+    raw_token_cross_entropy = total["move_nll"] / subtoken_count
+    canonical_cross_entropy = total["canonical_move_nll"] / subtoken_count
+    grammar_token_cross_entropy = total["grammar_normalized_move_nll"] / subtoken_count
     result = {"queries": n}
     for key, value in total.items():
-        if key != "queries":
+        if key not in {"queries", "move_subtokens"}:
             result[key] = value / n
+    result["move_subtokens"] = subtoken_count
     if total.get("promotion_decision_applicable", 0):
         result["promotion_decision_top1"] = (
             total["promotion_decision_correct"] / total["promotion_decision_applicable"]
@@ -363,7 +386,15 @@ def summarize(total):
         result["promotion_decision_examples"] = int(total["promotion_decision_applicable"])
     result.pop("promotion_decision_correct", None)
     result.pop("promotion_decision_applicable", None)
+    result["raw_token_cross_entropy"] = raw_token_cross_entropy
+    result["raw_token_perplexity"] = math.exp(min(raw_token_cross_entropy, 20.0))
+    result["canonical_cross_entropy"] = canonical_cross_entropy
+    result["canonical_perplexity"] = math.exp(min(canonical_cross_entropy, 20.0))
+    result["grammar_normalized_token_cross_entropy"] = grammar_token_cross_entropy
+    result["grammar_normalized_token_perplexity"] = math.exp(min(grammar_token_cross_entropy, 20.0))
+    # 以下は1指手を1標本としてNLL和を平均したaction-levelの補助指標．
     result["move_perplexity"] = math.exp(min(result["move_nll"], 20.0))
+    result["canonical_move_perplexity"] = math.exp(min(result["canonical_move_nll"], 20.0))
     result["grammar_normalized_move_perplexity"] = math.exp(min(result["grammar_normalized_move_nll"], 20.0))
     return result
 
@@ -380,6 +411,12 @@ def main():
         raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     config = ModelConfig(**checkpoint["config"])
     checkpoint_settings = checkpoint.get("new_prompt", {})
+    recorded_objective = checkpoint_settings.get("training_objective")
+    if recorded_objective is None and (
+        checkpoint_settings.get("annotation_mode") == "vanilla"
+        and float(checkpoint_settings.get("annotation_probability", 0.0)) == 0.0
+    ):
+        recorded_objective = "legacy_action_mle_q0_compatible"
     args.state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     args.start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
     if args.state_prompt_mode != "implicit_initial" or args.start_selection != "fixed_initial":
@@ -413,7 +450,7 @@ def main():
             )
             for row, (query, tokens, ids, generated) in enumerate(zip(batch, targets, target_ids, beam_moves)):
                 prefix_length = len(query["prefix_ids"])
-                nll = grammar_nll = 0.0
+                nll = canonical_nll = grammar_nll = 0.0
                 component_top1 = component_top5 = True
                 source_top1 = source_top5 = destination_top1 = destination_top5 = 0
                 promotion_correct = promotion_applicable = 0
@@ -421,6 +458,9 @@ def main():
                 for offset, target_id in enumerate(ids):
                     vector = logits[row, prefix_length + offset - 1].float()
                     nll -= float(torch.log_softmax(vector, dim=-1)[target_id])
+                    canonical_nll += canonical_nll_for_component(
+                        vector, target_id, current_ids, vocabulary
+                    )
                     allowed = grammar_allowed(current_ids, vocabulary)
                     allowed_logits = vector[allowed]
                     grammar_nll -= float(torch.log_softmax(allowed_logits, dim=-1)[allowed.index(target_id)])
@@ -442,7 +482,9 @@ def main():
                     math.exp(score) for move, score in generated if move in query["legal_moves"]
                 )
                 values = {
+                    "move_subtokens": len(ids),
                     "move_nll": nll,
+                    "canonical_move_nll": canonical_nll,
                     "grammar_normalized_move_nll": grammar_nll,
                     "source_top1": source_top1, "source_top5": source_top5,
                     "destination_given_source_top1": destination_top1,
@@ -471,10 +513,11 @@ def main():
         raise ValueError("no evaluation queries")
 
     output = {
-        "format_version": 3,
+        "format_version": 4,
         "checkpoint": args.checkpoint,
         "model_type": model_type,
         "move_encoding": MOVE_ENCODING,
+        "training_objective": recorded_objective or "legacy_unknown",
         "evaluation_input_rap": False,
         "settings": vars(args),
         "amp": amp_name,
@@ -486,6 +529,8 @@ def main():
             "by_position_scope": {key: summarize(value) for key, value in by_position.items()},
         },
         "notes": {
+            "canonical_perplexity": "token-level perplexity after masking RAP-only piece-token logits before normalization; intrinsic DROP piece tokens remain available after DROP",
+            "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
             "greedy_and_beam": "autonomous decoding is normalized within the factorized move grammar, not shogi legality",
             "legal_probability_mass": "beam_legal_probability_lower_bound sums only legal moves retained by beam search; exact mass requires scoring every legal move sequence",

@@ -18,6 +18,7 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-2560}"
 MAX_MOVES="${MAX_MOVES:-512}"
 MAX_HINTS="${MAX_HINTS:-512}"
 EPOCHS="${EPOCHS:-50}"
+RUN_VARIANT="${RUN_VARIANT:-}"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -36,7 +37,12 @@ done
 case "${MODEL_TYPE}" in llama|vanilla) ;; *) echo "--model-type must be llama or vanilla" >&2; exit 2 ;; esac
 case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small, base, or large" >&2; exit 2 ;; esac
 
-OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}/seed-${SEED:-20260802}"
+if [[ "${ANNOTATION_MODE}" == rap && -z "${RUN_VARIANT}" ]]; then
+  RUN_VARIANT="proportional-rap-v1"
+fi
+condition="${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}"
+[[ -n "${RUN_VARIANT}" ]] && condition="${condition}-${RUN_VARIANT}"
+OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${condition}/seed-${SEED:-20260802}"
 VOCAB="${DATASET_DIR}/vocab.json"
 mkdir -p "${OUTPUT_DIR}"
 [[ -f "${VOCAB}" ]] || { echo "missing ${VOCAB}; run build_factorized_prompt_dataset.sh first" >&2; exit 2; }

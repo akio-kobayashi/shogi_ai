@@ -25,7 +25,7 @@ from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt_data import collate_new_prompt_sequences
 from factorized_prompt_data import FactorizedPromptSequenceDataset
-from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING, TERMINAL_ENCODING
+from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING, TERMINAL_ENCODING, TRAINING_OBJECTIVE
 from train_model import amp_context, resolve_amp, resolve_device
 
 try:
@@ -214,23 +214,22 @@ def loss_for_batch(model, batch, device):
         eos_weight = eos_weights[0] if eos_weights.numel() else per_token.new_zeros(())
         eos_nll_sum = per_token.masked_select(eos_mask).sum()
         primary_weight = move_count.to(per_token.dtype) + eos_weight * eos_count.to(per_token.dtype)
-        primary_loss = (move_nll_sum + eos_weight * eos_nll_sum) / primary_weight
-        hint_count = hint_mask.sum()
-        hint_loss = (
-            per_token.masked_select(hint_mask).mean()
-            if bool(hint_count > 0)
-            else per_token.new_zeros(())
-        )
-        hint_weights = effective_weights.masked_select(hint_mask)
-        hint_scale = hint_weights[0] if hint_weights.numel() else per_token.new_zeros(())
-        loss = primary_loss + hint_scale * hint_loss
-        combined_nll_sum = primary_loss.detach() * primary_weight.detach()
+        weighted_hint_nll_sum = (per_token * effective_weights * hint_mask).sum()
+        weighted_nll_sum = move_nll_sum + eos_weight * eos_nll_sum + weighted_hint_nll_sum
+        loss = weighted_nll_sum / primary_weight
+        combined_nll_sum = weighted_nll_sum.detach()
         combined_weight = primary_weight.detach()
     else:
         move_count = move_mask.sum()
-        loss = (per_token * effective_weights).sum() / weight_sum
-        combined_nll_sum = (per_token * effective_weights).sum().detach()
+        weighted_nll_sum = (per_token * effective_weights).sum()
+        loss = weighted_nll_sum / weight_sum
+        combined_nll_sum = weighted_nll_sum.detach()
         combined_weight = weight_sum.detach()
+
+    # factorized系列では従来の指手単位正規化を保つ．RAP平均を独立に足すと
+    # 挿入率qによらずRAPがほぼ1タスク分の重みを持つため，RAP NLLの「和」を
+    # 指手損失の分子へ加える．これによりq=0の目的関数は従来と完全に同じで，
+    # RAPの追加寄与だけが実際の挿入token数に比例する．
 
     # 注釈の有無が平均lossに埋もれないよう，重み付け前のCEと実トークン数を返す。
     # move_mask/hint_maskはlabelsと同じ位置で，それぞれ排他的に定義される。
@@ -312,6 +311,7 @@ def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss, includ
             "hint_loss_weight": args.hint_loss_weight, "max_hints": args.max_hints,
             "eos_loss_weight": args.eos_loss_weight,
             "terminal_encoding": TERMINAL_ENCODING,
+            "training_objective": TRAINING_OBJECTIVE,
             "max_moves": args.max_moves, "seed": args.seed,
         },
     }
@@ -444,13 +444,25 @@ def main() -> None:
             raise ValueError("resume checkpoint model_type differs from requested model_type")
         if dict(resume.get("config", {})) != config.to_dict():
             raise ValueError("resume checkpoint model config differs from requested config")
+        resume_objective = resume.get("new_prompt", {}).get("training_objective")
+        compatible_legacy_vanilla = (
+            resume_objective is None
+            and args.annotation_mode == "vanilla"
+            and args.annotation_probability == 0.0
+        )
+        if resume_objective != TRAINING_OBJECTIVE and not compatible_legacy_vanilla:
+            raise ValueError(
+                "resume checkpoint uses a legacy loss; start a fresh run for {}".format(
+                    TRAINING_OBJECTIVE
+                )
+            )
         model.load_state_dict(resume["model_state_dict"])
         if "optimizer_state_dict" in resume: optimizer.load_state_dict(resume["optimizer_state_dict"])
         start_epoch = int(resume.get("epoch", 0)); step = int(resume.get("step", 0)); best_loss = float(resume.get("best_validation_loss", best_loss))
         # load_state_dict後もcheckpoint辞書を残すとmodel/optimizer stateを二重保持する。
         del resume
         gc.collect()
-    run = {"format_version": 1, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit(), "tensorboard": None if writer is None else str(tensorboard_dir.resolve())}
+    run = {"format_version": 1, "training_objective": TRAINING_OBJECTIVE, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit(), "tensorboard": None if writer is None else str(tensorboard_dir.resolve())}
     if args.dataset_manifest:
         dataset_manifest = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
         run["dataset"] = {"manifest": str(Path(args.dataset_manifest).resolve()), "schema_version": dataset_manifest.get("schema_version"), "terminal_encoding": dataset_manifest.get("terminal_encoding"), "vocab_sha256": dataset_manifest.get("vocab_sha256"), "splits": dataset_manifest.get("splits")}
@@ -573,7 +585,11 @@ def main() -> None:
         if args.max_steps and step >= args.max_steps:
             print(json.dumps({"event": "max_steps_reached", "epoch": epoch, "step": step, "max_steps": args.max_steps}, ensure_ascii=False), flush=True)
             break
-    history_path.write_text(json.dumps({"best_validation_loss": best_loss, "history": history}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    history_path.write_text(json.dumps({
+        "training_objective": TRAINING_OBJECTIVE,
+        "best_validation_loss": best_loss,
+        "history": history,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if not (output / "best.pt").is_file():
         raise FileNotFoundError(
             "training ended without best.pt; refusing to report run_complete"

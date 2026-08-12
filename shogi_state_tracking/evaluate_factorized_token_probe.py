@@ -12,7 +12,7 @@ import torch
 
 from data import load_vocabulary
 from evaluate_factorized_moves import padded_forward, parse_distances, resolve_device
-from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, annotation_piece_token, factorize_usi
+from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, TRAINING_OBJECTIVE, annotation_piece_token, factorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
@@ -113,6 +113,13 @@ def main():
         raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     config = ModelConfig(**payload["config"])
     checkpoint_settings = payload.get("new_prompt", {})
+    training_objective = checkpoint_settings.get("training_objective")
+    if training_objective is None and (
+        checkpoint_settings.get("annotation_mode") == "vanilla"
+        and float(checkpoint_settings.get("annotation_probability", 0.0)) == 0.0
+    ):
+        training_objective = "legacy_action_mle_q0_compatible"
+    training_objective = str(training_objective or "legacy_unknown")
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
     if state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
@@ -187,9 +194,11 @@ def main():
         return {"queries": n, **{key: number / n for key, number in value.items() if key != "queries"}}
 
     output = {
-        "format_version": 3,
+        "format_version": 4,
         "checkpoint": args.checkpoint,
         "move_encoding": MOVE_ENCODING,
+        "training_objective": training_objective,
+        "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
         "settings": vars(args),

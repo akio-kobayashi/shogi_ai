@@ -4,6 +4,8 @@
 
 現在の主実験は，通常移動へ駒種トークンを確率的に挿入するRAP（Randomly Annotated Piece type）の有無を比較する．盤面情報を直接教師として与えるのではなく，弱い駒種注釈が指手予測と内部状態の形成へ与える影響を評価する．
 
+学習目的は`factorized_action_mle_proportional_rap_v1`である．従来の指手単位正規化を維持し，RAP tokenのNLL和を同じ分子へ加えることで，RAPの寄与を実際の挿入数に比例させる．`q=0`の損失は修正前と同一なのでRAPなしモデルは再利用できるが，旧RAPモデルは再学習する．新RAPモデルの出力には`-proportional-rap-v1`を付け，旧checkpointと混在させない．token列とdataset schemaは変わらないので，現行factorized_v3 datasetの再生成は不要である．
+
 ## 現行仕様
 
 - 実験名：`factorized_v3`
@@ -171,12 +173,12 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 | `token` | RAP token probe |
 | `probes` | 盤面・持ち駒・手番などの線形状態プローブ |
 | `action-probes` | 指手構成要素の条件付き線形プローブ |
-| `main` | `moves`，`probes`，終端プローブ |
+| `main` | `moves`，`token`，`probes`，終端プローブ |
 | `all` | 上記すべて |
 
 主な評価指標は次のとおりである．
 
-- 指手cross entropy，perplexity，top-1／top-5
+- 指手cross entropy，raw／canonical／文法正規化perplexity，top-1／top-5
 - top-1合法率，top-5内合法手率，合法手への確率質量
 - 盤面81マスの正解率，occupied盤面精度，駒種別指標，盤面完全一致率
 - 持ち駒のslot精度，非零持ち駒精度，MAE，完全一致率

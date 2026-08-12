@@ -200,7 +200,8 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             ids = record["_move_ids"][move_index]
             token_ids.extend(ids)
             categories.extend(["move"] * len(ids))
-            # 指手内の全subtoken NLLを合計し，後段で移動先座標数（指手数）で割る．
+            # 指手subtokenはすべて標準的なtoken-level MLEの教師とする．
+            # move_weightsは後方互換な集計用であり，指手単位への再正規化には使わない．
             move_weights.extend([1.0] * len(ids))
             move_end.extend([False] * (len(ids) - 1) + [True])
         if complete_game:

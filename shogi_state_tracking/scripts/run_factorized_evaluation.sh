@@ -41,7 +41,7 @@ if [[ "${STAGE}" == moves || "${STAGE}" == main || "${STAGE}" == all ]]; then
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/move_evaluation.log"
 fi
 
-if [[ "${STAGE}" == token || "${STAGE}" == all ]]; then
+if [[ "${STAGE}" == token || "${STAGE}" == main || "${STAGE}" == all ]]; then
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_token_probe.py" \
     --checkpoint "${CHECKPOINT}" \
     --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
