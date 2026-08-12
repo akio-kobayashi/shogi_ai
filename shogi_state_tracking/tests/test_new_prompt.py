@@ -15,6 +15,16 @@ except ImportError:
 
 
 class NewPromptSchemaTest(unittest.TestCase):
+    def test_decisive_game_result_is_required_and_preserved(self):
+        from build_new_prompt_dataset import decisive_game_result
+
+        self.assertEqual(decisive_game_result({"game_result": 1}), 1)
+        self.assertEqual(decisive_game_result({"game_result": -1}), -1)
+        with self.assertRaisesRegex(ValueError, "missing game_result"):
+            decisive_game_result({})
+        with self.assertRaisesRegex(ValueError, "draw game"):
+            decisive_game_result({"game_result": 0})
+
     def test_position_scope_terminal_state_is_removed(self):
         from build_new_prompt_dataset import normalize_position_scopes
 

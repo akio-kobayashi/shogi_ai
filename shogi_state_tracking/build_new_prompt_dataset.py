@@ -31,6 +31,19 @@ from new_prompt import (
 EMPTY_BOARD_LABEL = "<EMPTY>"
 
 
+def decisive_game_result(record: Mapping[str, object]) -> int:
+    """上流で抽出済みの勝敗を検査し，中間artifactへ保持する．"""
+    if "game_result" not in record:
+        raise ValueError("source record is missing game_result")
+    try:
+        result = int(record["game_result"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid game_result: {}".format(record["game_result"])) from exc
+    if result == 0:
+        raise ValueError("draw game is not allowed in the decisive terminal experiment")
+    return result
+
+
 def import_cshogi():
     try:
         import cshogi  # type: ignore
@@ -137,6 +150,7 @@ def materialize_record(
     probe_offsets: Sequence[int],
     probe_start_plies: Sequence[int],
 ) -> Dict[str, object]:
+    game_result = decisive_game_result(record)
     moves = [str(value) for value in record["move_tokens"]]
     initial_sfen = str(record["initial_sfen"])
     annotations = annotate_game_moves(initial_sfen, moves, cshogi_module)
@@ -194,6 +208,7 @@ def materialize_record(
     result = {
         "schema_version": NEW_PROMPT_SCHEMA_VERSION,
         "game_id": str(record["game_id"]),
+        "game_result": game_result,
         "split": str(record.get("split", "")),
         "initial_sfen": initial_sfen,
         "move_tokens": moves,

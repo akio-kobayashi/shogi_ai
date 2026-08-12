@@ -53,7 +53,12 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
         raise ValueError("{}:{} missing move_tokens/move_annotations".format(split, line_number))
     if not is_standard_initial_sfen(str(record.get("initial_sfen", ""))):
         raise ValueError("{}:{} is not a standard-initial game".format(split, line_number))
-    game_result = int(record.get("game_result", 0))
+    if "game_result" not in record:
+        raise ValueError(
+            "{}:{} missing game_result; rebuild the intermediate new-prompt dataset"
+            .format(split, line_number)
+        )
+    game_result = int(record["game_result"])
     if game_result == 0:
         raise ValueError("{}:{} draw game is not allowed in the decisive terminal experiment".format(split, line_number))
     validate_move_annotations([str(value) for value in moves], [dict(value) for value in annotations])
