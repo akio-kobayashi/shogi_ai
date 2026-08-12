@@ -219,6 +219,36 @@ TensorBoardは次のように起動する．
 ./scripts/launch_tensorboard.sh factorized_v3_eos_results
 ```
 
+## 分析結果の転送
+
+すべての学習・評価が終了したことを確認した後，独立した後処理として，数値結果，
+学習履歴，run manifest，ログ，dataset manifestを一つの
+archiveへまとめられる．datasetのJSONLと`best.pt`／`last.pt`は含めないため，実験環境
+そのものを移行するpackageより小さい．テキスト中の絶対pathとhome名も置換する．
+
+```bash
+./scripts/package_analysis_results.sh \
+  factorized_v3_eos_results \
+  factorized_v3_analysis.tar.gz \
+  --dataset-dir factorized_v3_eos_data
+```
+
+この`factorized_v3_analysis.tar.gz`を転送すれば，RAP条件間の指手指標，状態probe，
+指手probe，終端probe，学習曲線を分析できる．盤面ヒートマップを別計算機で再生成する
+ためにprobe重みや予測tensorも必要な場合だけ，次を追加する．
+
+```bash
+./scripts/package_analysis_results.sh \
+  factorized_v3_eos_results \
+  factorized_v3_analysis_with_probes.tar.gz \
+  --dataset-dir factorized_v3_eos_data \
+  --include-probe-artifacts
+```
+
+TensorBoard eventを含める場合は`--include-tensorboard`，ログを除く場合は`--no-logs`を
+指定する．archive内の`COLLECTION_MANIFEST.json`には，収録ファイルのSHA-256，実行code
+のcommit，見つからなかった任意評価結果を記録する．
+
 ## モデル
 
 現行主実験では次のdecoderを選択できる．
