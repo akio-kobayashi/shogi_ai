@@ -15,8 +15,9 @@ from create_dataset import HAND_ORDER, all_usi_move_tokens
 from new_prompt import count_token, square_token, square_tokens
 
 
-FACTORIZED_SCHEMA_VERSION = 3
+FACTORIZED_SCHEMA_VERSION = 4
 MOVE_ENCODING = "factorized_v3_no_eom"
+TERMINAL_ENCODING = "eos_on_complete_decisive_game_v1"
 DROP_TOKEN = "<DROP>"
 PROMOTE_TOKEN = "<PROMOTE>"
 DROP_PIECES = "PLNSGBR"
@@ -201,6 +202,7 @@ def write_factorized_vocabulary(path: str | Path) -> Dict[str, object]:
         "format": "shogi_canonical_state_prompt_factorized_moves",
         "token_to_id": {token: index for index, token in enumerate(tokens)},
         "move_encoding": MOVE_ENCODING,
+        "terminal_encoding": TERMINAL_ENCODING,
         "move_grammar": "source destination | source PROMOTE destination | DROP piece destination",
         "probe_position": "h_pre_at_moves_or_previous_destination; h_post_at_current_destination",
         "syntactic_usi_actions": len(all_usi_move_tokens()),

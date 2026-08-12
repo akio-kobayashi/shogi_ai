@@ -20,6 +20,11 @@ PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
   echo "checkpoint does not exist: ${CHECKPOINT}; evaluation is aborted" >&2
   exit 2
 }
+[[ -f "${DATASET_DIR}/dataset_manifest.json" ]] \
+  && grep -q '"terminal_encoding"[[:space:]]*:[[:space:]]*"eos_on_complete_decisive_game_v1"' "${DATASET_DIR}/dataset_manifest.json" || {
+  echo "dataset does not declare complete-game EOS supervision: ${DATASET_DIR}" >&2
+  exit 2
+}
 mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${STAGE}" == moves || "${STAGE}" == main || "${STAGE}" == all ]]; then
@@ -64,6 +69,25 @@ if [[ "${STAGE}" == probes || "${STAGE}" == main || "${STAGE}" == all ]]; then
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/probe_evaluation.log"
 fi
 
+if [[ "${STAGE}" == main || "${STAGE}" == all ]]; then
+  "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_action_probes.py" \
+    --checkpoint "${CHECKPOINT}" \
+    --vocab "${VOCAB}" \
+    --train-jsonl "${DATASET_DIR}/train.jsonl" \
+    --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
+    --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
+    --output-dir "${OUTPUT_DIR}/terminal-probe" \
+    --tasks terminal_next \
+    --batch-size "${ACTION_PROBE_BATCH_SIZE:-128}" \
+    --max-seq-len "${ACTION_PROBE_MAX_SEQ_LEN:-2560}" \
+    --max-train-examples "${TERMINAL_PROBE_MAX_TRAIN_EXAMPLES:-12000}" \
+    --max-validation-examples "${TERMINAL_PROBE_MAX_VALIDATION_EXAMPLES:-3000}" \
+    --max-evaluation-examples "${TERMINAL_PROBE_MAX_EVALUATION_EXAMPLES:-5000}" \
+    --length-bucket-pool-batches "${ACTION_PROBE_LENGTH_BUCKET_POOL_BATCHES:-8}" \
+    --amp "${EVAL_AMP:-auto}" \
+    --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/terminal_probe.log"
+fi
+
 if [[ "${STAGE}" == action-probes || "${STAGE}" == all ]]; then
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_action_probes.py" \
     --checkpoint "${CHECKPOINT}" \
@@ -72,6 +96,7 @@ if [[ "${STAGE}" == action-probes || "${STAGE}" == all ]]; then
     --validation-jsonl "${DATASET_DIR}/validation.jsonl" \
     --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
     --output-dir "${OUTPUT_DIR}/action-probes" \
+    --tasks "${ACTION_PROBE_TASKS:-actual_move_kind,actual_source,drop_available,actual_destination_nonpromote,actual_destination_promote,actual_promote,actual_promote_optional,actual_drop_piece,actual_drop_destination}" \
     --batch-size "${ACTION_PROBE_BATCH_SIZE:-128}" \
     --max-seq-len "${ACTION_PROBE_MAX_SEQ_LEN:-512}" \
     --max-train-examples "${ACTION_PROBE_MAX_TRAIN_EXAMPLES:-12000}" \

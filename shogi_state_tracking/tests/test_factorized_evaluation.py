@@ -24,6 +24,9 @@ class FactorizedEvaluationTest(unittest.TestCase):
                  "<BOARD_WHITE>", "<K>", "<SQ_5a>", "<HAND_BLACK>", "<HAND_WHITE>"]
         return {
             "game_id": "g",
+            "game_result": 1,
+            "terminal_encoding": "eos_on_complete_decisive_game_v1",
+            "terminal_token": "<EOS>",
             "initial_sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
             "move_tokens": ["7g7f"],
             "move_annotations": [{"eligible": True, "piece": "<P>", "source": "<SQ_7g>"}],
@@ -100,6 +103,33 @@ class FactorizedEvaluationTest(unittest.TestCase):
             self.assertAlmostEqual(float(batch["move_unit_weight"].sum()), 2.0)
             self.assertEqual(int(batch["move_boundary_mask"].sum()), 1)
             self.assertEqual(int(metrics["hint"]["targets"]), 1)
+            self.assertEqual(int(metrics["eos"]["targets"]), 1)
+
+    def test_eos_is_supervised_only_for_complete_games(self):
+        from factorized_prompt import factorized_vocabulary_tokens
+        from factorized_prompt_data import FactorizedPromptSequenceDataset
+
+        vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
+        record = self.record()
+        record["move_tokens"] = ["7g7f", "3c3d"]
+        record["move_annotations"] = [
+            {"eligible": True, "piece": "<P>", "source": "<SQ_7g>"},
+            {"eligible": True, "piece": "<P>", "source": "<SQ_3c>"},
+        ]
+        record.pop("factorized_move_ids", None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "train.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            complete = FactorizedPromptSequenceDataset(
+                str(path), vocab, max_moves=2, randomize_each_epoch=False,
+            )[0]
+            truncated = FactorizedPromptSequenceDataset(
+                str(path), vocab, max_moves=1, randomize_each_epoch=False,
+            )[0]
+        self.assertEqual(int(complete["input_ids"][-1]), vocab["<EOS>"])
+        self.assertEqual(int(complete["eos_target_mask"].sum()), 1)
+        self.assertNotEqual(int(truncated["input_ids"][-1]), vocab["<EOS>"])
+        self.assertEqual(int(truncated["eos_target_mask"].sum()), 0)
 
     def test_tiny_llama_and_vanilla_evaluation(self):
         from evaluate_factorized_moves import main
@@ -121,7 +151,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 torch.save({
                     "model_type": model_type, "config": config.to_dict(),
                     "model_state_dict": model.state_dict(),
-                    "new_prompt": {"move_encoding": "factorized_v3_no_eom", "state_prompt_mode": "implicit_initial", "start_selection": "fixed_initial"},
+                    "new_prompt": {"move_encoding": "factorized_v3_no_eom", "terminal_encoding": "eos_on_complete_decisive_game_v1", "state_prompt_mode": "implicit_initial", "start_selection": "fixed_initial"},
                 }, checkpoint)
                 output = root / (model_type + ".json")
                 argv = [
@@ -145,6 +175,8 @@ class FactorizedEvaluationTest(unittest.TestCase):
         vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
         record = {
             "game_id": "action-probe",
+            "game_result": 1,
+            "terminal_token": "<EOS>",
             "start_candidates": [{"start_ply": 0, "state_prompt_tokens": []}],
             "move_tokens": ["7g7f", "2b3c+", "P*5e"],
             "legal_drop_available_by_ply": [False, True, True],
@@ -162,6 +194,8 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual([item["target"] for item in queries["actual_promote_optional"]], [1])
         self.assertEqual(queries["actual_drop_destination"][0]["target"], 40)
         self.assertEqual([item["target"] for item in queries["drop_available"]], [0, 1, 1])
+        self.assertEqual([item["target"] for item in queries["terminal_next"]], [0, 1])
+        self.assertEqual(queries["terminal_next"][1]["tokens"][-1], "<SQ_5e>")
 
     def test_action_probe_length_bucketing_keeps_labels_aligned(self):
         from evaluate_factorized_action_probes import extract_features
@@ -284,7 +318,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
             model_type="vanilla", model_size="small", move_encoding="factorized_v3_no_eom",
             state_prompt_mode="explicit", start_selection="fixed_initial",
             annotation_mode="vanilla", annotation_probability=0.0,
-            hint_loss_weight=1.0, max_hints=0, max_moves=1, seed=1,
+            hint_loss_weight=1.0, eos_loss_weight=1.0, max_hints=0, max_moves=1, seed=1,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "best.pt"

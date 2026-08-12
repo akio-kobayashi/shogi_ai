@@ -14,6 +14,7 @@ from build_new_prompt_dataset import state_targets
 from factorized_prompt import (
     FACTORIZED_SCHEMA_VERSION,
     MOVE_ENCODING,
+    TERMINAL_ENCODING,
     annotation_piece_token,
     encode_state_prompt,
     factorize_usi,
@@ -52,6 +53,9 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
         raise ValueError("{}:{} missing move_tokens/move_annotations".format(split, line_number))
     if not is_standard_initial_sfen(str(record.get("initial_sfen", ""))):
         raise ValueError("{}:{} is not a standard-initial game".format(split, line_number))
+    game_result = int(record.get("game_result", 0))
+    if game_result == 0:
+        raise ValueError("{}:{} draw game is not allowed in the decisive terminal experiment".format(split, line_number))
     validate_move_annotations([str(value) for value in moves], [dict(value) for value in annotations])
     factorized = []
     for move in moves:
@@ -131,6 +135,8 @@ def transform_record(record, split, line_number, cshogi_module, token_to_id):
     output.update({
         "schema_version": FACTORIZED_SCHEMA_VERSION,
         "move_encoding": MOVE_ENCODING,
+        "terminal_encoding": TERMINAL_ENCODING,
+        "terminal_token": "<EOS>",
         "state_prompt_tokens": state_tokens,
         "state_prompt_token_ids": candidate["state_prompt_token_ids"],
         "move_annotations": normalized_annotations,
@@ -199,6 +205,8 @@ def main():
         "schema_version": FACTORIZED_SCHEMA_VERSION,
         "format": "shogi_canonical_state_prompt_factorized_moves",
         "move_encoding": MOVE_ENCODING,
+        "terminal_encoding": TERMINAL_ENCODING,
+        "terminal_supervision": "complete_game_only",
         "state_prompt": "stored_for_future_explicit_start_experiments",
         "stage_1_2_input_mode": "implicit_standard_initial",
         "probe_annotations": ["legal_drop_available_by_ply", "promotion_choice_available_by_ply"],

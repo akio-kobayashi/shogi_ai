@@ -45,6 +45,9 @@ grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${MANI
 grep -q '"stage_1_2_input_mode"[[:space:]]*:[[:space:]]*"implicit_standard_initial"' "${MANIFEST}" || {
   echo "obsolete dataset: rebuild factorized_v3 with implicit standard-initial manifest" >&2; exit 2;
 }
+grep -q '"terminal_encoding"[[:space:]]*:[[:space:]]*"eos_on_complete_decisive_game_v1"' "${MANIFEST}" || {
+  echo "obsolete dataset: rebuild factorized_v3 with complete-game EOS supervision" >&2; exit 2;
+}
 
 IFS=',' read -r -a rates <<< "${RAP_RATES}"
 IFS=',' read -r -a seeds <<< "${SEEDS}"

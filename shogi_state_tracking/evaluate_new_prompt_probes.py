@@ -18,7 +18,7 @@ from create_dataset import HAND_ORDER, PIECE_NAMES
 from data import load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
-from factorized_prompt import MOVE_ENCODING, factorize_usi
+from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_usi
 from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, replay_probe_targets, state_metrics
 from train_model import amp_context, resolve_amp
 
@@ -410,7 +410,8 @@ def main():
     move_encoding = str(checkpoint.get("new_prompt", {}).get("move_encoding", "atomic_v1"))
     state_prompt_mode = str(checkpoint.get("new_prompt", {}).get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint.get("new_prompt", {}).get("start_selection", "random_candidates"))
-    if move_encoding != MOVE_ENCODING or state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
+    terminal_encoding = str(checkpoint.get("new_prompt", {}).get("terminal_encoding", ""))
+    if move_encoding != MOVE_ENCODING or terminal_encoding != TERMINAL_ENCODING or state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
         raise ValueError("linear probe requires the current implicit fixed-initial factorized_v3 checkpoint")
     model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"]); model.eval()
     del checkpoint

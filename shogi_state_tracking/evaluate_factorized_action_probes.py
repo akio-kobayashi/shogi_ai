@@ -20,12 +20,13 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import load_vocabulary
-from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, factorize_usi
+from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, TERMINAL_ENCODING, factorize_usi
 from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
 
 
 TASK_SPECS = {
+    "terminal_next": ("pre", 2),
     "actual_move_kind": ("pre", 2),
     "actual_source": ("pre", 81),
     "drop_available": ("pre", 2),
@@ -47,6 +48,7 @@ def parse_args():
     parser.add_argument("--evaluation-jsonl", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--sources", default="layers", help="layers,final,layer_0,...")
+    parser.add_argument("--tasks", default="all", help="allまたはカンマ区切りのtask名")
     parser.add_argument("--history-distances", default="8,32")
     parser.add_argument("--max-train-examples", type=int, default=12000)
     parser.add_argument("--max-validation-examples", type=int, default=3000)
@@ -94,6 +96,16 @@ def expand_sources(value: str, n_layers: int) -> list[str]:
     return list(dict.fromkeys(result))
 
 
+def parse_tasks(value: str) -> list[str]:
+    if value == "all":
+        return list(TASK_SPECS)
+    tasks = list(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    unknown = [task for task in tasks if task not in TASK_SPECS]
+    if not tasks or unknown:
+        raise ValueError("unknown or empty action-probe tasks: {}".format(", ".join(unknown)))
+    return tasks
+
+
 def _target_index(token: str, vocabulary: Mapping[str, int], tokens: Sequence[str]) -> int:
     try:
         return list(tokens).index(token)
@@ -135,6 +147,8 @@ def _append_query(
     limit: int,
     max_seq_len: int,
 ) -> None:
+    if task not in queries:
+        return
     if len(queries[task]) >= limit or len(tokens) > max_seq_len:
         return
     queries[task].append({
@@ -224,14 +238,20 @@ def read_queries(
     distances: Sequence[int],
     max_examples: int,
     max_seq_len: int,
+    tasks: Sequence[str] | None = None,
+    max_terminal_moves: int | None = None,
 ) -> Dict[str, list[dict]]:
-    queries = {task: [] for task in TASK_SPECS}
+    queries = {task: [] for task in (tasks or TASK_SPECS)}
     wanted = set(distances)
     with Path(path).open(encoding="utf-8") as handle:
         for line in handle:
-            if not line.strip() or all(len(values) >= max_examples for values in queries.values()):
+            if not line.strip():
                 continue
+            if all(len(values) >= max_examples for values in queries.values()):
+                break
             record = json.loads(line)
+            if record.get("terminal_token") != "<EOS>" or int(record.get("game_result", 0)) == 0:
+                raise ValueError("{} contains a record without decisive EOS terminal supervision".format(path))
             base_state = _candidate_state(record, state_prompt_mode)
             base = ["<BOS>", *base_state, "<MOVES>"]
             recurrent_start = len(base)
@@ -267,6 +287,21 @@ def read_queries(
                             _append_query(queries, "actual_destination_nonpromote", prefix + [parts[0]], destination, ply, game_id, recurrent_start, max_examples, max_seq_len)
                     # 既存の学習・評価スクリプトと同様，評価対象はRAPなし系列である。
                 history.extend(parts)
+            # 終端直前とその1手前を同一対局から対で採取する．これにより各対局が
+            # 正例・負例を1件ずつ持ち，単純なクラス頻度では判定できない．
+            terminal_queries = queries.get("terminal_next")
+            terminal_eligible = max_terminal_moves is None or len(moves) <= max_terminal_moves
+            if terminal_queries is not None and moves and terminal_eligible and len(terminal_queries) + 2 <= max_examples:
+                last_parts = factorize_usi(moves[-1])
+                final_history = list(history)
+                before_last = final_history[: -len(last_parts)]
+                negative_tokens = base + before_last
+                positive_tokens = base + final_history
+                if len(positive_tokens) <= max_seq_len:
+                    terminal_queries.extend((
+                        {"tokens": negative_tokens, "target": 0, "distance": len(moves) - 1, "game_id": game_id, "recurrent_start": recurrent_start},
+                        {"tokens": positive_tokens, "target": 1, "distance": len(moves), "game_id": game_id, "recurrent_start": recurrent_start},
+                    ))
     return queries
 
 
@@ -396,6 +431,8 @@ def main():
     settings = checkpoint.get("new_prompt", {})
     if settings.get("move_encoding") != MOVE_ENCODING:
         raise ValueError("checkpoint is not factorized_v3_no_eom")
+    if settings.get("terminal_encoding") != TERMINAL_ENCODING:
+        raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     state_prompt_mode = str(settings.get("state_prompt_mode", "implicit_initial"))
     if str(settings.get("start_selection", "fixed_initial")) != "fixed_initial":
         raise ValueError("action probe requires fixed_initial checkpoint")
@@ -406,18 +443,21 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     sources = expand_sources(args.sources, config.n_layers)
+    selected_tasks = parse_tasks(args.tasks)
+    max_terminal_moves = int(settings.get("max_moves", 0)) or None
     distances = parse_distances(args.history_distances)
     limits = {"train": args.max_train_examples, "validation": args.max_validation_examples, "evaluation": args.max_evaluation_examples}
     paths = {"train": args.train_jsonl, "validation": args.validation_jsonl, "evaluation": args.evaluation_jsonl}
     split_game_counts = assert_disjoint_game_ids(paths)
     all_queries = {
-        split: read_queries(path, vocabulary, state_prompt_mode, distances, limits[split], args.max_seq_len)
+        split: read_queries(path, vocabulary, state_prompt_mode, distances, limits[split], args.max_seq_len, selected_tasks, max_terminal_moves)
         for split, path in paths.items()
     }
     print(json.dumps({"event": "action_probe_query_counts", "counts": {split: {task: len(values) for task, values in tasks.items()} for split, tasks in all_queries.items()}}, ensure_ascii=False), flush=True)
     result = {"format_version": 1, "checkpoint": args.checkpoint, "settings": vars(args), "state_prompt_mode": state_prompt_mode, "evaluation_input_rap": False, "split_game_counts": split_game_counts, "game_splits_disjoint": True, "tasks": {}}
     saved = {"checkpoint": args.checkpoint, "sources": sources, "tasks": {}}
-    for task, (_, classes) in TASK_SPECS.items():
+    for task in selected_tasks:
+        _, classes = TASK_SPECS[task]
         result["tasks"][task] = {}
         saved["tasks"][task] = {}
         # タスク単位で特徴量を抽出・学習・解放する。全タスク×全層の特徴を同時に

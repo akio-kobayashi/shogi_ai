@@ -35,12 +35,16 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
         *args,
         state_prompt_mode: str = "implicit_initial",
         start_selection: str = "fixed_initial",
+        eos_loss_weight: float = 1.0,
         **kwargs,
     ):
         if state_prompt_mode not in {"implicit_initial", "explicit"} or start_selection != "fixed_initial":
             raise ValueError("factorized_v3 requires fixed initial start")
         self.state_prompt_mode = state_prompt_mode
         self.start_selection = start_selection
+        if eos_loss_weight < 0.0:
+            raise ValueError("eos_loss_weight must be nonnegative")
+        self.eos_loss_weight = float(eos_loss_weight)
         super().__init__(*args, **kwargs)
         self.length_estimates = None
         length_path = self.jsonl_path.with_suffix(".lengths.u32")
@@ -110,6 +114,8 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
     def _validate_record(self, record: Mapping[str, object]) -> None:
         if not str(record.get("game_id", "")):
             raise ValueError("record has no game_id")
+        if record.get("terminal_token") != "<EOS>" or int(record.get("game_result", 0)) == 0:
+            raise ValueError("factorized_v3 requires a decisive complete-game terminal label")
         state = record.get("state_prompt_tokens")
         candidates = record.get("start_candidates")
         if state is None and candidates is None:
@@ -179,6 +185,7 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             state_ids = ()
         start_ply = int(candidate.get("start_ply", 0) if candidate is not None else record.get("start_ply", 0))
         end_ply = self._end_ply(record, len(state_ids), start_ply)
+        complete_game = start_ply == 0 and end_ply == len(record["_move_ids"])
         selected = self._selected_hint_indices(record, start_ply, end_ply, index)
         token_ids = [self._bos_id, *state_ids, self._moves_id]
         categories = ["prompt"] * len(token_ids)
@@ -196,16 +203,18 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             # 指手内の全subtoken NLLを合計し，後段で移動先座標数（指手数）で割る．
             move_weights.extend([1.0] * len(ids))
             move_end.extend([False] * (len(ids) - 1) + [True])
-        token_ids.append(self._eos_id)
-        categories.append("eos")
-        move_weights.append(0.0)
-        move_end.append(False)
+        if complete_game:
+            token_ids.append(self._eos_id)
+            categories.append("eos")
+            move_weights.append(0.0)
+            move_end.append(False)
 
         input_ids = torch.tensor(token_ids, dtype=torch.long)
         labels = torch.full((len(token_ids),), IGNORE_INDEX, dtype=torch.long)
         loss_weights = torch.zeros(len(token_ids), dtype=torch.float32)
         move_target_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         hint_target_mask = torch.zeros(len(token_ids), dtype=torch.bool)
+        eos_target_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         move_unit_weight = torch.zeros(len(token_ids), dtype=torch.float32)
         move_boundary_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         for position in range(len(token_ids) - 1):
@@ -220,6 +229,10 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
                 labels[position] = input_ids[position + 1]
                 loss_weights[position] = self.hint_loss_weight
                 hint_target_mask[position] = True
+            elif target == "eos":
+                labels[position] = input_ids[position + 1]
+                loss_weights[position] = self.eos_loss_weight
+                eos_target_mask[position] = True
         recurrent_mask = torch.zeros(len(token_ids), dtype=torch.bool)
         recurrent_mask[2 + len(state_ids) :] = True
         example = {
@@ -230,7 +243,9 @@ class FactorizedPromptSequenceDataset(NewPromptSequenceDataset):
             "move_boundary_mask": move_boundary_mask,
             "move_target_mask": move_target_mask,
             "hint_target_mask": hint_target_mask,
+            "eos_target_mask": eos_target_mask,
             "recurrent_mask": recurrent_mask,
+            "complete_game": complete_game,
         }
         if self.return_metadata:
             example.update({

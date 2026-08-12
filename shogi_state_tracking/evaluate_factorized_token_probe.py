@@ -12,7 +12,7 @@ import torch
 
 from data import load_vocabulary
 from evaluate_factorized_moves import padded_forward, parse_distances, resolve_device
-from factorized_prompt import MOVE_ENCODING, annotation_piece_token, factorize_usi
+from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, annotation_piece_token, factorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
@@ -109,6 +109,8 @@ def main():
     payload = torch.load(args.checkpoint, map_location="cpu")
     if payload.get("new_prompt", {}).get("move_encoding") != MOVE_ENCODING:
         raise ValueError("checkpoint is not {}".format(MOVE_ENCODING))
+    if payload.get("new_prompt", {}).get("terminal_encoding") != TERMINAL_ENCODING:
+        raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     config = ModelConfig(**payload["config"])
     checkpoint_settings = payload.get("new_prompt", {})
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))

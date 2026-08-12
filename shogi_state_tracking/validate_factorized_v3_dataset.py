@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from data import load_vocabulary
-from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING, annotation_piece_token, factorize_usi, factorized_vocabulary_tokens, validate_state_prompt_tokens
+from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING, TERMINAL_ENCODING, annotation_piece_token, factorize_usi, factorized_vocabulary_tokens, validate_state_prompt_tokens
 from factorized_prompt_data import is_standard_initial_sfen
 from new_prompt import source_square_from_usi, square_token
 
@@ -17,6 +17,10 @@ def validate_record(record, vocabulary, split, line_number):
     where = "{}:{}".format(split, line_number)
     if int(record.get("schema_version", -1)) != FACTORIZED_SCHEMA_VERSION or record.get("move_encoding") != MOVE_ENCODING:
         raise ValueError("{} has an obsolete schema".format(where))
+    if record.get("terminal_encoding") != TERMINAL_ENCODING or record.get("terminal_token") != "<EOS>":
+        raise ValueError("{} has no current terminal supervision declaration".format(where))
+    if int(record.get("game_result", 0)) == 0:
+        raise ValueError("{} contains a draw game".format(where))
     if not is_standard_initial_sfen(str(record.get("initial_sfen", ""))):
         raise ValueError("{} is not standard-initial".format(where))
     state = [str(token) for token in record.get("state_prompt_tokens", ())]
@@ -74,6 +78,8 @@ def main():
     manifest = json.loads((root / "dataset_manifest.json").read_text(encoding="utf-8"))
     if manifest.get("schema_version") != FACTORIZED_SCHEMA_VERSION or manifest.get("move_encoding") != MOVE_ENCODING:
         raise ValueError("dataset manifest is obsolete")
+    if manifest.get("terminal_encoding") != TERMINAL_ENCODING or manifest.get("terminal_supervision") != "complete_game_only":
+        raise ValueError("dataset manifest does not declare complete-game EOS supervision")
     if manifest.get("stage_1_2_input_mode") != "implicit_standard_initial":
         raise ValueError(
             "dataset manifest does not declare stage_1_2_input_mode=implicit_standard_initial; "

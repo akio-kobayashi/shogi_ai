@@ -482,6 +482,11 @@ def collate_new_prompt_sequences(
         batch_first=True,
         padding_value=False,
     )
+    eos_target_mask = pad_sequence(
+        [example.get("eos_target_mask", torch.zeros_like(example["labels"], dtype=torch.bool)) for example in examples],
+        batch_first=True,
+        padding_value=False,
+    )
     lengths = torch.tensor(
         [int(example["input_ids"].shape[0]) for example in examples], dtype=torch.long
     )
@@ -494,6 +499,7 @@ def collate_new_prompt_sequences(
         "loss_weights": loss_weights,
         "move_target_mask": move_target_mask,
         "hint_target_mask": hint_target_mask,
+        "eos_target_mask": eos_target_mask,
     }
     if "move_unit_weight" in examples[0]:
         batch["move_unit_weight"] = pad_sequence(

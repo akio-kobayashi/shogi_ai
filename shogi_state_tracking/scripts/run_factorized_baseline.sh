@@ -43,7 +43,8 @@ mkdir -p "${OUTPUT_DIR}"
 MANIFEST_ARGS=()
 if [[ -f "${DATASET_DIR}/dataset_manifest.json" ]] \
   && grep -q '"move_encoding"[[:space:]]*:[[:space:]]*"factorized_v3_no_eom"' "${DATASET_DIR}/dataset_manifest.json" \
-  && grep -q '"stage_1_2_input_mode"[[:space:]]*:[[:space:]]*"implicit_standard_initial"' "${DATASET_DIR}/dataset_manifest.json"; then
+  && grep -q '"stage_1_2_input_mode"[[:space:]]*:[[:space:]]*"implicit_standard_initial"' "${DATASET_DIR}/dataset_manifest.json" \
+  && grep -q '"terminal_encoding"[[:space:]]*:[[:space:]]*"eos_on_complete_decisive_game_v1"' "${DATASET_DIR}/dataset_manifest.json"; then
   MANIFEST_ARGS=(--dataset-manifest "${DATASET_DIR}/dataset_manifest.json")
 else
   echo "missing or obsolete factorized_v3 dataset_manifest.json; rebuild with scripts/setup_factorized_v3_data.sh" >&2
@@ -64,6 +65,7 @@ set +e
   --start-selection fixed_initial \
   --annotation-mode "${ANNOTATION_MODE}" \
   --annotation-probability "${ANNOTATION_PROBABILITY}" \
+  --eos-loss-weight "${EOS_LOSS_WEIGHT:-1.0}" \
   --max-seq-len "${MAX_SEQ_LEN}" \
   --max-moves "${MAX_MOVES}" \
   --max-hints "${MAX_HINTS}" \

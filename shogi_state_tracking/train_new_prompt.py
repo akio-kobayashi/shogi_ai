@@ -25,7 +25,7 @@ from data import IGNORE_INDEX, load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt_data import collate_new_prompt_sequences
 from factorized_prompt_data import FactorizedPromptSequenceDataset
-from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING
+from factorized_prompt import FACTORIZED_SCHEMA_VERSION, MOVE_ENCODING, TERMINAL_ENCODING
 from train_model import amp_context, resolve_amp, resolve_device
 
 try:
@@ -130,6 +130,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotation-mode", choices=("vanilla", "rap"), default="vanilla")
     parser.add_argument("--annotation-probability", type=float, default=0.0)
     parser.add_argument("--hint-loss-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--eos-loss-weight", type=float, default=1.0,
+        help="完全棋譜末尾のEOSを1行動として数える重み",
+    )
     # 最大開始prompt約90 token，512指手，320個の2-token注釈を含めても
     # 90 + 512 + 2*320 = 1242 tokenであり，1280 token文脈に収まる。
     parser.add_argument("--max-hints", type=int, default=512)
@@ -183,6 +187,7 @@ def loss_for_batch(model, batch, device):
     weights = batch["loss_weights"].to(device, non_blocking=non_blocking)
     move_mask = batch["move_target_mask"].to(device, non_blocking=non_blocking)
     hint_mask = batch["hint_target_mask"].to(device, non_blocking=non_blocking)
+    eos_mask = batch["eos_target_mask"].to(device, non_blocking=non_blocking)
     per_token = F.cross_entropy(
         output.logits.reshape(-1, output.logits.shape[-1]),
         labels.reshape(-1),
@@ -203,7 +208,13 @@ def loss_for_batch(model, batch, device):
         ).sum()
         if not bool(move_count > 0):
             raise ValueError("factorized batch has no move targets")
-        move_loss = (per_token * move_units).sum() / move_count
+        move_nll_sum = (per_token * move_units).sum()
+        eos_count = eos_mask.sum()
+        eos_weights = effective_weights.masked_select(eos_mask)
+        eos_weight = eos_weights[0] if eos_weights.numel() else per_token.new_zeros(())
+        eos_nll_sum = per_token.masked_select(eos_mask).sum()
+        primary_weight = move_count.to(per_token.dtype) + eos_weight * eos_count.to(per_token.dtype)
+        primary_loss = (move_nll_sum + eos_weight * eos_nll_sum) / primary_weight
         hint_count = hint_mask.sum()
         hint_loss = (
             per_token.masked_select(hint_mask).mean()
@@ -212,9 +223,9 @@ def loss_for_batch(model, batch, device):
         )
         hint_weights = effective_weights.masked_select(hint_mask)
         hint_scale = hint_weights[0] if hint_weights.numel() else per_token.new_zeros(())
-        loss = move_loss + hint_scale * hint_loss
-        combined_nll_sum = loss.detach() * move_count.detach()
-        combined_weight = move_count.detach()
+        loss = primary_loss + hint_scale * hint_loss
+        combined_nll_sum = primary_loss.detach() * primary_weight.detach()
+        combined_weight = primary_weight.detach()
     else:
         move_count = move_mask.sum()
         loss = (per_token * effective_weights).sum() / weight_sum
@@ -235,13 +246,14 @@ def loss_for_batch(model, batch, device):
         "combined_weight": combined_weight,
         "move": totals(move_mask),
         "hint": totals(hint_mask),
+        "eos": totals(eos_mask),
         "move_count": move_count.detach(),
     }
 
 
 def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
     model.eval()
-    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "batches": 0}
+    totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "eos_nll_sum": 0.0, "eos_targets": 0, "batches": 0}
     with torch.inference_mode():
         for batch_index, batch in enumerate(loader, 1):
             with amp_context(device, amp_dtype):
@@ -253,6 +265,8 @@ def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
             totals["move_count"] += int(metrics["move_count"])
             totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             totals["hint_targets"] += int(metrics["hint"]["targets"])
+            totals["eos_nll_sum"] += float(metrics["eos"]["nll_sum"])
+            totals["eos_targets"] += int(metrics["eos"]["targets"])
             totals["batches"] += 1
             if max_batches > 0 and batch_index >= max_batches:
                 break
@@ -260,9 +274,11 @@ def evaluate(model, loader, device, amp_dtype, max_batches: int = 0):
         "loss": totals["combined_nll_sum"] / max(1.0, totals["combined_weight"]),
         "move_cross_entropy": totals["move_nll_sum"] / max(1, totals["move_targets"]),
         "hint_cross_entropy": None if not totals["hint_targets"] else totals["hint_nll_sum"] / totals["hint_targets"],
+        "eos_cross_entropy": None if not totals["eos_targets"] else totals["eos_nll_sum"] / totals["eos_targets"],
         "move_targets": totals["move_targets"],
         "move_count": totals["move_count"],
         "hint_targets": totals["hint_targets"],
+        "eos_targets": totals["eos_targets"],
         "batches": totals["batches"],
     }
 
@@ -274,6 +290,7 @@ def write_step_scalars(writer: Optional["SummaryWriter"], step: int, loss, metri
     writer.add_scalar("train/combined_cross_entropy", float(loss.detach()), step)
     writer.add_scalar("train/move_targets_per_batch", int(metrics["move"]["targets"]), step)
     writer.add_scalar("train/hint_targets_per_batch", int(metrics["hint"]["targets"]), step)
+    writer.add_scalar("train/eos_targets_per_batch", int(metrics["eos"]["targets"]), step)
     writer.add_scalar("train/moves_per_batch", int(metrics["move_count"]), step)
     writer.add_scalar("train/hints_per_move", int(metrics["hint"]["targets"]) / max(1, int(metrics["move_count"])), step)
     writer.add_scalar("train/sequence_length", int(batch["input_ids"].shape[1]), step)
@@ -293,6 +310,8 @@ def save_checkpoint(path, model, optimizer, args, epoch, step, best_loss, includ
             "annotation_mode": args.annotation_mode,
             "annotation_probability": args.annotation_probability,
             "hint_loss_weight": args.hint_loss_weight, "max_hints": args.max_hints,
+            "eos_loss_weight": args.eos_loss_weight,
+            "terminal_encoding": TERMINAL_ENCODING,
             "max_moves": args.max_moves, "seed": args.seed,
         },
     }
@@ -322,12 +341,14 @@ def main() -> None:
         raise ValueError("--max-validation-batches must be non-negative")
     if args.annotation_mode == "vanilla" and args.annotation_probability:
         raise ValueError("vanilla requires --annotation-probability 0")
+    if args.eos_loss_weight < 0.0:
+        raise ValueError("--eos-loss-weight must be non-negative")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     vocabulary = load_vocabulary(args.vocab)
     if args.move_encoding == MOVE_ENCODING:
         vocab_payload = json.loads(Path(args.vocab).read_text(encoding="utf-8"))
-        if vocab_payload.get("move_encoding") != MOVE_ENCODING or len(vocabulary) != 125:
+        if vocab_payload.get("move_encoding") != MOVE_ENCODING or vocab_payload.get("terminal_encoding") != TERMINAL_ENCODING or len(vocabulary) != 125:
             raise ValueError("factorized_v3 requires its canonical 125-token vocab.json")
         if not args.dataset_manifest:
             raise ValueError("factorized_v3 requires --dataset-manifest")
@@ -338,6 +359,8 @@ def main() -> None:
             raise ValueError(
                 "dataset manifest does not declare the current implicit-standard-initial experiment"
             )
+        if dataset_payload.get("terminal_encoding") != TERMINAL_ENCODING or dataset_payload.get("terminal_supervision") != "complete_game_only":
+            raise ValueError("dataset manifest does not declare complete-game EOS supervision")
     runtime_marker("vocabulary_loaded", vocab_size=len(vocabulary))
     device = resolve_device(args.device)
     amp_dtype, scaler, amp_name = resolve_amp(args.amp, device)
@@ -348,6 +371,7 @@ def main() -> None:
     runtime_marker("model_ready", device=str(device), parameter_count=sum(parameter.numel() for parameter in model.parameters()))
     common = dict(annotation_mode=args.annotation_mode, annotation_probability=args.annotation_probability,
                   hint_loss_weight=args.hint_loss_weight, max_hints=args.max_hints,
+                  eos_loss_weight=args.eos_loss_weight,
                   max_moves=args.max_moves, max_seq_len=args.max_seq_len,
                   return_metadata=False, validate_records=False)
     dataset_class = FactorizedPromptSequenceDataset
@@ -429,7 +453,7 @@ def main() -> None:
     run = {"format_version": 1, "args": vars(args), "model_config": config.to_dict(), "parameter_count": sum(p.numel() for p in model.parameters()), "device": str(device), "amp": amp_name, "git_commit": git_commit(), "tensorboard": None if writer is None else str(tensorboard_dir.resolve())}
     if args.dataset_manifest:
         dataset_manifest = json.loads(Path(args.dataset_manifest).read_text(encoding="utf-8"))
-        run["dataset"] = {"manifest": str(Path(args.dataset_manifest).resolve()), "schema_version": dataset_manifest.get("schema_version"), "vocab_sha256": dataset_manifest.get("vocab_sha256"), "splits": dataset_manifest.get("splits")}
+        run["dataset"] = {"manifest": str(Path(args.dataset_manifest).resolve()), "schema_version": dataset_manifest.get("schema_version"), "terminal_encoding": dataset_manifest.get("terminal_encoding"), "vocab_sha256": dataset_manifest.get("vocab_sha256"), "splits": dataset_manifest.get("splits")}
     (output / "run_manifest.json").write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if writer is not None:
         writer.add_text("run/config", json.dumps(run, ensure_ascii=False, indent=2), 0)
@@ -455,7 +479,7 @@ def main() -> None:
         if bucket_sampler is not None:
             bucket_sampler.set_epoch(epoch)
         model.train()
-        epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0}
+        epoch_totals = {"combined_nll_sum": 0.0, "combined_weight": 0.0, "move_nll_sum": 0.0, "move_targets": 0, "move_count": 0, "hint_nll_sum": 0.0, "hint_targets": 0, "eos_nll_sum": 0.0, "eos_targets": 0}
         for batch_index, batch in enumerate(train_loader, 1):
             optimizer.zero_grad(set_to_none=True)
             with amp_context(device, amp_dtype):
@@ -478,9 +502,11 @@ def main() -> None:
             epoch_totals["move_count"] += int(metrics["move_count"])
             epoch_totals["hint_nll_sum"] += float(metrics["hint"]["nll_sum"])
             epoch_totals["hint_targets"] += int(metrics["hint"]["targets"])
+            epoch_totals["eos_nll_sum"] += float(metrics["eos"]["nll_sum"])
+            epoch_totals["eos_targets"] += int(metrics["eos"]["targets"])
             if args.progress_every and (step == 1 or step % args.progress_every == 0):
                 write_step_scalars(writer, step, loss, metrics, batch, device)
-                print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
+                print(json.dumps({"event": "progress", "epoch": epoch, "step": step, "batch": batch_index, "loss": float(loss.detach()), "move_targets": int(metrics["move"]["targets"]), "hint_targets": int(metrics["hint"]["targets"]), "eos_targets": int(metrics["eos"]["targets"]), "seq_len": int(batch["input_ids"].shape[1]), "elapsed_sec": round(time.perf_counter()-started, 1)}, ensure_ascii=False), flush=True)
             if args.max_steps and step >= args.max_steps:
                 break
         print(json.dumps({"event": "validation_start", "epoch": epoch, "step": step, "max_validation_batches": args.max_validation_batches}, ensure_ascii=False), flush=True)
@@ -500,15 +526,19 @@ def main() -> None:
             "training_move_targets": epoch_totals["move_targets"],
             "training_hint_targets": epoch_totals["hint_targets"],
             "training_hint_per_move": epoch_totals["hint_targets"] / max(1, epoch_totals["move_count"]),
+            "training_eos_cross_entropy": None if not epoch_totals["eos_targets"] else epoch_totals["eos_nll_sum"] / epoch_totals["eos_targets"],
+            "training_eos_targets": epoch_totals["eos_targets"],
             "validation_loss": validation["loss"],
             "validation_move_cross_entropy": validation["move_cross_entropy"],
             "validation_hint_cross_entropy": validation["hint_cross_entropy"],
             "validation_move_targets": validation["move_targets"],
             "validation_move_count": validation["move_count"],
             "validation_hint_targets": validation["hint_targets"],
+            "validation_eos_cross_entropy": validation["eos_cross_entropy"],
+            "validation_eos_targets": validation["eos_targets"],
             "validation_batches": validation["batches"],
             "validation_perplexity": math.exp(min(validation["loss"], 20.0)),
-            "validation_move_perplexity": math.exp(min(validation["loss"], 20.0)),
+            "validation_move_perplexity": math.exp(min(validation["move_cross_entropy"], 20.0)),
             "validation_subtoken_perplexity": math.exp(min(validation["move_cross_entropy"], 20.0)),
             "elapsed_sec": round(time.perf_counter()-started, 1),
         }
@@ -517,10 +547,14 @@ def main() -> None:
             writer.add_scalar("epoch/training_move_cross_entropy", row["training_move_cross_entropy"], epoch)
             if row["training_hint_cross_entropy"] is not None:
                 writer.add_scalar("epoch/training_hint_cross_entropy", row["training_hint_cross_entropy"], epoch)
+            if row["training_eos_cross_entropy"] is not None:
+                writer.add_scalar("epoch/training_eos_cross_entropy", row["training_eos_cross_entropy"], epoch)
             writer.add_scalar("epoch/training_hint_per_move", row["training_hint_per_move"], epoch)
             writer.add_scalar("epoch/training_hint_targets", row["training_hint_targets"], epoch)
             writer.add_scalar("epoch/validation_move_cross_entropy", row["validation_move_cross_entropy"], epoch)
             writer.add_scalar("epoch/validation_perplexity", row["validation_perplexity"], epoch)
+            if row["validation_eos_cross_entropy"] is not None:
+                writer.add_scalar("epoch/validation_eos_cross_entropy", row["validation_eos_cross_entropy"], epoch)
             writer.flush()
         history.append(row); print(json.dumps(row, ensure_ascii=False), flush=True)
         if validation["loss"] < best_loss - 1e-4:
