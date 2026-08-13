@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 from data import load_vocabulary
-from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PIECE_TOKENS, PROMOTE_TOKEN, TERMINAL_ENCODING, TRAINING_OBJECTIVE, factorize_usi, unfactorize_usi
+from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PIECE_TOKENS, PROMOTE_TOKEN, TERMINAL_ENCODING, TRAINING_OBJECTIVE, annotation_piece_token, factorize_history_move, factorize_usi, unfactorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
@@ -106,6 +106,8 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                     if distance in wanted and ply < len(record["move_tokens"]):
                         step = steps.get(ply)
                         prefix = base + history
+                        if args.evaluation_annotation_mode == "ap" and bool(record["move_annotations"][ply].get("eligible", False)):
+                            prefix = prefix + [annotation_piece_token(str(record["move_annotations"][ply]["piece"]))]
                         if step is not None and len(prefix) + 3 <= max_seq_len:
                             batch.append({
                                 "prefix_ids": [vocabulary[token] for token in prefix],
@@ -123,7 +125,10 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                                 break
                     if ply >= len(record["move_tokens"]):
                         break
-                    history.extend(factorize_usi(str(record["move_tokens"][ply])))
+                    history.extend(factorize_history_move(
+                        str(record["move_tokens"][ply]), record["move_annotations"][ply],
+                        args.evaluation_annotation_mode,
+                    ))
                 if statistics["queries"] >= args.max_queries:
                     break
     if batch:
@@ -411,6 +416,7 @@ def main():
         raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     config = ModelConfig(**checkpoint["config"])
     checkpoint_settings = checkpoint.get("new_prompt", {})
+    args.evaluation_annotation_mode = "ap" if checkpoint_settings.get("annotation_mode") == "ap" else "vanilla"
     recorded_objective = checkpoint_settings.get("training_objective")
     if recorded_objective is None and (
         checkpoint_settings.get("annotation_mode") == "vanilla"
@@ -518,7 +524,9 @@ def main():
         "model_type": model_type,
         "move_encoding": MOVE_ENCODING,
         "training_objective": recorded_objective or "legacy_unknown",
+        "evaluation_input_annotation_mode": args.evaluation_annotation_mode,
         "evaluation_input_rap": False,
+        "oracle_piece_conditioned": args.evaluation_annotation_mode == "ap",
         "settings": vars(args),
         "amp": amp_name,
         "metrics": {

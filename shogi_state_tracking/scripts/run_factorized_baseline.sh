@@ -40,6 +40,15 @@ case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small
 if [[ "${ANNOTATION_MODE}" == rap && -z "${RUN_VARIANT}" ]]; then
   RUN_VARIANT="proportional-rap-v1"
 fi
+if [[ "${ANNOTATION_MODE}" == ap && -z "${RUN_VARIANT}" ]]; then
+  RUN_VARIANT="proportional-annotation-v1"
+fi
+case "${ANNOTATION_MODE}" in
+  vanilla) [[ "${ANNOTATION_PROBABILITY}" == 0 || "${ANNOTATION_PROBABILITY}" == 0.0 || "${ANNOTATION_PROBABILITY}" == 0.00 ]] || { echo "vanilla requires probability 0" >&2; exit 2; } ;;
+  rap) ;;
+  ap) [[ "${ANNOTATION_PROBABILITY}" == 1 || "${ANNOTATION_PROBABILITY}" == 1.0 || "${ANNOTATION_PROBABILITY}" == 1.00 ]] || { echo "ap requires probability 1" >&2; exit 2; } ;;
+  *) echo "--annotation-mode must be vanilla, rap, or ap" >&2; exit 2 ;;
+esac
 condition="${ANNOTATION_MODE}-p${ANNOTATION_PROBABILITY}"
 [[ -n "${RUN_VARIANT}" ]] && condition="${condition}-${RUN_VARIANT}"
 OUTPUT_DIR="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${condition}/seed-${SEED:-20260802}"

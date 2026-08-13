@@ -12,13 +12,13 @@ import torch
 
 from data import load_vocabulary
 from evaluate_factorized_moves import padded_forward, parse_distances, resolve_device
-from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, TRAINING_OBJECTIVE, annotation_piece_token, factorize_usi
+from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, TRAINING_OBJECTIVE, annotation_piece_token, factorize_history_move, factorize_usi
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
 
 
-def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_selection, distances, statistics):
+def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_selection, evaluation_annotation_mode, distances, statistics):
     """評価queryを小さなpool内で長さ順に並べ，paddingを抑えて返す。"""
     batch = []
     pool_batches = max(1, int(getattr(args, "length_bucket_pool_batches", 0) or 1))
@@ -68,7 +68,7 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                             })
                             batch.append({
                                 "start_ids": [vocabulary[token] for token in tokens],
-                                "end_ids": [vocabulary[token] for token in base + history + destination_prefix],
+                                "end_ids": [vocabulary[token] for token in base + history + ([piece] if evaluation_annotation_mode == "ap" else []) + destination_prefix],
                                 "actual": vocabulary[str(annotation["source"])],
                                 "legal": [vocabulary[token] for token in step["legal_sources_by_piece"].get(piece, [])],
                                 "actual_destination": vocabulary[destination_token],
@@ -81,7 +81,9 @@ def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_select
                                 batch = []
                             if statistics["queries"] >= args.max_queries:
                                 break
-                    history.extend(factorize_usi(str(record["move_tokens"][ply])))
+                    history.extend(factorize_history_move(
+                        str(record["move_tokens"][ply]), annotation, evaluation_annotation_mode,
+                    ))
                 if statistics["queries"] >= args.max_queries:
                     break
     if batch:
@@ -121,6 +123,7 @@ def main():
         training_objective = "legacy_action_mle_q0_compatible"
     training_objective = str(training_objective or "legacy_unknown")
     state_prompt_mode = str(checkpoint_settings.get("state_prompt_mode", "explicit"))
+    evaluation_annotation_mode = "ap" if checkpoint_settings.get("annotation_mode") == "ap" else "vanilla"
     start_selection = str(checkpoint_settings.get("start_selection", "random_candidates"))
     if state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
         raise ValueError("current factorized_v3 token probe accepts only implicit fixed-initial checkpoints")
@@ -147,7 +150,7 @@ def main():
     with torch.inference_mode(), amp_context(device, amp_dtype):
         for batch in iter_query_batches(
             args, vocabulary, config, state_prompt_mode, start_selection,
-            distances, statistics,
+            evaluation_annotation_mode, distances, statistics,
         ):
             logits, lengths = padded_forward(model, [query["start_ids"] for query in batch], vocabulary["<PAD>"], device)
             rows = torch.arange(len(batch), device=device)
@@ -201,11 +204,14 @@ def main():
         "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
+        "evaluation_input_annotation_mode": evaluation_annotation_mode,
+        "evaluation_input_rap": False,
+        "oracle_piece_conditioned": evaluation_annotation_mode == "ap",
         "settings": vars(args),
         "amp": amp_name,
         "metrics": summary(totals),
         "by_history_distance": {key: summary(value) for key, value in by_distance.items()},
-        "note": "Start inserts a piece token and is in-distribution only for RAP-trained conditions. End supplies the actual source coordinate and is available for every factorized model.",
+        "note": "Start inserts a piece token and is in-distribution for RAP/AP-trained conditions. AP additionally retains oracle piece tokens in evaluation history. End supplies the actual source coordinate and is available for every factorized model.",
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -55,8 +55,10 @@ for seed in "${seeds[@]}"; do
   for rate in "${rates[@]}"; do
     mode=rap
     [[ "${rate}" == 0 || "${rate}" == 0.0 || "${rate}" == 0.00 ]] && mode=vanilla
+    [[ "${rate}" == 1 || "${rate}" == 1.0 || "${rate}" == 1.00 ]] && mode=ap
     run_variant=""
     [[ "${mode}" == rap ]] && run_variant="proportional-rap-v1"
+    [[ "${mode}" == ap ]] && run_variant="proportional-annotation-v1"
     condition="${mode}-p${rate}"
     [[ -n "${run_variant}" ]] && condition="${condition}-${run_variant}"
     output="${RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${condition}/seed-${seed}"

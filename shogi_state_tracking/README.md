@@ -149,6 +149,15 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
   factorized_v3_eos_results
 ```
 
+`q=1.0`はAP（Always Piece Type）条件として扱い，結果を`ap-p1.0-proportional-annotation-v1`へ保存する．APはRAPと異なり，学習時だけでなく評価時の履歴にも全通常移動の駒種を与えるoracle条件である．評価対象となる現在指手についても正解駒種をpromptとして与え，その後の指手subtokenを評価する．APだけを追加実行する場合は次を用いる．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_ap_experiment.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results
+```
+
 既に`best.pt`がある条件は再学習しない．再学習する場合は`FORCE_TRAIN=1`を明示する．
 
 ## 評価

@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resume", action="store_true", help="output-dir/last.ptからモデルとoptimizerを再開する")
     parser.add_argument("--model-size", choices=tuple(MODEL_SIZES), required=True)
-    parser.add_argument("--annotation-mode", choices=("vanilla", "rap"), default="vanilla")
+    parser.add_argument("--annotation-mode", choices=("vanilla", "rap", "ap"), default="vanilla")
     parser.add_argument("--annotation-probability", type=float, default=0.0)
     parser.add_argument("--hint-loss-weight", type=float, default=1.0)
     parser.add_argument(
@@ -341,6 +341,8 @@ def main() -> None:
         raise ValueError("--max-validation-batches must be non-negative")
     if args.annotation_mode == "vanilla" and args.annotation_probability:
         raise ValueError("vanilla requires --annotation-probability 0")
+    if args.annotation_mode == "ap" and args.annotation_probability != 1.0:
+        raise ValueError("ap requires --annotation-probability 1")
     if args.eos_loss_weight < 0.0:
         raise ValueError("--eos-loss-weight must be non-negative")
     random.seed(args.seed)
@@ -383,7 +385,11 @@ def main() -> None:
     runtime_marker("train_dataset_ready", **train_dataset.storage_statistics())
     # early stoppingも運用時と同じ，注釈を除いた入力で測る。主比較の制約付き
     # 指手評価はevaluate_new_prompt_moves.pyで別に実行する。
-    validation_common = dict(common, annotation_mode="vanilla", annotation_probability=0.0)
+    validation_common = dict(
+        common,
+        annotation_mode="ap" if args.annotation_mode == "ap" else "vanilla",
+        annotation_probability=1.0 if args.annotation_mode == "ap" else 0.0,
+    )
     validation_dataset = dataset_class(args.validation_jsonl, vocabulary, seed=args.seed + 1, randomize_each_epoch=False, **validation_common)
     runtime_marker("validation_dataset_ready", **validation_dataset.storage_statistics())
     collate = partial(collate_new_prompt_sequences, pad_token_id=vocabulary["<PAD>"], max_seq_len=args.max_seq_len)

@@ -18,7 +18,7 @@ from create_dataset import HAND_ORDER, PIECE_NAMES
 from data import load_vocabulary
 from models import ModelConfig, build_model
 from new_prompt import piece_token, move_token
-from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_usi
+from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_history_move, factorize_usi
 from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, replay_probe_targets, state_metrics
 from train_model import amp_context, resolve_amp
 
@@ -125,6 +125,8 @@ def read_examples(path, limit, history_distances, start_selection="random_candid
                 # 切り捨てていない全指し手系列を保持する。
                 example["initial_sfen"] = str(record.get("initial_sfen", ""))
                 example["full_move_tokens"] = [str(move) for move in record.get("move_tokens", [])]
+                example["full_move_annotations"] = [dict(value) for value in record.get("move_annotations", [])]
+                example["history_move_annotations"] = example["full_move_annotations"][: int(example["ply"])]
                 example["game_id"] = str(record.get("game_id", ""))
                 distance = int(example["ply"]) - int(example["start_ply"])
                 # ply=0は全例が同一の平手初期局面であり，主状態集計から除外する。
@@ -136,7 +138,7 @@ def read_examples(path, limit, history_distances, start_selection="random_candid
     return examples
 
 
-def verify_probe_alignment(examples, vocabulary, max_seq_len, state_prompt_mode):
+def verify_probe_alignment(examples, vocabulary, max_seq_len, state_prompt_mode, evaluation_annotation_mode="vanilla"):
     """h_preと教師局面の時間対応を，系列構文とcshogi再生で検証する．"""
     checked = 0
     for example in examples:
@@ -150,8 +152,12 @@ def verify_probe_alignment(examples, vocabulary, max_seq_len, state_prompt_mode)
         if len(history_moves) != ply:
             raise ValueError("history length {} does not match ply {} for {}".format(len(history_moves), ply, example.get("game_id", "")))
         factorized_history = []
-        for move in history_moves:
-            tokens = factorize_usi(move) if MOVE_ENCODING == "factorized_v3_no_eom" else [move_token(move)]
+        annotations = list(example.get("history_move_annotations", []))
+        if evaluation_annotation_mode == "ap" and len(annotations) != len(history_moves):
+            raise ValueError("AP probe history annotations do not align with moves")
+        for move_index, move in enumerate(history_moves):
+            annotation = annotations[move_index] if move_index < len(annotations) else None
+            tokens = factorize_history_move(move, annotation, evaluation_annotation_mode) if MOVE_ENCODING == "factorized_v3_no_eom" else [move_token(move)]
             if not tokens or not tokens[-1].startswith("<SQ_"):
                 raise ValueError("history move does not end at a destination square: {}".format(move))
             factorized_history.extend(tokens)
@@ -173,7 +179,7 @@ def verify_probe_alignment(examples, vocabulary, max_seq_len, state_prompt_mode)
     return {"examples": checked, "truncated": 0, "ply_zero_excluded": True}
 
 
-def check_causal_prefix_consistency(model, examples, vocabulary, sources, device, max_seq_len, state_prompt_mode, max_samples):
+def check_causal_prefix_consistency(model, examples, vocabulary, sources, device, max_seq_len, state_prompt_mode, max_samples, evaluation_annotation_mode="vanilla"):
     """prefix単独と未来を含むfull sequenceのprefix位置を比較する．"""
     checked = 0
     skipped = 0
@@ -185,6 +191,7 @@ def check_causal_prefix_consistency(model, examples, vocabulary, sources, device
             break
         history = [str(move) for move in example.get("history_moves", [])]
         full_moves = [str(move) for move in example.get("full_move_tokens", [])]
+        full_annotations = list(example.get("full_move_annotations", []))
         if full_moves[: len(history)] != history:
             raise ValueError(
                 "probe history is not a prefix of the full game for {}".format(
@@ -193,14 +200,20 @@ def check_causal_prefix_consistency(model, examples, vocabulary, sources, device
             )
         state = [] if state_prompt_mode == "implicit_initial" else list(example.get("state_prompt_tokens", []))
         prefix_tokens = ["<BOS>", *state, "<MOVES>"]
-        for move in history:
-            prefix_tokens.extend(factorize_usi(move))
+        for move_index, move in enumerate(history):
+            prefix_tokens.extend(factorize_history_move(
+                move, full_annotations[move_index] if move_index < len(full_annotations) else None,
+                evaluation_annotation_mode,
+            ))
         # 対局全体ではなく，max_seq_len内に収まる未来をprefixへ追加する．
         # causal maskの検査には1手以上の未来があればよく，長い対局全体が
         # contextへ収まることを要求する必要はない．
         full_tokens = list(prefix_tokens)
-        for move in full_moves[len(history) :]:
-            future = factorize_usi(move)
+        for move_index, move in enumerate(full_moves[len(history) :], len(history)):
+            future = factorize_history_move(
+                move, full_annotations[move_index] if move_index < len(full_annotations) else None,
+                evaluation_annotation_mode,
+            )
             if len(full_tokens) + len(future) > max_seq_len:
                 break
             full_tokens.extend(future)
@@ -262,7 +275,7 @@ def _mapped_features(directory, split, sources, rows, d_model):
     return result
 
 
-def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len, move_encoding, batch_size, state_prompt_mode, feature_directory, split, amp_dtype=None, length_bucket_pool_batches=16):
+def extract(model, examples, vocabulary, sources, board_map, hand_names, device, max_seq_len, move_encoding, batch_size, state_prompt_mode, feature_directory, split, amp_dtype=None, length_bucket_pool_batches=16, evaluation_annotation_mode="vanilla"):
     features = _mapped_features(
         feature_directory, split, sources, len(examples), model.config.d_model,
     )
@@ -311,8 +324,12 @@ def extract(model, examples, vocabulary, sources, board_map, hand_names, device,
     with torch.inference_mode(), amp_context(device, amp_dtype):
         for example in examples:
             history = []
-            for move in example["history_moves"]:
-                history.extend(factorize_usi(move) if move_encoding == MOVE_ENCODING else [move_token(move)])
+            annotations = list(example.get("history_move_annotations", []))
+            for move_index, move in enumerate(example["history_moves"]):
+                history.extend(factorize_history_move(
+                    move, annotations[move_index] if move_index < len(annotations) else None,
+                    evaluation_annotation_mode,
+                ) if move_encoding == MOVE_ENCODING else [move_token(move)])
             state = [] if state_prompt_mode == "implicit_initial" else list(example["state_prompt_tokens"])
             tokens = ["<BOS>"] + state + ["<MOVES>"] + history
             if len(tokens) > max_seq_len:
@@ -411,6 +428,7 @@ def main():
     state_prompt_mode = str(checkpoint.get("new_prompt", {}).get("state_prompt_mode", "explicit"))
     start_selection = str(checkpoint.get("new_prompt", {}).get("start_selection", "random_candidates"))
     terminal_encoding = str(checkpoint.get("new_prompt", {}).get("terminal_encoding", ""))
+    evaluation_annotation_mode = "ap" if checkpoint.get("new_prompt", {}).get("annotation_mode") == "ap" else "vanilla"
     if move_encoding != MOVE_ENCODING or terminal_encoding != TERMINAL_ENCODING or state_prompt_mode != "implicit_initial" or start_selection != "fixed_initial":
         raise ValueError("linear probe requires the current implicit fixed-initial factorized_v3 checkpoint")
     model = build_model(model_type, config).to(device); model.load_state_dict(checkpoint["model_state_dict"]); model.eval()
@@ -430,13 +448,13 @@ def main():
     }
     print(json.dumps({"event": "probe_alignment_check_start", "examples": {name: len(values) for name, values in raw.items()}}, ensure_ascii=False), flush=True)
     alignment = {
-        split: verify_probe_alignment(examples, vocabulary, config.max_seq_len, state_prompt_mode)
+        split: verify_probe_alignment(examples, vocabulary, config.max_seq_len, state_prompt_mode, evaluation_annotation_mode)
         for split, examples in raw.items()
     }
     causal_alignment = {
         split: check_causal_prefix_consistency(
             model, examples, vocabulary, sources, device, config.max_seq_len,
-            state_prompt_mode, args.alignment_check_samples,
+            state_prompt_mode, args.alignment_check_samples, evaluation_annotation_mode,
         )
         for split, examples in raw.items()
     }
@@ -465,6 +483,7 @@ def main():
             model, examples, vocabulary, sources, board_map, hand_names, device,
             config.max_seq_len, move_encoding, args.batch_size, state_prompt_mode,
             feature_cache.name, name, amp_dtype, args.length_bucket_pool_batches,
+            evaluation_annotation_mode,
         )
         for name, examples in raw.items()
     }
@@ -475,7 +494,9 @@ def main():
         "move_encoding": move_encoding,
         "state_prompt_mode": state_prompt_mode,
         "start_selection": start_selection,
+        "evaluation_input_annotation_mode": evaluation_annotation_mode,
         "evaluation_input_rap": False,
+        "oracle_piece_conditioned": evaluation_annotation_mode == "ap",
         "split_game_counts": split_game_counts,
         "game_splits_disjoint": True,
         "settings": vars(args),

@@ -27,7 +27,7 @@ from new_prompt import (
 )
 
 
-ANNOTATION_MODES = ("vanilla", "rap", "partial_action", "random_control")
+ANNOTATION_MODES = ("vanilla", "rap", "ap", "partial_action", "random_control")
 
 
 def _annotation_color(annotation: Mapping[str, object]) -> str:
@@ -82,6 +82,8 @@ class NewPromptSequenceDataset(Dataset):
             raise ValueError("max_seq_len must be positive")
         if annotation_mode == "vanilla" and annotation_probability != 0.0:
             raise ValueError("vanilla mode requires annotation_probability=0")
+        if annotation_mode == "ap" and annotation_probability != 1.0:
+            raise ValueError("ap mode requires annotation_probability=1")
 
         self.token_to_id = dict(token_to_id)
         self._bos_id = self._token_id("<BOS>")

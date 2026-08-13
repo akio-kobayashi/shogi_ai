@@ -20,7 +20,7 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from data import load_vocabulary
-from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, TERMINAL_ENCODING, factorize_usi
+from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, TERMINAL_ENCODING, annotation_piece_token, factorize_history_move, factorize_usi
 from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
 
@@ -240,6 +240,7 @@ def read_queries(
     max_seq_len: int,
     tasks: Sequence[str] | None = None,
     max_terminal_moves: int | None = None,
+    evaluation_annotation_mode: str = "vanilla",
 ) -> Dict[str, list[dict]]:
     queries = {task: [] for task in (tasks or TASK_SPECS)}
     wanted = set(distances)
@@ -257,6 +258,11 @@ def read_queries(
             recurrent_start = len(base)
             history: list[str] = []
             moves = [str(value) for value in record.get("move_tokens", [])]
+            annotations = [dict(value) for value in record.get("move_annotations", [])]
+            if evaluation_annotation_mode == "ap" and len(annotations) != len(moves):
+                raise ValueError("move_annotations do not align with move_tokens")
+            if not annotations:
+                annotations = [{} for _ in moves]
             game_id = str(record.get("game_id", ""))
             drop_available_by_ply = _drop_available_by_ply(record, len(moves))
             promotion_choice_available_by_ply = _promotion_choice_available_by_ply(record, len(moves))
@@ -264,6 +270,8 @@ def read_queries(
                 parts = factorize_usi(move)
                 if ply in wanted:
                     prefix = base + history
+                    if evaluation_annotation_mode == "ap" and parts[0] != DROP_TOKEN:
+                        prefix = prefix + [annotation_piece_token(str(annotations[ply]["piece"]))]
                     if parts[0] == DROP_TOKEN:
                         piece_index = _target_index(parts[1], vocabulary, BASIC_PIECE_TOKENS)
                         _append_query(queries, "actual_move_kind", prefix, 1, ply, game_id, recurrent_start, max_examples, max_seq_len)
@@ -285,14 +293,17 @@ def read_queries(
                             _append_query(queries, "actual_destination_promote", prefix + [parts[0], PROMOTE_TOKEN], destination, ply, game_id, recurrent_start, max_examples, max_seq_len)
                         else:
                             _append_query(queries, "actual_destination_nonpromote", prefix + [parts[0]], destination, ply, game_id, recurrent_start, max_examples, max_seq_len)
-                    # 既存の学習・評価スクリプトと同様，評価対象はRAPなし系列である。
-                history.extend(parts)
+                history.extend(factorize_history_move(
+                    move, annotations[ply], evaluation_annotation_mode,
+                ))
             # 終端直前とその1手前を同一対局から対で採取する．これにより各対局が
             # 正例・負例を1件ずつ持ち，単純なクラス頻度では判定できない．
             terminal_queries = queries.get("terminal_next")
             terminal_eligible = max_terminal_moves is None or len(moves) <= max_terminal_moves
             if terminal_queries is not None and moves and terminal_eligible and len(terminal_queries) + 2 <= max_examples:
-                last_parts = factorize_usi(moves[-1])
+                last_parts = factorize_history_move(
+                    moves[-1], annotations[-1], evaluation_annotation_mode,
+                )
                 final_history = list(history)
                 before_last = final_history[: -len(last_parts)]
                 negative_tokens = base + before_last
@@ -434,6 +445,7 @@ def main():
     if settings.get("terminal_encoding") != TERMINAL_ENCODING:
         raise ValueError("checkpoint was not trained with complete-game EOS supervision")
     state_prompt_mode = str(settings.get("state_prompt_mode", "implicit_initial"))
+    evaluation_annotation_mode = "ap" if settings.get("annotation_mode") == "ap" else "vanilla"
     if str(settings.get("start_selection", "fixed_initial")) != "fixed_initial":
         raise ValueError("action probe requires fixed_initial checkpoint")
     config = ModelConfig(**checkpoint["config"])
@@ -450,11 +462,11 @@ def main():
     paths = {"train": args.train_jsonl, "validation": args.validation_jsonl, "evaluation": args.evaluation_jsonl}
     split_game_counts = assert_disjoint_game_ids(paths)
     all_queries = {
-        split: read_queries(path, vocabulary, state_prompt_mode, distances, limits[split], args.max_seq_len, selected_tasks, max_terminal_moves)
+        split: read_queries(path, vocabulary, state_prompt_mode, distances, limits[split], args.max_seq_len, selected_tasks, max_terminal_moves, evaluation_annotation_mode)
         for split, path in paths.items()
     }
     print(json.dumps({"event": "action_probe_query_counts", "counts": {split: {task: len(values) for task, values in tasks.items()} for split, tasks in all_queries.items()}}, ensure_ascii=False), flush=True)
-    result = {"format_version": 1, "checkpoint": args.checkpoint, "settings": vars(args), "state_prompt_mode": state_prompt_mode, "evaluation_input_rap": False, "split_game_counts": split_game_counts, "game_splits_disjoint": True, "tasks": {}}
+    result = {"format_version": 2, "checkpoint": args.checkpoint, "settings": vars(args), "state_prompt_mode": state_prompt_mode, "evaluation_input_annotation_mode": evaluation_annotation_mode, "evaluation_input_rap": False, "oracle_piece_conditioned": evaluation_annotation_mode == "ap", "split_game_counts": split_game_counts, "game_splits_disjoint": True, "tasks": {}}
     saved = {"checkpoint": args.checkpoint, "sources": sources, "tasks": {}}
     for task in selected_tasks:
         _, classes = TASK_SPECS[task]

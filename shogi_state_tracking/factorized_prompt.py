@@ -86,6 +86,24 @@ def factorize_usi(move_usi: str) -> List[str]:
     return [source, PROMOTE_TOKEN, destination] if len(move_usi) == 5 else [source, destination]
 
 
+def factorize_history_move(
+    move_usi: str,
+    annotation: dict | None = None,
+    annotation_mode: str = "vanilla",
+) -> List[str]:
+    """評価履歴用の1指手を符号化する．
+
+    RAPは評価時に注釈を外すが，AP（always piece type）はoracle条件なので
+    通常移動の駒種を評価時にも残す．駒打ちは本体に駒種を含むため重複させない．
+    """
+    parts = factorize_usi(move_usi)
+    if annotation_mode != "ap" or parts[0] == DROP_TOKEN:
+        return parts
+    if annotation is None or not bool(annotation.get("eligible", False)):
+        raise ValueError("AP history requires an eligible piece annotation for {}".format(move_usi))
+    return [annotation_piece_token(str(annotation["piece"])), *parts]
+
+
 def unfactorize_usi(tokens: Sequence[str]) -> str:
     """1指手分のtoken列をUSIへ戻す．RAP tokenは含めない．"""
     values = list(tokens)

@@ -58,6 +58,25 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertLess(len(implicit["input_ids"]), len(explicit["input_ids"]))
         self.assertEqual(int(implicit["move_boundary_mask"].sum()), 1)
 
+    def test_ap_annotates_every_eligible_normal_move(self):
+        from factorized_prompt import factorized_vocabulary_tokens
+        from factorized_prompt_data import FactorizedPromptSequenceDataset
+
+        vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "train.jsonl"
+            path.write_text(json.dumps(self.record()) + "\n", encoding="utf-8")
+            example = FactorizedPromptSequenceDataset(
+                str(path), vocab, annotation_mode="ap", annotation_probability=1.0,
+                randomize_each_epoch=False,
+            )[0]
+            with self.assertRaisesRegex(ValueError, "ap mode requires"):
+                FactorizedPromptSequenceDataset(
+                    str(path), vocab, annotation_mode="ap", annotation_probability=0.5,
+                    randomize_each_epoch=False,
+                )
+        self.assertEqual(int(example["hint_target_mask"].sum()), 1)
+
     def test_standard_initial_sfen_requires_all_nine_pawns(self):
         from factorized_prompt_data import is_standard_initial_sfen
 
@@ -323,6 +342,38 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual([len(batch) for batch in batches], [2, 2, 1])
         self.assertEqual(statistics["queries"], 5)
         self.assertLessEqual(max(map(len, batches)), args.batch_size)
+
+    def test_ap_move_evaluation_keeps_oracle_piece_tokens_in_history(self):
+        from evaluate_factorized_moves import iter_query_batches
+        from factorized_prompt import factorized_vocabulary_tokens
+
+        vocab = {token: index for index, token in enumerate(factorized_vocabulary_tokens())}
+        record = self.record()
+        record["move_tokens"] = ["7g7f", "3c3d"]
+        record["move_annotations"] = [
+            {"eligible": True, "piece": "<P>", "source": "<SQ_7g>"},
+            {"eligible": True, "piece": "<P>", "source": "<SQ_3c>"},
+        ]
+        record["evaluation_steps"] = [
+            {"ply": 0, "target_move": "7g7f", "legal_moves": ["7g7f"]},
+            {"ply": 1, "target_move": "3c3d", "legal_moves": ["3c3d"]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evaluation.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            args = SimpleNamespace(
+                evaluation_jsonl=str(path), history_distances=(1,), max_games=1,
+                max_queries=1, candidates_per_game=1, state_prompt_mode="implicit_initial",
+                evaluation_annotation_mode="ap", batch_size=1,
+                length_bucket_pool_batches=1,
+            )
+            query = list(iter_query_batches(args, vocab, 64, {"games": 0, "queries": 0}))[0][0]
+        tokens = {value: token for token, value in vocab.items()}
+        prefix = [tokens[value] for value in query["prefix_ids"]]
+        self.assertEqual(
+            prefix,
+            ["<BOS>", "<MOVES>", "<P>", "<SQ_7g>", "<SQ_7f>", "<P>"],
+        )
 
     def test_batched_beam_matches_single_query_beam(self):
         from evaluate_factorized_moves import beam_batch_cached, beam_single_cached
