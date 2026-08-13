@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "${MODEL_TYPE}" in llama|vanilla) ;; *) echo "--model-type must be llama or vanilla" >&2; exit 2 ;; esac
-case "${MODEL_SIZE}" in small|base|large) ;; *) echo "--model-size must be small, base, or large" >&2; exit 2 ;; esac
+case "${MODEL_SIZE}" in small|base|large|reference) ;; *) echo "--model-size must be small, base, large, or reference" >&2; exit 2 ;; esac
 echo "factorized experiment configuration: model_type=${MODEL_TYPE} model_size=${MODEL_SIZE} rap_rates=${RAP_RATES} seeds=${SEEDS}" >&2
 
 for path in "${DATASET_DIR}/train.jsonl" "${DATASET_DIR}/validation.jsonl" "${DATASET_DIR}/evaluation.jsonl" "${VOCAB}" "${MANIFEST}"; do

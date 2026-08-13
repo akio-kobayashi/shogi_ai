@@ -411,6 +411,34 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 for (_, actual_score), (_, expected_score) in zip(actual_query, expected_query):
                     self.assertAlmostEqual(actual_score, expected_score, places=5)
 
+    def test_hand_transition_metrics_separates_capture_and_drop(self):
+        from evaluate_factorized_hand_dynamics import hand_transition_metrics
+
+        events = [
+            {
+                "event_type": "capture", "changed_slot": 0,
+                "before_hands": [0] * 14, "after_hands": [1] + [0] * 13,
+            },
+            {
+                "event_type": "drop", "changed_slot": 7,
+                "before_hands": [0] * 7 + [2] + [0] * 6,
+                "after_hands": [0] * 7 + [1] + [0] * 6,
+            },
+        ]
+        before = torch.tensor([events[0]["before_hands"], events[1]["before_hands"]])
+        after = torch.tensor([events[0]["after_hands"], events[1]["after_hands"]])
+        metrics = hand_transition_metrics(before, after, events)
+        self.assertEqual(metrics["capture"]["events"], 1)
+        self.assertEqual(metrics["drop"]["events"], 1)
+        self.assertEqual(metrics["all"]["changed_slot_delta_accuracy"], 1.0)
+        self.assertEqual(metrics["all"]["full_hand_delta_exact_match"], 1.0)
+
+        wrong_after = after.clone()
+        wrong_after[1, 7] = 2
+        wrong = hand_transition_metrics(before, wrong_after, events)
+        self.assertEqual(wrong["capture"]["changed_slot_delta_accuracy"], 1.0)
+        self.assertEqual(wrong["drop"]["changed_slot_delta_accuracy"], 0.0)
+
     def test_best_checkpoint_can_omit_optimizer_state(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from models import ModelConfig, build_model

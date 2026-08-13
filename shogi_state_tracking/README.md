@@ -134,7 +134,23 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
   factorized_v3_eos_results
 ```
 
-`MODEL_TYPE`は`llama`または`vanilla`，`MODEL_SIZE`は`small`，`base`，`large`を指定できる．学習が`best.pt`を生成しなかった場合，評価を開始せず異常終了する．
+`MODEL_TYPE`は`llama`または`vanilla`，`MODEL_SIZE`は`small`，`base`，`large`，`reference`を指定できる．`reference`はToshniwal et al. (2021)のGPT-2 small型に深さとhidden sizeを合わせた12層・幅768・12 headの構成である．125語彙ではLlama型が約85.0M，Vanilla型が最大系列長2560の学習可能な位置埋め込みを含めて約87.0Mとなる．学習が`best.pt`を生成しなかった場合，評価を開始せず異常終了する．
+
+先行研究対応の主実験は次のように実行する．`--model-size reference`は，主実験，RAP挿入率ablation，AP，個別baselineのすべてで同じ出力ラベル`llama-reference`へ伝播する．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_main_experiment.sh \
+  factorized_v3_eos_data factorized_v3_reference_results \
+  --model-type llama --model-size reference
+
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_ap_experiment.sh \
+  factorized_v3_eos_data factorized_v3_reference_results \
+  --model-type llama --model-size reference
+```
+
+評価だけを再実行する場合は，サイズ名を別途指定する必要はない．checkpoint内の`model_config`からreference構成を復元する．
 
 ## RAP挿入率のablation
 
@@ -199,6 +215,37 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 
 条件付き指手プローブは，内部状態の証拠ではなく，指手の各構成要素が層ごとにどの程度線形復号可能かを調べる補助分析として扱う．
 
+### 持ち駒遷移・駒打ちの独立評価
+
+学習済みcheckpointに対し，既存の総合評価とは独立して線形状態プローブを学習し，
+駒取りによる持ち駒の増加，駒打ちによる減少，および駒打ちの正当性を評価できる．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_hand_evaluation.sh \
+  factorized_v3_eos_results/llama-small/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
+  factorized_v3_eos_data \
+  factorized_v3_eos_data/vocab.json \
+  factorized_v3_eos_results/manual-hand-evaluation
+```
+
+このシェルは`linear-probes/linear_probes.pt`を自分で作成してから，
+`hand_dynamics_metrics.json`を出力する．既存probeを再利用する場合だけ，
+`REUSE_LINEAR_PROBES=1`を指定する．主な指標は次のとおりである．
+
+- 駒取り・駒打ち前後の持ち駒完全一致率
+- 変化した持ち駒slotの前後正解率と増減正解率
+- 関係しない13 slotを変更しなかった率
+- 14 slot全体の差分完全一致率
+- `<DROP>`を条件とした保有駒への確率質量
+- 選択駒種を実際に持っている率
+- 選択駒種を合法地点へ打つ確率質量とtop-1完全合法率
+
+駒打ち行動の評価対象は，正解次手が駒打ちである局面に限定する．これによりAPでも，
+現在指手の正解駒種tokenが入力へ先に現れることを避ける．cshogiは教師ラベルと合法性の
+判定にだけ使用し，モデル入力や学習には使用しない．APは過去の通常移動へ駒種注釈を持つ
+oracle条件なので，RAPなし・RAPとの公平な無注釈比較ではないことに注意する．
+
 ## 出力
 
 1条件の既定出力は次の構成になる．
@@ -219,6 +266,9 @@ RESULTS_DIR/
             move_metrics.json
             probes/
             terminal-probe/
+          hand-evaluation/
+            hand_dynamics_metrics.json
+            linear-probes/
       rap-p0.15/
         seed-20260802/
           ...

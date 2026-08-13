@@ -38,6 +38,10 @@ MODEL_SIZES = {
     "small": {"d_model": 384, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
     "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 2304},
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 2880},
+    # Toshniwal et al. (2021) のGPT-2 small型（12層，幅768，12 head）に
+    # hidden sizeと深さを合わせる先行研究対応条件．小語彙化後のbackboneは
+    # 約85M parameters（max_seq_len=2560の位置埋め込み込みでは約87M）．
+    "reference": {"d_model": 768, "n_layers": 12, "n_heads": 12, "d_ff": 3072},
 }
 
 # VanillaのGELU FFNは2投影，SwiGLU FFNは3投影である。d_ffを2/3にして，
@@ -46,6 +50,9 @@ LLAMA_MODEL_SIZES = {
     "small": {"d_model": 384, "n_layers": 12, "n_heads": 12, "d_ff": 1024},
     "base": {"d_model": 576, "n_layers": 12, "n_heads": 12, "d_ff": 1536},
     "large": {"d_model": 720, "n_layers": 12, "n_heads": 12, "d_ff": 1920},
+    # SwiGLUは3投影なのでd_ffをVanillaの2/3とし，attention・FFNの容量を揃える．
+    # Vanillaだけが学習可能な絶対位置埋め込みを持つため，総数は完全一致しない．
+    "reference": {"d_model": 768, "n_layers": 12, "n_heads": 12, "d_ff": 2048},
 }
 
 
@@ -91,7 +98,7 @@ def validate_output_dir_model_label(output: Path, model_type: str, model_size: s
     """出力パス内のfamily-sizeラベルと実際の学習設定の不一致を拒否する。"""
     expected = (model_type, model_size)
     for component in output.parts:
-        match = re.fullmatch(r"(vanilla|llama)-(small|base|large)", component)
+        match = re.fullmatch(r"(vanilla|llama)-(small|base|large|reference)", component)
         if match and match.groups() != expected:
             actual = "{}-{}".format(*expected)
             raise ValueError(
