@@ -31,6 +31,7 @@ EXPECTED_RESULT_NAMES = {
     "token_probe_metrics.json",
     "probe_metrics.json",
     "action_probe_metrics.json",
+    "hand_dynamics_metrics.json",
 }
 
 
@@ -128,12 +129,15 @@ def main() -> None:
     entries: Dict[str, bytes] = {}
     sanitized_files: List[str] = []
     result_names = set()
+    result_locations: Dict[str, List[str]] = {}
     for source in selected_result_files(results, args):
         relative = source.relative_to(results)
         destination = "analysis_bundle/results/{}".format(relative.as_posix())
         data, sanitized = read_for_archive(source, replace)
         entries[destination] = data
         result_names.add(source.name)
+        if source.name in EXPECTED_RESULT_NAMES:
+            result_locations.setdefault(source.name, []).append(relative.as_posix())
         if sanitized:
             sanitized_files.append(destination)
 
@@ -170,6 +174,10 @@ def main() -> None:
         },
         "present_result_types": sorted(result_names & EXPECTED_RESULT_NAMES),
         "missing_common_result_types": sorted(EXPECTED_RESULT_NAMES - result_names),
+        # 条件ディレクトリ外へ独立出力した評価も，どこから収集したか確認できる．
+        "result_locations": {
+            name: sorted(paths) for name, paths in sorted(result_locations.items())
+        },
         "files": [],
     }
     for name, data in sorted(entries.items()):
@@ -210,6 +218,7 @@ See `COLLECTION_MANIFEST.json` for checksums and missing optional result types.
         "bytes": output.stat().st_size,
         "present_result_types": manifest["present_result_types"],
         "missing_common_result_types": manifest["missing_common_result_types"],
+        "result_locations": manifest["result_locations"],
     }, ensure_ascii=False, indent=2))
 
 

@@ -11,10 +11,13 @@ if [[ "$(uname -s)" == Linux && "${SHOGI_MEMORY_GUARD_ACTIVE:-0}" != 1 && "${ALL
   exec "${SCRIPT_DIR}/scripts/run_memory_bounded.sh" "$0" "$@"
 fi
 
-CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB OUTPUT_DIR}"
+CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB [OUTPUT_DIR]}"
 DATASET_DIR="${2:?dataset directory is required}"
 VOCAB="${3:?factorized vocabulary is required}"
-OUTPUT_DIR="${4:?output directory is required}"
+# 通常はbest.ptと同じrunのevaluation以下へ置く．これにより総合評価と同じ
+# 結果treeに入り，package_analysis_results.shから自動的に収集される．
+RUN_DIR="$(cd "$(dirname "${CHECKPOINT}")" && pwd)"
+OUTPUT_DIR="${4:-${RUN_DIR}/evaluation/hand-evaluation}"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 PROBE_DIR="${OUTPUT_DIR}/linear-probes"
 
@@ -24,6 +27,7 @@ for split in train validation evaluation; do
 done
 [[ -f "${VOCAB}" ]] || { echo "vocabulary does not exist: ${VOCAB}" >&2; exit 2; }
 mkdir -p "${OUTPUT_DIR}"
+echo "hand evaluation output: ${OUTPUT_DIR}" >&2
 
 if [[ "${REUSE_LINEAR_PROBES:-0}" != 1 || ! -f "${PROBE_DIR}/linear_probes.pt" ]]; then
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_new_prompt_probes.py" \

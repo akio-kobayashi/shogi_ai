@@ -225,12 +225,12 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
   ./scripts/run_factorized_hand_evaluation.sh \
   factorized_v3_eos_results/llama-small/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
   factorized_v3_eos_data \
-  factorized_v3_eos_data/vocab.json \
-  factorized_v3_eos_results/manual-hand-evaluation
+  factorized_v3_eos_data/vocab.json
 ```
 
-このシェルは`linear-probes/linear_probes.pt`を自分で作成してから，
-`hand_dynamics_metrics.json`を出力する．既存probeを再利用する場合だけ，
+出力先はcheckpointと同じrunにある`evaluation/hand-evaluation`である．このシェルは
+`linear-probes/linear_probes.pt`を自分で作成してから，`hand_dynamics_metrics.json`を
+出力する．第4引数を与えた場合だけ任意の出力先へ変更できる．既存probeを再利用する場合だけ，
 `REUSE_LINEAR_PROBES=1`を指定する．主な指標は次のとおりである．
 
 - 駒取り・駒打ち前後の持ち駒完全一致率
@@ -295,7 +295,10 @@ archiveへまとめられる．datasetのJSONLと`best.pt`／`last.pt`は含め�
 ```
 
 この`factorized_v3_analysis.tar.gz`を転送すれば，RAP条件間の指手指標，状態probe，
-指手probe，終端probe，学習曲線を分析できる．盤面ヒートマップを別計算機で再生成する
+指手probe，終端probe，持ち駒遷移・駒打ち評価，学習曲線を分析できる．
+持ち駒評価は各runの`evaluation/hand-evaluation/hand_dynamics_metrics.json`から収集される．
+収集元は`COLLECTION_MANIFEST.json`の`result_locations`で確認できる．
+盤面ヒートマップを別計算機で再生成する
 ためにprobe重みや予測tensorも必要な場合だけ，次を追加する．
 
 ```bash
