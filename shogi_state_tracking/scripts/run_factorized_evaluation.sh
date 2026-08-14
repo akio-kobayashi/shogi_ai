@@ -10,7 +10,7 @@ if [[ "$(uname -s)" == Linux && "${SHOGI_MEMORY_GUARD_ACTIVE:-0}" != 1 && "${ALL
   }
   exec "${SCRIPT_DIR}/scripts/run_memory_bounded.sh" "$0" "$@"
 fi
-CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB OUTPUT_DIR [main|moves|token|probes|action-probes|all]}"
+CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB OUTPUT_DIR [main|moves|token|chess|probes|action-probes|all]}"
 DATASET_DIR="${2:?dataset directory is required}"
 VOCAB="${3:?factorized vocabulary is required}"
 OUTPUT_DIR="${4:?output directory is required}"
@@ -52,6 +52,11 @@ if [[ "${STAGE}" == token || "${STAGE}" == main || "${STAGE}" == all ]]; then
     --amp "${EVAL_AMP:-auto}" \
     --max-queries "${MAX_TOKEN_PROBE_QUERIES:-30000}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/token_probe.log"
+fi
+
+if [[ "${STAGE}" == chess || "${STAGE}" == all ]]; then
+  ALLOW_UNBOUNDED_MEMORY=1 "${SCRIPT_DIR}/scripts/run_factorized_chess_protocol.sh" \
+    "${CHECKPOINT}" "${DATASET_DIR}" "${VOCAB}" "${OUTPUT_DIR}/chess-protocol"
 fi
 
 if [[ "${STAGE}" == probes || "${STAGE}" == main || "${STAGE}" == all ]]; then
@@ -108,4 +113,4 @@ if [[ "${STAGE}" == action-probes || "${STAGE}" == all ]]; then
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/action_probe_evaluation.log"
 fi
 
-case "${STAGE}" in main|moves|token|probes|action-probes|all) ;; *) echo "stage must be main, moves, token, probes, action-probes, or all" >&2; exit 2 ;; esac
+case "${STAGE}" in main|moves|token|chess|probes|action-probes|all) ;; *) echo "stage must be main, moves, token, chess, probes, action-probes, or all" >&2; exit 2 ;; esac

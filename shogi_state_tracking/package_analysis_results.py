@@ -33,6 +33,8 @@ EXPECTED_RESULT_NAMES = {
     "action_probe_metrics.json",
     "hand_dynamics_metrics.json",
 }
+OPTIONAL_RESULT_NAMES = {"chess_protocol_metrics.json"}
+TRACKED_RESULT_NAMES = EXPECTED_RESULT_NAMES | OPTIONAL_RESULT_NAMES
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,7 +138,7 @@ def main() -> None:
         data, sanitized = read_for_archive(source, replace)
         entries[destination] = data
         result_names.add(source.name)
-        if source.name in EXPECTED_RESULT_NAMES:
+        if source.name in TRACKED_RESULT_NAMES:
             result_locations.setdefault(source.name, []).append(relative.as_posix())
         if sanitized:
             sanitized_files.append(destination)
@@ -172,7 +174,7 @@ def main() -> None:
             "dataset_jsonl_included": False,
             "absolute_paths_sanitized_in_text_files": True,
         },
-        "present_result_types": sorted(result_names & EXPECTED_RESULT_NAMES),
+        "present_result_types": sorted(result_names & TRACKED_RESULT_NAMES),
         "missing_common_result_types": sorted(EXPECTED_RESULT_NAMES - result_names),
         # 条件ディレクトリ外へ独立出力した評価も，どこから収集したか確認できる．
         "result_locations": {

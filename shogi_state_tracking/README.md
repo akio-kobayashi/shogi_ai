@@ -196,10 +196,35 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 |---|---|
 | `moves` | 指手予測と合法性 |
 | `token` | RAP token probe |
+| `chess` | チェス先行研究に対応するStart／End token評価 |
 | `probes` | 盤面・持ち駒・手番などの線形状態プローブ |
 | `action-probes` | 指手構成要素の条件付き線形プローブ |
 | `main` | `moves`，`token`，`probes`，終端プローブ |
 | `all` | 上記すべて |
+
+### チェス先行研究対応の比較評価
+
+ToshniwalらのStart／End課題と比較する評価だけを，既存checkpointへ独立して
+追加実行できる．再学習およびdataset再生成は不要である．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_chess_protocol.sh \
+  factorized_v3_eos_results/llama-small/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
+  factorized_v3_eos_data \
+  factorized_v3_eos_data/vocab.json
+```
+
+既定では，平手初期局面から51～100 plyの履歴を持ち，非歩の盤上駒を動かす
+非成り指手のうち，その移動元に合法な成り分岐がない事例を全評価棋譜から
+seed固定で1,000件抽出する．Start-Actual／Start-Otherおよび
+End-Actual／End-Otherについて，チェス論文と同じExM，LgM accuracy，
+LgM R-Precisionを算出する．順位は81座標だけに制限せず，全125語彙上で求める．
+出力はcheckpoint配下の`evaluation/chess-protocol/chess_protocol_metrics.json`である．
+
+これは将棋への対応評価であり，盤面サイズと規則そのものはチェスと異なる．また，
+VanillaモデルのStart課題では駒種tokenが分布外入力となるため，RAPとの公平な
+比較にはEnd課題を用い，Start課題はRAPが獲得した状態追跡の診断として扱う．
 
 主な評価指標は次のとおりである．
 

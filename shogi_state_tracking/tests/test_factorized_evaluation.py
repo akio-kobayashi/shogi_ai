@@ -179,6 +179,64 @@ class FactorizedEvaluationTest(unittest.TestCase):
         )
         self.assertAlmostEqual(drop_nll, math.log(len(vocabulary)), places=6)
 
+    def test_chess_protocol_instance_uses_true_start_and_end_prompts(self):
+        from evaluate_factorized_chess_protocol import make_instance
+
+        record = {
+            "game_id": "chess-compatible",
+            "move_tokens": ["8h3c"],
+            "move_annotations": [{"eligible": True, "piece": "<B>", "source": "<SQ_8h>"}],
+            "evaluation_steps": [{
+                "ply": 0,
+                "target_move": "8h3c",
+                "legal_moves": ["8h3c", "8h4d", "2h2f"],
+                "legal_sources_by_piece": {
+                    "<B>": ["<SQ_8h>"],
+                    "<R>": ["<SQ_2h>"],
+                },
+            }],
+        }
+        instance = make_instance(record, 0, ["<SQ_7g>", "<SQ_7f>"], "vanilla", 7)
+        self.assertEqual(instance["tasks"]["start_actual"]["prompt"][-1], "<B>")
+        self.assertEqual(instance["tasks"]["start_actual"]["exact"], "<SQ_8h>")
+        self.assertEqual(instance["tasks"]["end_actual"]["prompt"][-1], "<SQ_8h>")
+        self.assertEqual(instance["tasks"]["end_actual"]["exact"], "<SQ_3c>")
+        self.assertEqual(instance["tasks"]["start_other"]["legal"], ["<SQ_2h>"])
+        self.assertEqual(instance["tasks"]["end_other"]["legal"], ["<SQ_2f>"])
+
+    def test_chess_protocol_excludes_pawns_drops_and_promotion_branches(self):
+        from evaluate_factorized_chess_protocol import make_instance
+
+        base = {
+            "game_id": "excluded",
+            "move_tokens": ["7g7f"],
+            "move_annotations": [{"eligible": True, "piece": "<P>", "source": "<SQ_7g>"}],
+            "evaluation_steps": [{
+                "ply": 0, "target_move": "7g7f", "legal_moves": ["7g7f"],
+                "legal_sources_by_piece": {"<P>": ["<SQ_7g>"]},
+            }],
+        }
+        self.assertIsNone(make_instance(base, 0, [], "vanilla", 7))
+        promoted = json.loads(json.dumps(base))
+        promoted["move_tokens"] = ["8h3c"]
+        promoted["move_annotations"] = [{"eligible": True, "piece": "<B>", "source": "<SQ_8h>"}]
+        promoted["evaluation_steps"] = [{
+            "ply": 0, "target_move": "8h3c", "legal_moves": ["8h3c", "8h3c+"],
+            "legal_sources_by_piece": {"<B>": ["<SQ_8h>"]},
+        }]
+        self.assertIsNone(make_instance(promoted, 0, [], "vanilla", 7))
+
+    def test_chess_protocol_scores_over_full_vocabulary(self):
+        from evaluate_factorized_chess_protocol import score_next_token
+
+        # 非座標token 0が最大なら，座標だけに絞った場合と違ってExM/LgMは失敗する．
+        logits = torch.tensor([9.0, 8.0, 7.0, 6.0])
+        score = score_next_token(logits, exact_id=1, legal_ids=[1, 2], square_id_set={1, 2, 3})
+        self.assertEqual(score["exact_move_correct"], 0)
+        self.assertEqual(score["legal_move_correct"], 0)
+        self.assertEqual(score["square_top1"], 0)
+        self.assertEqual(score["legal_r_precision"], 0.5)
+
     def test_eos_is_supervised_only_for_complete_games(self):
         from factorized_prompt import factorized_vocabulary_tokens
         from factorized_prompt_data import FactorizedPromptSequenceDataset
