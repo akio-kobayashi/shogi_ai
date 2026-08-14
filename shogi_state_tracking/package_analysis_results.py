@@ -33,7 +33,10 @@ EXPECTED_RESULT_NAMES = {
     "action_probe_metrics.json",
     "hand_dynamics_metrics.json",
 }
-OPTIONAL_RESULT_NAMES = {"chess_protocol_metrics.json"}
+OPTIONAL_RESULT_NAMES = {
+    "chess_protocol_metrics.json",
+    "policy_relevance_metrics.json",
+}
 TRACKED_RESULT_NAMES = EXPECTED_RESULT_NAMES | OPTIONAL_RESULT_NAMES
 
 

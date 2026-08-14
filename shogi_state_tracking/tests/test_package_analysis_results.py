@@ -22,6 +22,11 @@ class PackageAnalysisResultsTest(unittest.TestCase):
                 json.dumps({"metrics": {"drop_top1_fully_legal_rate": 0.5}}),
                 encoding="utf-8",
             )
+            policy = hand.parent / "policy-relevance"
+            policy.mkdir()
+            (policy / "policy_relevance_metrics.json").write_text(
+                json.dumps({"decoding": {}, "steering": {}}), encoding="utf-8",
+            )
             output = root / "analysis.tar.gz"
             args = argparse.Namespace(
                 results_dir=str(results), output=str(output), dataset_dir=None,
@@ -53,6 +58,7 @@ class PackageAnalysisResultsTest(unittest.TestCase):
                     "evaluation/hand-evaluation/hand_dynamics_metrics.json"
                 ],
             )
+            self.assertIn("policy_relevance_metrics.json", manifest["present_result_types"])
 
 
 if __name__ == "__main__":
