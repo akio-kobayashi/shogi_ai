@@ -23,6 +23,28 @@ from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
 
 
+MAJOR_PIECE_TYPES = {"<B>", "<R>", "<HORSE>", "<DRAGON>"}
+MINOR_PIECE_TYPES = {"<P>", "<L>", "<N>", "<S>", "<G>", "<PRO_P>", "<PRO_L>", "<PRO_N>", "<PRO_S>"}
+
+
+def move_piece_and_kind(move, annotation):
+    move = str(move)
+    if "*" in move:
+        return "<{}>".format(move[0]), "drop"
+    piece = annotation_piece_token(str(annotation["piece"]))
+    return piece, "promotion" if move.endswith("+") else "normal"
+
+
+def move_piece_group(piece):
+    if piece in MAJOR_PIECE_TYPES:
+        return "major"
+    if piece in MINOR_PIECE_TYPES:
+        return "minor"
+    if piece == "<K>":
+        return "king"
+    return "other"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="factorized_v3指手評価")
     parser.add_argument("--checkpoint", required=True)
@@ -109,9 +131,16 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                         if args.evaluation_annotation_mode == "ap" and bool(record["move_annotations"][ply].get("eligible", False)):
                             prefix = prefix + [annotation_piece_token(str(record["move_annotations"][ply]["piece"]))]
                         if step is not None and len(prefix) + 3 <= max_seq_len:
+                            target = str(record["move_tokens"][ply])
+                            target_piece, target_kind = move_piece_and_kind(
+                                target, record["move_annotations"][ply]
+                            )
                             batch.append({
                                 "prefix_ids": [vocabulary[token] for token in prefix],
-                                "target": str(record["move_tokens"][ply]),
+                                "target": target,
+                                "target_piece": target_piece,
+                                "target_piece_group": move_piece_group(target_piece),
+                                "target_kind": target_kind,
                                 "legal_moves": set(str(value) for value in step["legal_moves"]),
                                 "distance": distance,
                                 "position_scope": position_scope(record, candidate, ply),
@@ -404,6 +433,21 @@ def summarize(total):
     return result
 
 
+def summarize_complete_moves(total):
+    """自律生成した指手全体だけを，構成要素のteacher forcingから分離する．"""
+    n = int(total["queries"])
+    if not n:
+        return {"queries": 0}
+    return {
+        "queries": n,
+        "complete_action_beam_top1_exact": total["greedy_full_move_top1"] / n,
+        "complete_action_beam_top5_exact": total["beam_full_move_top5"] / n,
+        "complete_action_beam_top1_syntactic": total["greedy_syntactic_rate"] / n,
+        "complete_action_beam_top1_legal": total["greedy_legal_rate"] / n,
+        "complete_action_beam_top5_contains_legal": total["beam_top5_contains_legal_rate"] / n,
+    }
+
+
 def main():
     args = parse_args()
     args.history_distances = parse_distances(args.history_distances)
@@ -442,6 +486,9 @@ def main():
     totals = {"all": empty_total(), "primary": empty_total()}
     by_distance = defaultdict(empty_total)
     by_position = defaultdict(empty_total)
+    complete_by_kind = defaultdict(empty_total)
+    complete_by_piece = defaultdict(empty_total)
+    complete_by_piece_group = defaultdict(empty_total)
     started = time.perf_counter()
     statistics = {"games": 0, "queries": 0}
     with torch.inference_mode(), amp_context(device, amp_dtype):
@@ -511,6 +558,9 @@ def main():
                 if query["distance"] in args.primary_history_distances:
                     add(totals["primary"], query, values)
                     add(by_position[query["position_scope"]], query, values)
+                    add(complete_by_kind[query["target_kind"]], query, values)
+                    add(complete_by_piece[query["target_piece"]], query, values)
+                    add(complete_by_piece_group[query["target_piece_group"]], query, values)
             done = int(totals["all"]["queries"])
             if args.progress_every and done // args.progress_every != (done - len(batch)) // args.progress_every:
                 print(json.dumps({"event": "evaluation_progress", "queries": done, "max_queries": args.max_queries, "elapsed_sec": round(time.perf_counter() - started, 1)}), flush=True)
@@ -519,7 +569,7 @@ def main():
         raise ValueError("no evaluation queries")
 
     output = {
-        "format_version": 4,
+        "format_version": 5,
         "checkpoint": args.checkpoint,
         "model_type": model_type,
         "move_encoding": MOVE_ENCODING,
@@ -536,11 +586,33 @@ def main():
             "by_history_distance": {key: summarize(value) for key, value in by_distance.items()},
             "by_position_scope": {key: summarize(value) for key, value in by_position.items()},
         },
+        "complete_move_evaluation": {
+            "definition": {
+                "normal": "(piece_at_source, source, promotion_flag, destination); piece_at_source is determined by the true pre-move state",
+                "drop": "(DROP, dropped_piece, destination)",
+                "exact": "the autonomously decoded complete USI action equals the recorded action",
+                "legal": "the autonomously decoded complete USI action belongs to the cshogi legal-move set saved for the position",
+                "search_note": "top-1 and top-5 are from the retained width-5 grammar-constrained beam and are approximations to the global action ranking",
+                "conditioning": "no gold move component is supplied during complete-action decoding",
+                "breakdown_scope": "primary history distances only",
+            },
+            "all_reported_distances": summarize_complete_moves(totals["all"]),
+            "primary": summarize_complete_moves(totals["primary"]),
+            "by_move_kind": {
+                key: summarize_complete_moves(value) for key, value in sorted(complete_by_kind.items())
+            },
+            "by_piece_group": {
+                key: summarize_complete_moves(value) for key, value in sorted(complete_by_piece_group.items())
+            },
+            "by_piece": {
+                key: summarize_complete_moves(value) for key, value in sorted(complete_by_piece.items())
+            },
+        },
         "notes": {
             "canonical_perplexity": "token-level perplexity after masking RAP-only piece-token logits before normalization; intrinsic DROP piece tokens remain available after DROP",
             "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
-            "greedy_and_beam": "autonomous decoding is normalized within the factorized move grammar, not shogi legality",
+            "greedy_and_beam": "legacy greedy_* fields use the first result of the width-5 grammar-constrained beam; complete_move_evaluation names this beam output explicitly; decoding is not constrained by shogi legality",
             "legal_probability_mass": "beam_legal_probability_lower_bound sums only legal moves retained by beam search; exact mass requires scoring every legal move sequence",
         },
     }

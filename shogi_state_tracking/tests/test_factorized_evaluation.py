@@ -179,6 +179,22 @@ class FactorizedEvaluationTest(unittest.TestCase):
         )
         self.assertAlmostEqual(drop_nll, math.log(len(vocabulary)), places=6)
 
+    def test_complete_move_definition_handles_normal_promotion_and_drop(self):
+        from evaluate_factorized_moves import move_piece_and_kind, move_piece_group
+
+        self.assertEqual(
+            move_piece_and_kind("7g7f", {"eligible": True, "piece": "<P>"}),
+            ("<P>", "normal"),
+        )
+        self.assertEqual(
+            move_piece_and_kind("2b3c+", {"eligible": True, "piece": "<B>"}),
+            ("<B>", "promotion"),
+        )
+        self.assertEqual(move_piece_and_kind("P*5e", {"eligible": False}), ("<P>", "drop"))
+        self.assertEqual(move_piece_group("<R>"), "major")
+        self.assertEqual(move_piece_group("<S>"), "minor")
+        self.assertEqual(move_piece_group("<K>"), "king")
+
     def test_chess_protocol_instance_uses_true_start_and_end_prompts(self):
         from evaluate_factorized_chess_protocol import make_instance
 
@@ -203,6 +219,8 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual(instance["tasks"]["end_actual"]["exact"], "<SQ_3c>")
         self.assertEqual(instance["tasks"]["start_other"]["legal"], ["<SQ_2h>"])
         self.assertEqual(instance["tasks"]["end_other"]["legal"], ["<SQ_2f>"])
+        self.assertEqual(instance["tasks"]["start_actual"]["piece"], "<B>")
+        self.assertEqual(instance["tasks"]["end_other"]["piece"], "<R>")
 
     def test_chess_protocol_excludes_pawns_drops_and_promotion_branches(self):
         from evaluate_factorized_chess_protocol import make_instance
@@ -226,6 +244,17 @@ class FactorizedEvaluationTest(unittest.TestCase):
         }]
         self.assertIsNone(make_instance(promoted, 0, [], "vanilla", 7))
 
+        other_promotes = json.loads(json.dumps(promoted))
+        other_promotes["evaluation_steps"] = [{
+            "ply": 0,
+            "target_move": "8h3c",
+            "legal_moves": ["8h3c", "2h2f", "2h2f+"],
+            "legal_sources_by_piece": {"<B>": ["<SQ_8h>"], "<R>": ["<SQ_2h>"]},
+        }]
+        instance = make_instance(other_promotes, 0, [], "vanilla", 7)
+        self.assertIsNotNone(instance)
+        self.assertNotIn("end_other", instance["tasks"])
+
     def test_chess_protocol_scores_over_full_vocabulary(self):
         from evaluate_factorized_chess_protocol import score_next_token
 
@@ -236,6 +265,96 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual(score["legal_move_correct"], 0)
         self.assertEqual(score["square_top1"], 0)
         self.assertEqual(score["legal_r_precision"], 0.5)
+
+    def test_chess_protocol_cardinality_baselines_and_strata(self):
+        from evaluate_factorized_chess_protocol import (
+            add_scores,
+            empty_task_metrics,
+            legal_count_bin,
+            piece_group,
+            summarize_task,
+        )
+
+        totals = empty_task_metrics()
+        examples = [
+            (1, "<B>", 1, 1.0),
+            (3, "<R>", 0, 2.0 / 3.0),
+            (8, "<S>", 1, 0.5),
+        ]
+        for legal_count, piece, legal_correct, r_precision in examples:
+            score = {
+                "legal_move_correct": legal_correct,
+                "square_top1": 1,
+                "exact_move_correct": legal_correct,
+                "legal_r_precision": r_precision,
+            }
+            for target in (
+                totals["overall"],
+                totals["by_legal_set_cardinality"][legal_count_bin(legal_count)],
+                totals["by_piece_group"][piece_group(piece)],
+                totals["by_piece"][piece],
+            ):
+                add_scores(target, score, exact_id=7, legal_count=legal_count)
+
+        summary = summarize_task(totals, vocabulary_size=125)
+        self.assertAlmostEqual(summary["legal_set_cardinality"]["mean"], 4.0)
+        self.assertEqual(summary["legal_set_cardinality"]["median"], 3.0)
+        self.assertAlmostEqual(
+            summary["chance_baselines"]["uniform_81_squares_legal_accuracy"], 4.0 / 81.0
+        )
+        self.assertAlmostEqual(
+            summary["chance_baselines"]["uniform_125_vocabulary_legal_accuracy"], 4.0 / 125.0
+        )
+        self.assertAlmostEqual(
+            summary["chance_baselines"]["uniform_legal_set_exact_accuracy"],
+            (1.0 + 1.0 / 3.0 + 1.0 / 8.0) / 3.0,
+        )
+        self.assertEqual(summary["by_legal_set_cardinality"]["1"]["queries"], 1)
+        self.assertEqual(summary["by_legal_set_cardinality"]["2_3"]["queries"], 1)
+        self.assertEqual(summary["by_legal_set_cardinality"]["4_7"]["queries"], 0)
+        self.assertEqual(summary["by_legal_set_cardinality"]["8_plus"]["queries"], 1)
+        self.assertEqual(summary["by_piece_group"]["major"]["queries"], 2)
+        self.assertEqual(summary["by_piece_group"]["minor"]["queries"], 1)
+
+    def test_chess_protocol_geometry_and_pseudo_legal_oracles(self):
+        from evaluate_factorized_chess_protocol import add_scores, empty_metrics, oracle_destination_sets, summarize
+
+        labels = ["<EMPTY>"] * 81
+
+        def place(square, label):
+            file_index = int(square[0]) - 1
+            rank_index = "abcdefghi".index(square[1])
+            labels[file_index * 9 + rank_index] = label
+
+        place("5e", "<B_R>")
+        place("5h", "<B_P>")
+        place("5c", "<W_S>")
+        place("2e", "<B_G>")
+        place("7e", "<W_B>")
+        geometry, pseudo = oracle_destination_sets(
+            {"probe_targets": {"board_labels_cshogi_order": labels}}, "<SQ_5e>", "<R>"
+        )
+        self.assertEqual(len(geometry), 16)
+        self.assertEqual(len(pseudo), 8)
+        self.assertIn("<SQ_5c>", pseudo)
+        self.assertNotIn("<SQ_5b>", pseudo)
+        self.assertNotIn("<SQ_5h>", pseudo)
+
+        metrics = empty_metrics()
+        score = {
+            "legal_move_correct": 1,
+            "square_top1": 1,
+            "exact_move_correct": 1,
+            "legal_r_precision": 1.0,
+        }
+        add_scores(metrics, score, exact_id=7, legal_count=4, geometry_count=16, pseudo_legal_count=8)
+        summary = summarize(metrics, 125)
+        oracle = summary["oracle_rule_baselines"]
+        self.assertEqual(oracle["coverage"], 1.0)
+        self.assertEqual(oracle["uniform_geometry_legal_accuracy"], 0.25)
+        self.assertEqual(oracle["uniform_pseudo_legal_legal_accuracy"], 0.5)
+        self.assertEqual(oracle["uniform_geometry_exact_accuracy"], 1.0 / 16.0)
+        self.assertEqual(oracle["uniform_pseudo_legal_exact_accuracy"], 1.0 / 8.0)
 
     def test_eos_is_supervised_only_for_complete_games(self):
         from factorized_prompt import factorized_vocabulary_tokens

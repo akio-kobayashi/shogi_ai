@@ -35,6 +35,7 @@ EXPECTED_RESULT_NAMES = {
 }
 OPTIONAL_RESULT_NAMES = {
     "chess_protocol_metrics.json",
+    "distribution_baselines.json",
     "policy_relevance_metrics.json",
 }
 TRACKED_RESULT_NAMES = EXPECTED_RESULT_NAMES | OPTIONAL_RESULT_NAMES

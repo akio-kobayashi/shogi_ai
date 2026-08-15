@@ -27,6 +27,9 @@ class PackageAnalysisResultsTest(unittest.TestCase):
             (policy / "policy_relevance_metrics.json").write_text(
                 json.dumps({"decoding": {}, "steering": {}}), encoding="utf-8",
             )
+            (hand.parent / "distribution_baselines.json").write_text(
+                json.dumps({"metrics": {"primary": {"queries": 10}}}), encoding="utf-8",
+            )
             output = root / "analysis.tar.gz"
             args = argparse.Namespace(
                 results_dir=str(results), output=str(output), dataset_dir=None,
@@ -59,6 +62,7 @@ class PackageAnalysisResultsTest(unittest.TestCase):
                 ],
             )
             self.assertIn("policy_relevance_metrics.json", manifest["present_result_types"])
+            self.assertIn("distribution_baselines.json", manifest["present_result_types"])
 
 
 if __name__ == "__main__":

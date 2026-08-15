@@ -28,17 +28,46 @@ PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${STAGE}" == moves || "${STAGE}" == main || "${STAGE}" == all ]]; then
+  EVAL_HISTORY_DISTANCES_VALUE="${EVAL_HISTORY_DISTANCES:-0,8,32}"
+  PRIMARY_HISTORY_DISTANCES_VALUE="${PRIMARY_HISTORY_DISTANCES:-8,32}"
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_moves.py" \
     --checkpoint "${CHECKPOINT}" \
     --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
     --vocab "${VOCAB}" \
     --output "${OUTPUT_DIR}/move_metrics.json" \
+    --history-distances "${EVAL_HISTORY_DISTANCES_VALUE}" \
+    --primary-history-distances "${PRIMARY_HISTORY_DISTANCES_VALUE}" \
+    --max-games "${MAX_EVAL_GAMES:-5000}" \
     --batch-size "${EVAL_BATCH_SIZE:-64}" \
     --length-bucket-pool-batches "${EVAL_LENGTH_BUCKET_POOL_BATCHES:-16}" \
     --beam-micro-batch-size "${BEAM_MICRO_BATCH_SIZE:-8}" \
     --amp "${EVAL_AMP:-auto}" \
     --max-queries "${MAX_EVAL_QUERIES:-30000}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/move_evaluation.log"
+
+  manifest_signature="$(cksum < "${DATASET_DIR}/dataset_manifest.json")"
+  manifest_signature="${manifest_signature// /_}"
+  baseline_key="d${manifest_signature}-h${EVAL_HISTORY_DISTANCES_VALUE//,/_}-p${PRIMARY_HISTORY_DISTANCES_VALUE//,/_}-g${MAX_EVAL_GAMES:-5000}-q${MAX_EVAL_QUERIES:-30000}"
+  baseline_cache_dir="${DISTRIBUTION_BASELINE_CACHE_DIR:-${DATASET_DIR}/evaluation-cache}"
+  baseline_cache="${baseline_cache_dir}/distribution_baselines-${baseline_key}.json"
+  mkdir -p "${baseline_cache_dir}"
+  if [[ ! -f "${baseline_cache}" || "${FORCE_DISTRIBUTION_BASELINE:-0}" == 1 ]]; then
+    baseline_temporary="${baseline_cache}.tmp.$$"
+    "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_distribution_baselines.py" \
+      --train-jsonl "${DATASET_DIR}/train.jsonl" \
+      --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
+      --output "${baseline_temporary}" \
+      --history-distances "${EVAL_HISTORY_DISTANCES_VALUE}" \
+      --primary-history-distances "${PRIMARY_HISTORY_DISTANCES_VALUE}" \
+      --max-games "${MAX_EVAL_GAMES:-5000}" \
+      --max-queries "${MAX_EVAL_QUERIES:-30000}" \
+      --progress-every-games "${BASELINE_PROGRESS_EVERY_GAMES:-10000}" \
+      2>&1 | tee "${OUTPUT_DIR}/distribution_baselines.log"
+    mv "${baseline_temporary}" "${baseline_cache}"
+  else
+    echo "reusing distribution baseline: ${baseline_cache}" | tee "${OUTPUT_DIR}/distribution_baselines.log"
+  fi
+  cp "${baseline_cache}" "${OUTPUT_DIR}/distribution_baselines.json"
 fi
 
 if [[ "${STAGE}" == token || "${STAGE}" == main || "${STAGE}" == all ]]; then
