@@ -86,6 +86,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--include-probe-artifacts", action="store_true", help="linear_probes.pt等も含める")
     parser.add_argument("--no-logs", action="store_true", help="*.logを含めない")
+    parser.add_argument(
+        "--no-auto-sibling-discovery",
+        action="store_true",
+        help="指定rootの親にある別results rootを自動探索しない",
+    )
     parser.add_argument("--force", action="store_true", help="既存archiveを置き換える")
     return parser.parse_args()
 
@@ -118,8 +123,15 @@ def selected(path: Path, include_probe_artifacts: bool, include_logs: bool) -> b
         return False
     if any(part in {".venv", ".uv-cache", "__pycache__", "checkpoints"} for part in path.parts):
         return False
+    # 親ディレクトリを指定しても，ゲームデータや設定JSONを誤って収集しない．
     if path.suffix == ".json":
-        return True
+        return path.name in TRACKED_RESULT_NAMES or path.name in {
+            "artifact_verification.json",
+            "dataset_manifest.json",
+            "vocab.json",
+            "split_summary.json",
+            "export_summary.json",
+        }
     if include_logs and path.suffix == ".log":
         return True
     return include_probe_artifacts and path.name in PROBE_ARTIFACTS
@@ -181,6 +193,77 @@ def required_matrix(
     return missing
 
 
+def _contains_result_metrics(path: Path) -> bool:
+    """results rootらしいディレクトリかを軽量に判定する．"""
+    for candidate in path.rglob("*"):
+        if candidate.is_file() and candidate.name in REQUIRED_RESULT_TYPES:
+            return True
+    return False
+
+
+def discover_sibling_roots(roots: Iterable[Path]) -> list[Path]:
+    """指定されたresultsディレクトリの兄弟results rootを探索する．
+
+    標準結果とLishogi結果が，例えば
+    ``factorized_v3_eos_results`` と ``factorized_v3_reference_results`` のように
+   分かれている場合，片方だけを指定しても取りこぼさないための補助機能である．
+    無関係な親ディレクトリを再帰走査しないよう，名前にresult(s)またはanalysisを
+    含むrootだけを対象とする．
+    """
+    known = {root.resolve() for root in roots}
+    discovered: set[Path] = set()
+    for root in roots:
+        if not any(token in root.name.lower() for token in ("result", "analysis")):
+            continue
+        try:
+            siblings = list(root.parent.iterdir())
+        except OSError:
+            continue
+        for sibling in siblings:
+            if not sibling.is_dir() or sibling.resolve() in known or sibling.resolve() in discovered:
+                continue
+            if any(token in sibling.name.lower() for token in ("result", "analysis")) and _contains_result_metrics(sibling):
+                discovered.add(sibling.resolve())
+    return sorted(discovered)
+
+
+def scan_results(
+    roots: Iterable[Path],
+    args: argparse.Namespace,
+    replacements: Iterable[tuple[str, str]],
+) -> tuple[dict[str, bytes], dict[str, list[str]], dict[tuple[str, str], set[str]], list[str]]:
+    entries: dict[str, bytes] = {}
+    source_files: dict[str, list[str]] = {}
+    observed: dict[tuple[str, str], set[str]] = {}
+    duplicate_paths: list[str] = []
+    for root in roots:
+        for source in sorted(root.rglob("*")):
+            if not selected(source, args.include_probe_artifacts, not args.no_logs):
+                continue
+            relative = source.relative_to(root)
+            destination = "analysis_bundle/results/{}".format(relative.as_posix())
+            if source.suffix in {".json", ".log"}:
+                data = sanitize_text(
+                    source.read_text(encoding="utf-8", errors="replace"), replacements
+                ).encode("utf-8")
+            else:
+                data = source.read_bytes()
+            if destination in entries:
+                duplicate_paths.append(destination)
+                if entries[destination] != data:
+                    raise ValueError(
+                        "conflicting result files were found at {} from multiple roots".format(destination)
+                    )
+                continue
+            entries[destination] = data
+            source_files.setdefault(destination, []).append(str(source))
+            covered = coverage_for(relative)
+            if covered is not None:
+                condition, data_name, result_type = covered
+                observed.setdefault((condition, data_name), set()).add(result_type)
+    return entries, source_files, observed, duplicate_paths
+
+
 def main() -> None:
     args = parse_args()
     project = Path(__file__).resolve().parent
@@ -199,38 +282,30 @@ def main() -> None:
         raise FileExistsError(f"archive already exists (use --force): {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    replacements = [(str(project), "<PROJECT_DIR>"), (str(Path.home()), "<HOME>")]
-    replacements.extend((str(root), "<RESULTS_ROOT>") for root in roots)
-    if dataset is not None:
-        replacements.append((str(dataset), "<DATASET_DIR>"))
+    expected_conditions = tuple(args.expected_conditions or CONDITIONS)
+    expected_datasets = tuple(args.expected_datasets or REQUIRED_DATASETS)
 
-    entries: dict[str, bytes] = {}
-    source_files: dict[str, list[str]] = {}
-    observed: dict[tuple[str, str], set[str]] = {}
-    duplicate_paths: list[str] = []
-    for root in roots:
-        for source in sorted(root.rglob("*")):
-            if not selected(source, args.include_probe_artifacts, not args.no_logs):
-                continue
-            relative = source.relative_to(root)
-            destination = "analysis_bundle/results/{}".format(relative.as_posix())
-            if source.suffix in {".json", ".log"}:
-                data = sanitize_text(source.read_text(encoding="utf-8", errors="replace"), replacements).encode("utf-8")
-            else:
-                data = source.read_bytes()
-            if destination in entries:
-                duplicate_paths.append(destination)
-                if entries[destination] != data:
-                    raise ValueError(
-                        "conflicting result files were found at {} from multiple roots".format(destination)
-                    )
-                continue
-            entries[destination] = data
-            source_files.setdefault(destination, []).append(str(source))
-            covered = coverage_for(relative)
-            if covered is not None:
-                condition, data_name, result_type = covered
-                observed.setdefault((condition, data_name), set()).add(result_type)
+    def make_replacements(current_roots: Iterable[Path]) -> list[tuple[str, str]]:
+        values = [(str(project), "<PROJECT_DIR>"), (str(Path.home()), "<HOME>")]
+        values.extend((str(root), "<RESULTS_ROOT>") for root in current_roots)
+        if dataset is not None:
+            values.append((str(dataset), "<DATASET_DIR>"))
+        return values
+
+    replacements = make_replacements(roots)
+    entries, source_files, observed, duplicate_paths = scan_results(roots, args, replacements)
+    auto_discovered_roots: list[Path] = []
+    missing_matrix = required_matrix(observed, expected_conditions, expected_datasets)
+
+    # 標準とLishogiを兄弟rootへ出力する従来シェルに対応する．片方のrootだけが
+    # 指定されても，親ディレクトリ直下のresults siblingを自動的に追加する．
+    if missing_matrix and not args.no_auto_sibling_discovery:
+        auto_discovered_roots = discover_sibling_roots(roots)
+        if auto_discovered_roots:
+            roots = roots + auto_discovered_roots
+            replacements = make_replacements(roots)
+            entries, source_files, observed, duplicate_paths = scan_results(roots, args, replacements)
+            missing_matrix = required_matrix(observed, expected_conditions, expected_datasets)
 
     if dataset is not None:
         for name in ("dataset_manifest.json", "vocab.json", "split_summary.json", "export_summary.json"):
@@ -244,9 +319,6 @@ def main() -> None:
     if not entries:
         raise ValueError("no analysis files were found under the supplied results roots")
 
-    expected_conditions = tuple(args.expected_conditions or CONDITIONS)
-    expected_datasets = tuple(args.expected_datasets or REQUIRED_DATASETS)
-    missing_matrix = required_matrix(observed, expected_conditions, expected_datasets)
     if missing_matrix and not args.allow_incomplete:
         message = json.dumps(
             {
@@ -256,6 +328,13 @@ def main() -> None:
                     f"{condition}/{dataset_name}": sorted(values)
                     for (condition, dataset_name), values in sorted(observed.items())
                 },
+                "scanned_roots": [str(root) for root in roots],
+                "auto_discovered_siblings": [str(root) for root in auto_discovered_roots],
+                "discovered_metric_paths": sorted(
+                    name
+                    for name in entries
+                    if name.endswith(("move_metrics.json", "probe_metrics.json"))
+                ),
                 "hint": "標準評価とLishogiの親results rootを全て指定するか，部分収集なら--allow-incompleteを指定してください",
             },
             ensure_ascii=False,
@@ -269,6 +348,7 @@ def main() -> None:
         "source_commit": git_value(project, "rev-parse", "HEAD"),
         "source_dirty": bool(git_value(project, "status", "--short")),
         "input_results_roots": ["<RESULTS_ROOT>" for _ in roots],
+        "auto_discovered_sibling_roots": len(auto_discovered_roots),
         "dataset_root": "<DATASET_DIR>" if dataset is not None else None,
         "options": {
             "include_probe_artifacts": bool(args.include_probe_artifacts),

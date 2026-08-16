@@ -521,7 +521,10 @@ tar -xOzf factorized_v3_analysis_reference_full.tar.gz \
 ```
 
 `collect_factorized_analysis.py`は入力rootを読み取るだけで，元のresultsやcheckpointを
-削除しない．checkpointとゲームJSONLもarchiveには含めない．
+削除しない．checkpointとゲームJSONLもarchiveには含めない．指定したrootで標準評価が
+見つからない場合，root名に`result`または`analysis`を含むときは親ディレクトリの兄弟
+results rootを自動探索する．自動探索を無効にする場合は
+`--no-auto-sibling-discovery`を指定する．
 
 ## モデル
 
