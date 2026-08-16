@@ -56,6 +56,98 @@ UV_CACHE_DIR=/large-volume/uv-cache ./setup_env.sh cuda
 
 ## データセットの作成
 
+### LishogiのPRO／LP棋譜を評価用に収集する
+
+Lishogiには全PRO／LP利用者を列挙する公開APIがない．そのため，収集を次の二段階に分ける．
+
+1. 上位利用者又は任意の起点から公開対局メタデータ上の対局者グラフを幅優先に走査する．発見した利用者の公開プロフィールを最大300名ずつ照合し，現在のタイトルが`PRO`又は`LP`である利用者を抽出する．この段階では指手を取得しない．実行シェルは公式API文書に掲載された`YokoyamaTomoki`と`Shogi_Harbour`も探索のbootstrapに使うが，この2名を完全一覧とは扱わない．
+2. 確認済みPRO／LPを起点として棋譜を本取得する．本取得時にも起点利用者の現在のタイトルを再検証する．
+
+一連の実行には次を使う．既定では2022年1月以降を対象とし，探索は中断後に同じコマンドで再開できる．
+
+```bash
+MAX_USERS_THIS_RUN=500 \
+TARGET_GAMES=1000 \
+./scripts/collect_lishogi_pro_lp.sh data/lishogi-pro-lp
+```
+
+既知の公開利用者を探索起点へ追加する場合は，1行1名のファイルを第2引数へ指定する．空行と`#`以後は無視される．
+
+```text
+# lishogi_users.txt
+user_name_1
+user_name_2
+```
+
+```bash
+./scripts/collect_lishogi_pro_lp.sh \
+  data/lishogi-pro-lp \
+  lishogi_users.txt
+```
+
+探索範囲は`MAX_DISCOVERED_USERS`，1回に走査する人数は`MAX_USERS_THIS_RUN`，利用者当たりのメタデータ件数は`DISCOVERY_GAMES_PER_USER`で制限する．例えば，探索を段階的に広げるには同じ出力先に対して`MAX_USERS_THIS_RUN=2000`として再実行する．この方法は公開対局から到達できる利用者だけを対象とするため，PRO／LPの完全一覧を保証しない．`discovery/manifest.json`にもこの制約を記録する．
+
+`MIN_RATING`，`MAX_RATING`，`UNTIL`を指定すると，本取得の抽出条件へも引き継がれる．
+
+サーバー負荷を抑えた試験では，例えば`REQUEST_DELAY=1.0 MAX_USERS_THIS_RUN=10 DISCOVERY_GAMES_PER_USER=5 MAX_PROFILE_USERS_THIS_RUN=100 TARGET_GAMES=10 COLLECTION_GAMES_PER_USER=20`とする．プロフィールは既定で24時間のキャッシュを使う．即時再照合が必要な場合だけ`REFRESH_PROFILES=1`を指定する．
+
+PRO／LPが少ない場合は，タイトル保持者だけに限定せず，現在の探索結果から確認済み非BOT利用者へ対象を広げられる．探索時には`discovery/non_bot_users.txt`も生成される．既存の`profile_cache.json`だけから一覧を作り直す場合は，ネットワークアクセスなしで次を実行する．
+
+```bash
+./.venv/bin/python build_non_bot_user_list.py \
+  data/lishogi-pro-lp/discovery
+```
+
+その後，`USER_SCOPE=non-bot`を指定すると，PRO／LPのタイトル条件を外し，プロフィール確認済みの非BOT利用者を収集対象にする．
+
+```bash
+SKIP_DISCOVERY=1 \
+USER_SCOPE=non-bot \
+COLLECTION_OUTPUT_DIR=data/lishogi-non-bot/games \
+APPEND_NEW_GAMES=1 \
+REQUEST_DELAY=2.0 \
+TARGET_GAMES=50 \
+./scripts/collect_lishogi_pro_lp.sh data/lishogi-pro-lp-light
+```
+
+この一覧は「人間であることの完全な証明」ではなく，`BOT`タイトル，無効アカウント，プロフィール未照合のプレースホルダーを除いた「非BOT登録利用者」の近似である．PRO／LP棋譜は学習データへ混ぜず，外部評価用サブセットとして保持する．
+
+収集済みの非BOT棋譜をfactorized_v3の評価形式へ変換する場合は，500局をそのまま`evaluation.jsonl`へ変換する．このスクリプトは学習・検証分割を作らず，評価データだけを生成する．
+
+```bash
+./.venv/bin/python build_lishogi_factorized_evaluation.py \
+  --input-jsonl data/lishogi-non-bot/games/games.jsonl \
+  --output-dir data/lishogi-non-bot-factorized-eval \
+  --max-games 500 \
+  --min-plies 80 \
+  --overwrite
+```
+
+出力には`evaluation.jsonl`，`vocab.json`，`dataset_manifest.json`が含まれる．これは評価専用であり，`train.jsonl`や`validation.jsonl`の代わりに使用してはならない．指手評価は次のように直接実行する．
+
+```bash
+${PYTHON_BIN:-./.venv/bin/python} evaluate_factorized_moves.py \
+  --checkpoint CHECKPOINT \
+  --evaluation-jsonl data/lishogi-non-bot-factorized-eval/evaluation.jsonl \
+  --vocab data/lishogi-non-bot-factorized-eval/vocab.json \
+  --output RESULTS/lishogi-non-bot/move_metrics.json \
+  --max-games 500
+```
+
+線形プローブを評価する場合は，プローブの学習には元の機械棋譜`train.jsonl`／`validation.jsonl`を使い，評価部分だけをこの非BOT`evaluation.jsonl`へ差し替える．非BOT棋譜をプローブ学習側へ混ぜない．
+
+本取得では，レーティング対象，標準将棋，リアルタイム，平手初期局面，80 ply以上，決着局に限定する．匿名対局，組込みAI，棋譜又は現在の公開プロフィールが`BOT`である対局者を除外する．API tokenを使う場合は`LISHOGI_TOKEN`環境変数へ設定する．
+
+Python環境がOSのCA bundleを自動検出しない場合だけ，例えば`CA_FILE=/etc/ssl/cert.pem`を指定する．TLS検証を無効化するオプションは設けていない．
+
+探索ディレクトリには，取得に必要な公開ユーザ名を含む`discovery_state.json`，`profile_cache.json`，`titled_users.txt`が置かれるため，公開用の分析パッケージには含めない．本取得の`games/games.jsonl`では利用者IDを固定salt付きSHA-256で仮名化し，公開タイトルだけを保存する．`KEEP_RAW=1`を指定した場合だけ公開ユーザ名を含むAPI応答も保存するため，通常は指定しない．`data/`はGit管理対象外である．
+
+同一条件で既存出力へ再実行した場合，`games/manifest.json`を照合し，条件が一致すれば利用者ごとの最新棋譜時刻以降だけを取得する．条件を変更した場合は安全のため全再走査へ戻る．強制的に全範囲を取り直す場合は`FULL_RESCAN=1`を指定する．
+
+既存`games.jsonl`へ今回分を追記する運用では，`APPEND_NEW_GAMES=1 NEW_GAMES_PER_RUN=100`を指定する．この場合，既存局をゲームIDで重複除去しながら，今回新たに採用できた局を最大100局追記する．追記モードでは`NEW_GAMES_PER_RUN`が優先され，未指定なら`TARGET_GAMES`を今回追記局数として扱う．通常モードの`TARGET_GAMES`は累積総数の上限である．
+
+探索キューを進めず既存のタイトル一覧から棋譜だけを増分取得する場合は`SKIP_DISCOVERY=1`を指定する．探索だけ実行する場合は`DISCOVERY_ONLY=1`を指定する．
+
 ### metadata.csvから全段階を構築する
 
 CSA本体へアクセスできる計算機で実行する．`metadata.csv`のCSAパスと実ファイルの配置が異なる場合は，`create_dataset.py build`用のパス置換オプションを末尾へ渡す．
