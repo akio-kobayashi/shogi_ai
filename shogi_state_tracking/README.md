@@ -136,6 +136,25 @@ ${PYTHON_BIN:-./.venv/bin/python} evaluate_factorized_moves.py \
 
 線形プローブを評価する場合は，プローブの学習には元の機械棋譜`train.jsonl`／`validation.jsonl`を使い，評価部分だけをこの非BOT`evaluation.jsonl`へ差し替える．非BOT棋譜をプローブ学習側へ混ぜない．
 
+referenceモデルに対する評価専用シェルも用意している．指手評価は評価データだけを受け取り，線形プローブ評価は機械棋譜データと非BOT評価データを別々に受け取る．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_lishogi_move_evaluation.sh \
+  factorized_v3_reference_results/llama-reference/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
+  data/lishogi-non-bot-factorized-eval \
+  factorized_v3_reference_results/llama-reference/implicit-initial/vanilla-p0.0/seed-20260802/evaluation/lishogi-non-bot/moves
+
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_lishogi_linear_probe_evaluation.sh \
+  factorized_v3_reference_results/llama-reference/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
+  factorized_v3_eos_data \
+  data/lishogi-non-bot-factorized-eval \
+  factorized_v3_reference_results/llama-reference/implicit-initial/vanilla-p0.0/seed-20260802/evaluation/lishogi-non-bot/linear-probes
+```
+
+線形プローブシェルは，機械棋譜のtrain／validationでprobeを学習し，非BOT棋譜でのみ評価する．
+
 本取得では，レーティング対象，標準将棋，リアルタイム，平手初期局面，80 ply以上，決着局に限定する．匿名対局，組込みAI，棋譜又は現在の公開プロフィールが`BOT`である対局者を除外する．API tokenを使う場合は`LISHOGI_TOKEN`環境変数へ設定する．
 
 Python環境がOSのCA bundleを自動検出しない場合だけ，例えば`CA_FILE=/etc/ssl/cert.pem`を指定する．TLS検証を無効化するオプションは設けていない．
