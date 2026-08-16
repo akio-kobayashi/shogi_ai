@@ -480,6 +480,49 @@ TensorBoard eventを含める場合は`--include-tensorboard`，ログを除く�
 指定する．archive内の`COLLECTION_MANIFEST.json`には，収録ファイルのSHA-256，実行code
 のcommit，見つからなかった任意評価結果を記録する．
 
+### 複数のresults rootを統合する場合
+
+標準評価とLishogi評価を別々のresults rootへ出力した場合は，単一rootを指定する
+`package_analysis_results.sh`ではなく，次の統合収集スクリプトを使う．vanilla／RAP／AP
+の各条件について，standardと`lishogi-non-bot`の両方の
+`move_metrics.json`・`probe_metrics.json`が揃っていなければ既定で停止する．
+
+```bash
+RESULTS_PARENT_1=/path/to/results-parent-on-the-execution-machine
+RESULTS_PARENT_2=/another/path/containing/results
+DATASET_DIR=/path/to/dataset
+
+./scripts/collect_factorized_analysis.sh \
+  /path/to/factorized_v3_analysis_reference_full.tar.gz \
+  --scan-root "${RESULTS_PARENT_1}" \
+  --scan-root "${RESULTS_PARENT_2}" \
+  --dataset-dir "${DATASET_DIR}" \
+  --force
+```
+
+Lishogiだけを確認用に収集する場合は，必須データセットを明示的に限定する．
+
+```bash
+./scripts/collect_factorized_analysis.sh \
+  /path/to/factorized_v3_lishogi_only.tar.gz \
+  --scan-root /path/to/lishogi-results-parent \
+  --dataset-dir /path/to/lishogi-factorized-eval \
+  --expected-dataset lishogi-non-bot \
+  --allow-incomplete \
+  --force
+```
+
+作成後は，必ずarchiveのcoverageを確認する．
+
+```bash
+tar -xOzf factorized_v3_analysis_reference_full.tar.gz \
+  analysis_bundle/COLLECTION_MANIFEST.json \
+  | jq '{expected_matrix,observed_matrix,missing_matrix}'
+```
+
+`collect_factorized_analysis.py`は入力rootを読み取るだけで，元のresultsやcheckpointを
+削除しない．checkpointとゲームJSONLもarchiveには含めない．
+
 ## モデル
 
 現行主実験では次のdecoderを選択できる．
