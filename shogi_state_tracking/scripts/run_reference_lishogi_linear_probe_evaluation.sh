@@ -12,17 +12,31 @@ if [[ "$(uname -s)" == Linux && "${SHOGI_MEMORY_GUARD_ACTIVE:-0}" != 1 && "${ALL
 fi
 
 CHECKPOINT="${1:?usage: $0 CHECKPOINT TRAIN_DATASET LISHOGI_EVAL_DATASET [OUTPUT_DIR]}"
-TRAIN_DATASET="${2:?training dataset directory is required}"
-EVAL_DATASET="${3:?Lishogi evaluation dataset directory is required}"
+SECOND_ARGUMENT="${2:?training or Lishogi evaluation dataset directory is required}"
+THIRD_ARGUMENT="${3:?Lishogi evaluation dataset or output directory is required}"
 RUN_DIR="$(cd "$(dirname "${CHECKPOINT}")" && pwd)"
-OUTPUT_DIR="${4:-${RUN_DIR}/evaluation/lishogi-non-bot/linear-probes}"
+
+# 評価専用datasetを第2引数に置いた3引数形式も受理する．第2引数に
+# train/validationがあれば従来形式，evaluationだけなら短縮形式と判定する．
+if [[ $# -eq 3 && ! -f "${SECOND_ARGUMENT}/train.jsonl" && -f "${SECOND_ARGUMENT}/evaluation.jsonl" ]]; then
+  TRAIN_DATASET="${PROBE_TRAIN_DATASET:-factorized_v3_eos_data}"
+  EVAL_DATASET="${SECOND_ARGUMENT}"
+  OUTPUT_DIR="${THIRD_ARGUMENT}"
+  echo "compact arguments: probe_train=${TRAIN_DATASET} lishogi_eval=${EVAL_DATASET} output=${OUTPUT_DIR}"
+else
+  TRAIN_DATASET="${SECOND_ARGUMENT}"
+  EVAL_DATASET="${THIRD_ARGUMENT}"
+  OUTPUT_DIR="${4:-${RUN_DIR}/evaluation/lishogi-non-bot/linear-probes}"
+fi
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 VOCAB="${VOCAB:-${TRAIN_DATASET}/vocab.json}"
 
 [[ -f "${CHECKPOINT}" ]] || { echo "checkpoint does not exist: ${CHECKPOINT}" >&2; exit 2; }
 for split in train validation; do
   [[ -f "${TRAIN_DATASET}/${split}.jsonl" ]] || {
-    echo "${split}.jsonl does not exist: ${TRAIN_DATASET}" >&2
+    echo "${split}.jsonl does not exist in probe training dataset: ${TRAIN_DATASET}" >&2
+    echo "full form: $0 CHECKPOINT TRAIN_DATASET LISHOGI_EVAL_DATASET [OUTPUT_DIR]" >&2
+    echo "compact form: PROBE_TRAIN_DATASET=TRAIN_DATASET $0 CHECKPOINT LISHOGI_EVAL_DATASET OUTPUT_DIR" >&2
     exit 2
   }
 done
