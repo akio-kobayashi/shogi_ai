@@ -30,6 +30,18 @@ class PackageAnalysisResultsTest(unittest.TestCase):
             (hand.parent / "distribution_baselines.json").write_text(
                 json.dumps({"metrics": {"primary": {"queries": 10}}}), encoding="utf-8",
             )
+            relevance = hand.parent / "drop-relevance"
+            figures = relevance / "figures"
+            figures.mkdir(parents=True)
+            (relevance / "confidence_trajectory.json").write_text(
+                json.dumps({"metrics": {}}), encoding="utf-8",
+            )
+            (relevance / "attention_metrics.json").write_text(
+                json.dumps({"attention": {}, "ablation": {}}), encoding="utf-8",
+            )
+            (figures / "hand_confidence_trajectory.svg").write_text(
+                "<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8",
+            )
             output = root / "analysis.tar.gz"
             args = argparse.Namespace(
                 results_dir=str(results), output=str(output), dataset_dir=None,
@@ -63,6 +75,13 @@ class PackageAnalysisResultsTest(unittest.TestCase):
             )
             self.assertIn("policy_relevance_metrics.json", manifest["present_result_types"])
             self.assertIn("distribution_baselines.json", manifest["present_result_types"])
+            self.assertIn("confidence_trajectory.json", manifest["present_result_types"])
+            self.assertIn("attention_metrics.json", manifest["present_result_types"])
+            self.assertIn(
+                "analysis_bundle/results/llama-small/implicit-initial/vanilla-p0.0/"
+                "seed-20260802/evaluation/drop-relevance/figures/hand_confidence_trajectory.svg",
+                names,
+            )
 
 
 if __name__ == "__main__":

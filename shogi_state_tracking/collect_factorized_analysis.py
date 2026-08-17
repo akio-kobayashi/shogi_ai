@@ -43,6 +43,8 @@ TRACKED_RESULT_NAMES = {
     "hand_dynamics_metrics.json",
     "chess_protocol_metrics.json",
     "policy_relevance_metrics.json",
+    "confidence_trajectory.json",
+    "attention_metrics.json",
 }
 EXCLUDED_NAMES = {"best.pt", "last.pt"}
 PROBE_ARTIFACTS = {"linear_probes.pt", "action_probes.pt", "probe_predictions.pt"}
@@ -132,6 +134,8 @@ def selected(path: Path, include_probe_artifacts: bool, include_logs: bool) -> b
             "split_summary.json",
             "export_summary.json",
         }
+    if path.suffix == ".svg" and "drop-relevance" in path.parts:
+        return True
     if include_logs and path.suffix == ".log":
         return True
     return include_probe_artifacts and path.name in PROBE_ARTIFACTS

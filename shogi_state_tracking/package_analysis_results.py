@@ -21,7 +21,7 @@ import tarfile
 from typing import Dict, Iterable, List, Tuple
 
 
-TEXT_SUFFIXES = {".json", ".log", ".txt", ".md"}
+TEXT_SUFFIXES = {".json", ".log", ".txt", ".md", ".svg"}
 PROBE_ARTIFACTS = {"linear_probes.pt", "action_probes.pt", "probe_predictions.pt"}
 EXCLUDED_NAMES = {"best.pt", "last.pt"}
 EXPECTED_RESULT_NAMES = {
@@ -37,6 +37,8 @@ OPTIONAL_RESULT_NAMES = {
     "chess_protocol_metrics.json",
     "distribution_baselines.json",
     "policy_relevance_metrics.json",
+    "confidence_trajectory.json",
+    "attention_metrics.json",
 }
 TRACKED_RESULT_NAMES = EXPECTED_RESULT_NAMES | OPTIONAL_RESULT_NAMES
 
@@ -95,6 +97,8 @@ def selected_result_files(root: Path, args: argparse.Namespace) -> Iterable[Path
         if any(part in {".venv", ".uv-cache", "__pycache__"} for part in relative.parts):
             continue
         if path.suffix == ".json" or (path.suffix == ".log" and not args.no_logs):
+            yield path
+        elif path.suffix == ".svg":
             yield path
         elif args.include_tensorboard and path.name.startswith("events.out.tfevents"):
             yield path

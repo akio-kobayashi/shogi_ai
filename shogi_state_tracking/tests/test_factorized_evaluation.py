@@ -195,6 +195,55 @@ class FactorizedEvaluationTest(unittest.TestCase):
         self.assertEqual(move_piece_group("<S>"), "minor")
         self.assertEqual(move_piece_group("<K>"), "king")
 
+    def test_drop_relevance_matching_requires_same_held_count_and_legal_drop(self):
+        from factorized_drop_relevance import select_anchors_and_controls
+
+        def position(game, ply, move, count, legal, in_check=0):
+            hands = [0] * 14
+            hands[0] = count
+            return {
+                "game_id": game, "ply": ply, "move": move,
+                "is_drop": "*" in move, "side": 0, "hands": hands,
+                "in_check": in_check, "legal_moves": legal,
+                "query_position": 2 * ply + 2,
+                "event_markers": {"0:0": [2]}, "all_move_markers": list(range(2, 2 * ply + 2, 2)),
+            }
+
+        anchor = position("drop-game", 12, "P*5e", 2, ["P*5e", "P*4e"])
+        wrong_count = position("wrong-count", 11, "7g7f", 1, ["P*5e"])
+        no_legal_drop = position("no-legal", 11, "7g7f", 2, ["7g7f"])
+        matched = position("matched", 14, "2g2f", 2, ["P*5e", "P*4e"])
+        pairs, summary = select_anchors_and_controls(
+            [anchor, wrong_count, no_legal_drop, matched], 10, 7
+        )
+        self.assertEqual(summary["matched_pairs"], 1)
+        self.assertEqual(pairs[0]["control"]["game_id"], "matched")
+
+    def test_llama_attention_observation_and_empty_ablation_preserve_logits(self):
+        from evaluate_factorized_drop_attention import (
+            forward_with_edge_ablation,
+            selected_attention_rows,
+        )
+        from models import ModelConfig, build_model
+
+        torch.manual_seed(3)
+        config = ModelConfig(
+            vocab_size=32, max_seq_len=16, d_model=16,
+            n_layers=2, n_heads=4, d_ff=32, dropout=0.0,
+        )
+        model = build_model("llama", config).eval()
+        ids = torch.tensor([[1, 2, 3, 4, 5]])
+        observed_rows, observed_logits = selected_attention_rows(model, ids, 4)
+        baseline = model(ids).logits
+        empty = forward_with_edge_ablation(model, ids, 4, [], {0, 1})
+        self.assertEqual(len(observed_rows), 2)
+        self.assertEqual(tuple(observed_rows[0].shape), (4, 5))
+        self.assertTrue(torch.allclose(observed_logits, baseline, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(empty, baseline, atol=1e-6, rtol=1e-6))
+
+        masked = forward_with_edge_ablation(model, ids, 4, [1], {0, 1})
+        self.assertFalse(torch.allclose(masked[:, -1], baseline[:, -1]))
+
     def test_chess_protocol_instance_uses_true_start_and_end_prompts(self):
         from evaluate_factorized_chess_protocol import make_instance
 
