@@ -173,41 +173,47 @@ def calibration_temperatures(model, probes, samples, vocabulary, device, amp_dty
     return result
 
 
-def verify_prefix_full_consistency(model, samples, sources, vocabulary, device, amp_dtype, max_seq_len):
+def verify_prefix_full_consistency(model, samples, sources, vocabulary, device, amp_dtype, max_seq_len, max_samples=8):
     """未来tokenを追加してもh_preが変わらないことを実測する。"""
-    selected = None
+    selected = []
+    used_games = set()
     for item in samples:
         suffix = factorize_history_move(str(item["move"]), {}, "vanilla")
-        if len(item["prefix_tokens"]) + len(suffix) <= max_seq_len:
-            selected = (item, suffix)
-            break
-    if selected is None:
+        game_id = str(item["game_id"])
+        if len(item["prefix_tokens"]) + len(suffix) <= max_seq_len and game_id not in used_games:
+            selected.append((item, suffix)); used_games.add(game_id)
+            if len(selected) >= max_samples:
+                break
+    if not selected:
         raise ValueError("no sample can be used for prefix/full-sequence causal consistency audit")
-    item, suffix = selected
-    prefix = token_ids_for_audit(item["prefix_tokens"], vocabulary, device)
-    full = token_ids_for_audit([*item["prefix_tokens"], *suffix], vocabulary, device)
-    query = prefix.shape[1] - 1
-    with torch.inference_mode(), amp_context(device, amp_dtype):
-        prefix_output = model(prefix, output_hidden_states=True)
-        full_output = model(full, output_hidden_states=True)
-    logit_error = float((prefix_output.logits[:, query] - full_output.logits[:, query]).abs().max())
-    hidden_error = max(
-        float((prefix_output.hidden_states[int(source.split("_", 1)[1])][:, query]
-               - full_output.hidden_states[int(source.split("_", 1)[1])][:, query]).abs().max())
-        for source in sources
-    )
     tolerance = 2e-3 if amp_dtype is not None else 1e-4
-    if max(logit_error, hidden_error) > tolerance:
-        raise RuntimeError(
-            "prefix/full-sequence causal consistency failed: logits={} hidden={}".format(
-                logit_error, hidden_error
-            )
+    cases = []; max_logit_error = 0.0; max_hidden_error = 0.0
+    for item, suffix in selected:
+        prefix = token_ids_for_audit(item["prefix_tokens"], vocabulary, device)
+        full = token_ids_for_audit([*item["prefix_tokens"], *suffix], vocabulary, device)
+        query = prefix.shape[1] - 1
+        with torch.inference_mode(), amp_context(device, amp_dtype):
+            prefix_output = model(prefix, output_hidden_states=True)
+            full_output = model(full, output_hidden_states=True)
+        logit_error = float((prefix_output.logits[:, query] - full_output.logits[:, query]).abs().max())
+        hidden_error = max(
+            float((prefix_output.hidden_states[int(source.split("_", 1)[1])][:, query]
+                   - full_output.hidden_states[int(source.split("_", 1)[1])][:, query]).abs().max())
+            for source in sources
         )
+        max_logit_error = max(max_logit_error, logit_error)
+        max_hidden_error = max(max_hidden_error, hidden_error)
+        cases.append({"game_id": str(item["game_id"]), "ply": int(item["ply"]),
+                      "query_position": query, "future_tokens": len(suffix),
+                      "max_absolute_logit_error": logit_error,
+                      "max_absolute_hidden_state_error": hidden_error})
+    if max(max_logit_error, max_hidden_error) > tolerance:
+        raise RuntimeError("prefix/full-sequence causal consistency failed: logits={} hidden={}".format(
+            max_logit_error, max_hidden_error))
     return {
-        "game_id": str(item["game_id"]), "ply": int(item["ply"]),
-        "query_position": query, "future_tokens": len(suffix),
-        "max_absolute_logit_error": logit_error,
-        "max_absolute_hidden_state_error": hidden_error,
+        "samples": len(cases), "cases": cases,
+        "max_absolute_logit_error": max_logit_error,
+        "max_absolute_hidden_state_error": max_hidden_error,
         "tolerance": tolerance, "passed": True,
     }
 

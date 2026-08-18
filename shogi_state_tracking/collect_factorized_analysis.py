@@ -46,10 +46,12 @@ TRACKED_RESULT_NAMES = {
     "confidence_trajectory.json",
     "attention_metrics.json",
     "action_condition_metrics.json",
+    "action_condition_robustness.json",
+    "action_condition_attention_ablation.json",
     "action_condition_matrix.json",
 }
 EXCLUDED_NAMES = {"best.pt", "last.pt"}
-PROBE_ARTIFACTS = {"linear_probes.pt", "action_probes.pt", "probe_predictions.pt"}
+PROBE_ARTIFACTS = {"linear_probes.pt", "action_probes.pt", "probe_predictions.pt", "branch_hand_probes.pt"}
 
 
 def parse_args() -> argparse.Namespace:

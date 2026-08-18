@@ -16,6 +16,7 @@ import torch
 from data import load_vocabulary
 from evaluate_new_prompt_probes import label_maps
 from factorized_drop_relevance import (
+    action_condition_game_partition,
     matching_balance, read_positions, rebind_pairs,
     relevant_and_control_markers,
     select_anchors_and_controls,
@@ -39,6 +40,8 @@ def parse_args():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--amp", choices=("auto", "off", "fp16", "bf16"), default="off")
     parser.add_argument("--progress-every", type=int, default=50)
+    parser.add_argument("--game-partition", choices=("all", "probe_train", "calibration", "evaluation"), default="all")
+    parser.add_argument("--partition-seed", type=int, default=20260802)
     return parser.parse_args()
 
 
@@ -224,6 +227,12 @@ def main():
         args.evaluation_jsonl, metadata["state_prompt_mode"], annotation_mode,
         hand_names, config.max_seq_len - 1,
     )
+    if args.game_partition != "all":
+        lightweight_positions = [
+            item for item in lightweight_positions
+            if action_condition_game_partition(str(item["game_id"]), args.partition_seed) == args.game_partition
+        ]
+        census["partition_included_positions"] = len(lightweight_positions)
     lightweight_pairs, matching = select_anchors_and_controls(
         lightweight_positions, args.max_pairs, args.seed
     )

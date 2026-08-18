@@ -40,8 +40,21 @@ class FactorizedActionConditionOutputTest(unittest.TestCase):
                 }
             }), encoding="utf-8")
             output = root / "figures"
+            robustness = root / "robustness.json"
+            robustness.write_text(json.dumps({"metrics": {"layer_0": {
+                "pooled_probe_within_prefix": {"difference": {"mean": 0.03}},
+                "behavior_after_drop": {"actual_drop": {
+                    "mean_correct_piece_probability_after_drop": 0.6,
+                }},
+                "cross_position_generalization": {
+                    family: {"tested_at": {branch: {"relevant_count_accuracy": 0.5}
+                                            for branch in ("pre", "drop", "normal")}}
+                    for family in ("pre", "drop", "normal", "pooled")
+                },
+            }}}), encoding="utf-8")
             original = sys.argv
-            sys.argv = ["visualize", "--metrics", str(metrics), "--output-dir", str(output)]
+            sys.argv = ["visualize", "--metrics", str(metrics), "--robustness", str(robustness),
+                        "--output-dir", str(output)]
             try:
                 visualizer.main()
             finally:
@@ -49,6 +62,9 @@ class FactorizedActionConditionOutputTest(unittest.TestCase):
             self.assertTrue((output / "within_prefix_action_contrast.svg").is_file())
             self.assertTrue((output / "selective_action_condition.svg").is_file())
             self.assertTrue((output / "relevant_hand_by_branch.svg").is_file())
+            self.assertTrue((output / "robust_pooled_action_contrast.svg").is_file())
+            self.assertTrue((output / "drop_piece_behavior.svg").is_file())
+            self.assertTrue((output / "cross_position_layer_0.svg").is_file())
 
     def test_matrix_keeps_primary_and_ap_separate(self):
         import collect_factorized_action_condition_matrix as collector
@@ -72,6 +88,22 @@ class FactorizedActionConditionOutputTest(unittest.TestCase):
                     "checkpoint": "model.pt", "protocol": {"primary_comparable": category == "primary"},
                     "metrics": {"layer_0": self.source_metrics(0.2)},
                 }), encoding="utf-8")
+                path.with_name("action_condition_robustness.json").write_text(json.dumps({
+                    "split_audit": {"passed": True, "game_overlap_counts": {
+                        "train_calibration": 0, "train_evaluation": 0, "calibration_evaluation": 0,
+                    }},
+                    "causal_prefix_full_audit": {"passed": True},
+                    "metrics": {"layer_0": {
+                        "pooled_probe_within_prefix": {"instances": 10},
+                        "cross_position_generalization": {},
+                        "behavior_after_drop": {},
+                    }},
+                }), encoding="utf-8")
+                if category == "primary":
+                    path.with_name("action_condition_attention_ablation.json").write_text(json.dumps({
+                        "no_mask_forward_max_absolute_logit_error": 0.0,
+                        "matching": {"matched_pairs": 10}, "attention": {}, "ablation": {},
+                    }), encoding="utf-8")
             output = root / "summary.json"
             original = sys.argv
             sys.argv = [

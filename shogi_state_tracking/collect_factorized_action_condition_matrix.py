@@ -32,6 +32,20 @@ def compact(path: Path) -> dict:
     metrics = {}
     for source, values in payload.get("metrics", {}).items():
         metrics[source] = values.get("within_prefix_contrasts", {})
+    robustness_path = path.with_name("action_condition_robustness.json")
+    attention_path = path.with_name("action_condition_attention_ablation.json")
+    robustness = json.loads(robustness_path.read_text(encoding="utf-8"))
+    robust_metrics = {}
+    for source, values in robustness.get("metrics", {}).items():
+        robust_metrics[source] = {
+            "pooled_probe_within_prefix": values.get("pooled_probe_within_prefix"),
+            "cross_position_generalization": values.get("cross_position_generalization"),
+            "behavior_after_drop": values.get("behavior_after_drop"),
+        }
+    attention_payload = (
+        json.loads(attention_path.read_text(encoding="utf-8"))
+        if attention_path.is_file() else None
+    )
     return {
         "source": str(path),
         "checkpoint": payload.get("checkpoint"),
@@ -40,6 +54,17 @@ def compact(path: Path) -> dict:
         "matching_balance": payload.get("matching_balance"),
         "branch_summary": payload.get("branch_summary"),
         "within_prefix_contrasts": metrics,
+        "robustness_source": str(robustness_path),
+        "split_audit": robustness.get("split_audit"),
+        "causal_prefix_full_audit": robustness.get("causal_prefix_full_audit"),
+        "robustness": robust_metrics,
+        "attention_ablation_source": str(attention_path) if attention_path.is_file() else None,
+        "attention_ablation": None if attention_payload is None else {
+            "no_mask_forward_max_absolute_logit_error": attention_payload.get("no_mask_forward_max_absolute_logit_error"),
+            "matching": attention_payload.get("matching"),
+            "attention": attention_payload.get("attention"),
+            "ablation": attention_payload.get("ablation"),
+        },
     }
 
 
@@ -68,6 +93,14 @@ def main():
                 )
                 if not path.is_file():
                     missing.append(str(path))
+                    continue
+                robustness_path = path.with_name("action_condition_robustness.json")
+                if not robustness_path.is_file():
+                    missing.append(str(robustness_path))
+                    continue
+                attention_path = path.with_name("action_condition_attention_ablation.json")
+                if section == "primary" and not attention_path.is_file():
+                    missing.append(str(attention_path))
                     continue
                 result[section][name][seed] = compact(path)
     if missing:

@@ -70,6 +70,12 @@ def stable_number(*values: object) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+def action_condition_game_partition(game_id: str, seed: int) -> str:
+    """行動条件実験専用の対局単位60/20/20固定分割。"""
+    value = stable_number("action-condition-split", seed, game_id) % 100
+    return "probe_train" if value < 60 else "calibration" if value < 80 else "evaluation"
+
+
 def read_positions(
     path: str,
     state_prompt_mode: str,
