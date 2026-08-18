@@ -182,7 +182,7 @@ def classification_metrics(
     target: torch.Tensor,
     prediction: torch.Tensor,
     class_indices: Sequence[int],
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     """正解集合に出現するクラスについてmacro指標を返す。
 
     balanced accuracyは各クラスrecallの単純平均である。未出現クラスを0点として
@@ -191,10 +191,12 @@ def classification_metrics(
     precision_scores = []
     recall_scores = []
     f1_scores = []
+    supported_class_indices = []
     for class_index in class_indices:
         truth = target == class_index
         if not bool(truth.any()):
             continue
+        supported_class_indices.append(int(class_index))
         predicted = prediction == class_index
         true_positive = int((truth & predicted).sum())
         false_positive = int((~truth & predicted).sum())
@@ -212,6 +214,7 @@ def classification_metrics(
         "macro_recall": float(sum(recall_scores) / denominator),
         "macro_f1": float(sum(f1_scores) / denominator),
         "supported_classes": len(recall_scores),
+        "supported_class_indices": supported_class_indices,
     }
 
 
@@ -279,9 +282,26 @@ def state_metrics(
     occupancy_binary = binary_classification_metrics(
         occupied.to(dtype=torch.long), predicted_occupied.to(dtype=torch.long)
     )
-    hand_count_multiclass = classification_metrics(
+    # 旧実装は14個の所有者×駒種slotを平坦化していたため，頻出する0枚と
+    # 最大枚数の大きい歩slotが集計を支配した。主指標は各slot内の枚数
+    # macro-F1を等重みで平均し，旧値は明示的にpooled指標として残す。
+    hand_count_pooled_multiclass = classification_metrics(
         targets.hands.reshape(-1), hand_prediction.reshape(-1), range(max(HAND_MAX_COUNTS) + 1)
     )
+    hand_count_by_slot = {
+        name: classification_metrics(
+            targets.hands[:, index],
+            hand_prediction[:, index],
+            range(HAND_MAX_COUNTS[index] + 1),
+        )
+        for index, name in enumerate(HAND_NAMES)
+    }
+
+    def mean_hand_metric(name: str) -> float:
+        return float(
+            sum(float(metrics[name]) for metrics in hand_count_by_slot.values())
+            / len(hand_count_by_slot)
+        )
     hand_nonzero_binary = binary_classification_metrics(
         nonzero_hand.to(dtype=torch.long), (hand_prediction != 0).to(dtype=torch.long)
     )
@@ -328,6 +348,11 @@ def state_metrics(
         "board_macro_precision": board_multiclass["macro_precision"],
         "board_macro_recall": board_multiclass["macro_recall"],
         "board_macro_f1": board_multiclass["macro_f1"],
+        "board_macro_supported_classes": board_multiclass["supported_classes"],
+        "board_macro_supported_class_indices": board_multiclass["supported_class_indices"],
+        "board_macro_supported_class_names": [
+            BOARD_NAMES[index] for index in board_multiclass["supported_class_indices"]
+        ],
         "board_piece_on_occupied_balanced_accuracy": None if occupied_piece_multiclass is None else occupied_piece_multiclass["balanced_accuracy"],
         "board_piece_on_occupied_macro_precision": None if occupied_piece_multiclass is None else occupied_piece_multiclass["macro_precision"],
         "board_piece_on_occupied_macro_recall": None if occupied_piece_multiclass is None else occupied_piece_multiclass["macro_recall"],
@@ -339,10 +364,15 @@ def state_metrics(
             if nonzero_hand_total
             else None
         ),
-        "hand_count_balanced_accuracy": hand_count_multiclass["balanced_accuracy"],
-        "hand_count_macro_precision": hand_count_multiclass["macro_precision"],
-        "hand_count_macro_recall": hand_count_multiclass["macro_recall"],
-        "hand_count_macro_f1": hand_count_multiclass["macro_f1"],
+        "hand_count_balanced_accuracy": mean_hand_metric("balanced_accuracy"),
+        "hand_count_macro_precision": mean_hand_metric("macro_precision"),
+        "hand_count_macro_recall": mean_hand_metric("macro_recall"),
+        "hand_count_macro_f1": mean_hand_metric("macro_f1"),
+        "hand_count_metrics_by_slot": hand_count_by_slot,
+        "hand_count_pooled_balanced_accuracy": hand_count_pooled_multiclass["balanced_accuracy"],
+        "hand_count_pooled_macro_precision": hand_count_pooled_multiclass["macro_precision"],
+        "hand_count_pooled_macro_recall": hand_count_pooled_multiclass["macro_recall"],
+        "hand_count_pooled_macro_f1": hand_count_pooled_multiclass["macro_f1"],
         "hand_nonzero_balanced_accuracy": hand_nonzero_binary["balanced_accuracy"],
         "hand_nonzero_precision": hand_nonzero_binary["precision"],
         "hand_nonzero_recall": hand_nonzero_binary["recall"],

@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from factorized_prompt import BASIC_PIECE_TOKENS, factorize_history_move
+from factorized_prompt import PIECE_TOKENS, annotation_piece_token, factorize_history_move
 
 
 PIECE_LETTERS = "PLNSGBR"
@@ -139,8 +139,19 @@ def read_positions(
                         ),
                     }
                     if materialize:
+                        normal_branches = []
+                        for raw_piece, raw_sources in dict(step.get("legal_sources_by_piece", {})).items():
+                            piece_token = annotation_piece_token(str(raw_piece))
+                            if piece_token not in PIECE_TOKENS:
+                                continue
+                            for source in raw_sources:
+                                source_token = str(source)
+                                if source_token.startswith("<SQ_") and source_token.endswith(">"):
+                                    normal_branches.append({"piece": piece_token, "source": source_token})
+                        normal_branches.sort(key=lambda value: (value["source"], value["piece"]))
                         item.update({
                             "prefix_tokens": list(prefix),
+                            "normal_branches": normal_branches,
                             "event_markers": {
                                 "{}:{}".format(key[0], key[1]): list(values)
                                 for key, values in event_markers.items()
@@ -158,6 +169,46 @@ def read_positions(
                 all_move_markers.append(len(prefix) - 1)
             counters["games"] += 1
     return positions, dict(counters)
+
+
+def choose_normal_branch(
+    item: Mapping[str, object], seed: int, avoid_piece_token: str | None = None,
+) -> dict | None:
+    """同一prefix比較に用いる合法な通常移動の先頭情報を決定する。"""
+    branches = [dict(value) for value in item.get("normal_branches", [])]
+    if not branches:
+        return None
+    preferred = [value for value in branches if value["piece"] != avoid_piece_token]
+    if preferred:
+        branches = preferred
+    move = str(item.get("move", ""))
+    if "*" not in move and len(move) >= 4:
+        source = "<SQ_{}>".format(move[:2])
+        for branch in branches:
+            if branch["source"] == source:
+                return branch
+    return min(
+        branches,
+        key=lambda value: stable_number(
+            seed, item.get("game_id"), item.get("ply"), value["piece"], value["source"]
+        ),
+    )
+
+
+def choose_irrelevant_hand_slot(item: Mapping[str, object], relevant_slot: int, seed: int) -> int | None:
+    """同じ側が保有する別駒から，枚数の近い非零slotを対照に選ぶ。"""
+    side = int(relevant_slot) // 7
+    relevant_count = int(item["hands"][relevant_slot])
+    candidates = [
+        side * 7 + piece for piece in range(7)
+        if side * 7 + piece != relevant_slot and int(item["hands"][side * 7 + piece]) > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda slot: (
+        abs(int(item["hands"][slot]) - relevant_count),
+        stable_number(seed, item.get("game_id"), item.get("ply"), slot),
+    ))
 
 
 def _control_score(anchor: Mapping[str, object], candidate: Mapping[str, object], piece: int) -> tuple[int, ...]:

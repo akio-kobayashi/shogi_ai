@@ -154,6 +154,15 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 ```
 
 線形プローブシェルは，機械棋譜のtrain／validationでprobeを学習し，非BOT棋譜でのみ評価する．
+標準の機械棋譜データが`factorized_v3_eos_data`にある場合は，次の短縮形式も使用できる．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_lishogi_linear_probe_evaluation.sh \
+  CHECKPOINT data/lishogi-non-bot-factorized-eval OUTPUT_DIR
+```
+
+別の学習データを短縮形式で使う場合は，`PROBE_TRAIN_DATASET`で指定する．
 
 本取得では，レーティング対象，標準将棋，リアルタイム，平手初期局面，80 ply以上，決着局に限定する．匿名対局，組込みAI，棋譜又は現在の公開プロフィールが`BOT`である対局者を除外する．API tokenを使う場合は`LISHOGI_TOKEN`環境変数へ設定する．
 
@@ -289,6 +298,52 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 
 ## 評価
 
+### 既存checkpointを固定50 epochへ揃えた比較
+
+early stopping済みの`last.pt`から不足epochだけを継続し，RAPなし，RAP=0.15，
+RAP=0.25を固定50 epochで比較する場合は次を使う．元のresults rootは変更せず，
+第3引数の固定epoch用results rootへcheckpointと履歴を複製してから再開する．
+
+```bash
+RAP_RATES=0.0,0.15,0.25 \
+MODEL_TYPE=llama MODEL_SIZE=reference TARGET_EPOCHS=50 \
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_fixed_epoch_experiment.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results_reference \
+  factorized_v3_eos_results_reference_fixed50 \
+  data/lishogi-non-bot-factorized-eval
+```
+
+この統合シェルは次を順番に行う．
+
+1. 元resultsの各`last.pt`を固定epoch用resultsへ複製する．
+2. optimizer状態を復元し，early stoppingを無効にしてepoch 50まで継続する．
+3. 各条件のepoch 50の`last.pt`だけを標準評価する．
+4. 同じ`last.pt`をLishogi非BOT棋譜で指手評価する．
+5. 機械棋譜で線形プローブを学習し，Lishogi非BOT棋譜で評価する．
+
+学習と評価を別々に行う場合は，次の2本を順番に実行する．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_fixed_epoch_training.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results_reference \
+  factorized_v3_eos_results_reference_fixed50
+
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_fixed_epoch_evaluation.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results_reference_fixed50 \
+  data/lishogi-non-bot-factorized-eval
+```
+
+固定epoch評価では`best.pt`を使わない．評価スクリプトが`last.pt`内のepochを検査し，
+1条件でも`TARGET_EPOCHS`と異なれば評価を中止する．標準結果は各runの
+`evaluation/`，Lishogi結果は`evaluation/lishogi-non-bot/`へ保存されるため，
+既存の分析結果収集スクリプトで回収できる．
+
 学習済みcheckpointだけを評価する場合は，次のスクリプトを使う．
 
 ```bash
@@ -373,7 +428,9 @@ strict-unseenを含むtrajectory scope，学習局面頻度0，1，2～4，5～9
 `DATASET_DIR/evaluation-cache/`へ保存し，同じデータセットを評価するVanilla，
 RAP，APで共有する．再計算する場合は`FORCE_DISTRIBUTION_BASELINE=1`を指定する．
 - 盤面81マスの正解率，occupied盤面精度，駒種別指標，盤面完全一致率
-- 持ち駒のslot精度，非零持ち駒精度，MAE，完全一致率
+- 盤面29クラスのうち評価splitで正解supportがあるクラスのmacro-F1とsupport
+- 持ち駒14項目それぞれの枚数macro-F1，その14項目等重み平均，非零持ち駒精度，MAE，完全一致率
+- 旧来の14項目平坦化macro-F1は`hand_count_pooled_macro_f1`として保存するが，主評価には用いない
 - 手番，王手，駒打ち可能性
 - 指手種別，移動元，移動先，成り選択，駒打ち駒種，駒打ち先
 - 完全棋譜終端の線形復号精度
@@ -412,6 +469,70 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 現在指手の正解駒種tokenが入力へ先に現れることを避ける．cshogiは教師ラベルと合法性の
 判定にだけ使用し，モデル入力や学習には使用しない．APは過去の通常移動へ駒種注釈を持つ
 oracle条件なので，RAPなし・RAPとの公平な無注釈比較ではないことに注意する．
+
+### 駒打ち時の行動条件付き持ち駒表現
+
+reference LLaMAを凍結し，実際の駒打ちと，手番・保有駒種・枚数・王手状態・
+棋譜長・最終増減からの距離・合法打ち先数を対応させた通常移動を比較する．
+既存の線形状態probeを各指手直前へ適用して駒打ち前後の信頼度を測り，続いて
+関連する過去の持ち駒増減イベントへのattentionと直接接続遮断の効果を評価する．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_drop_relevance_experiment.sh \
+  factorized_v3_reference_results/llama-reference/implicit-initial/vanilla-p0.0/seed-20260802/best.pt \
+  factorized_v3_eos_data \
+  factorized_v3_eos_data/vocab.json
+```
+
+既定の出力先はcheckpointと同じrunの`evaluation/drop-relevance/`である．
+`confidence_trajectory.json`，`attention_metrics.json`，図，実行logを保存する．
+初回の軽量確認では，例えば次を指定する．
+
+```bash
+MAX_DROP_RELEVANCE_EXAMPLES=100 \
+MAX_DROP_ATTENTION_PAIRS=20 \
+MAX_DROP_ABLATION_PAIRS=5 \
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_drop_relevance_experiment.sh CHECKPOINT DATASET_DIR VOCAB
+```
+
+attention経路は現在reference LLaMAだけに対応する．`SKIP_DROP_ATTENTION=1`を指定すれば，
+時系列probeと可視化だけを実行できる．APは正解駒種注釈を履歴へ含むoracle条件なので，
+この評価から除外する．attention massは記述的な指標であり，遮断結果と分けて解釈する．
+
+### 同一prefixによる行動条件付き状態表現
+
+異なる対局間の駒打ち／通常移動比較だけでは，局面そのものの違いを除けない．そこで，
+駒打ちと通常移動の両方が合法な同一prefixへ，それぞれ`<DROP>`または合法な通常移動の
+先頭tokenを1語だけ追加する．両分岐は同じ長さであり，指手適用前の同じ持ち駒ラベルを
+各層の線形probeで復号する．該当持ち駒と，同じ側が保有する別の非零持ち駒について，
+`DROP－通常移動`差とそのdifference-in-differencesを測る．
+
+reference LLaMAのRAPなし，RAP=0.15，RAP=0.25を同じ注釈なしprotocolで主比較し，
+APはoracle native入力と注釈除去感度分析を別枠へ保存する．
+
+```bash
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_action_condition_experiment.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results_reference
+```
+
+軽量確認では，例えば次を指定する．
+
+```bash
+MAX_ACTION_CONDITION_PAIRS=50 \
+MAX_ACTION_CALIBRATION_EXAMPLES=100 \
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_reference_action_condition_experiment.sh \
+  factorized_v3_eos_data factorized_v3_eos_results_reference
+```
+
+各runの`evaluation/action-condition/`へ数値，SVG，logを保存し，全条件の要約を
+`factorized_v3_eos_results_reference/action-condition-reference-summary/action_condition_matrix.json`
+へ出力する．AP結果は主比較へpoolしない．この介入は候補行動tokenを外から与えるため，
+モデルが未入力の状態でその行動を自発的に選んだことの証拠ではない．
 
 ## 出力
 

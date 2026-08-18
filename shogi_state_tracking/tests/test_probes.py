@@ -74,6 +74,56 @@ class ProbeMetricTest(unittest.TestCase):
         self.assertEqual(metrics["board_occupancy_f1"], 0.0)
         self.assertEqual(metrics["hand_nonzero_balanced_accuracy"], 0.5)
 
+    def test_hand_macro_f1_averages_slots_instead_of_pooling_them(self):
+        from probes import ProbeTargets, state_metrics
+
+        targets = ProbeTargets(
+            board=torch.zeros((2, 81), dtype=torch.long),
+            hands=torch.tensor([[0] * 14, [1] + [0] * 13]),
+            turn=torch.tensor([0, 1]),
+        )
+        hand_prediction = torch.zeros_like(targets.hands)
+        metrics = state_metrics(
+            targets,
+            targets.board.clone(),
+            hand_prediction,
+            targets.turn.clone(),
+        )
+
+        # black_pawnはmacro-F1=1/3，残る13 slotは1なので等重み平均は40/42。
+        self.assertAlmostEqual(metrics["hand_count_macro_f1"], 20.0 / 21.0)
+        self.assertNotAlmostEqual(
+            metrics["hand_count_macro_f1"],
+            metrics["hand_count_pooled_macro_f1"],
+        )
+        self.assertEqual(
+            set(metrics["hand_count_metrics_by_slot"]),
+            {
+                "black_pawn", "black_lance", "black_knight", "black_silver",
+                "black_gold", "black_bishop", "black_rook", "white_pawn",
+                "white_lance", "white_knight", "white_silver", "white_gold",
+                "white_bishop", "white_rook",
+            },
+        )
+
+    def test_board_macro_reports_its_supported_class_set(self):
+        from probes import ProbeTargets, state_metrics
+
+        targets = ProbeTargets(
+            board=torch.tensor([[0] * 80 + [1]]),
+            hands=torch.zeros((1, 14), dtype=torch.long),
+            turn=torch.tensor([0]),
+        )
+        metrics = state_metrics(
+            targets,
+            targets.board.clone(),
+            targets.hands.clone(),
+            targets.turn.clone(),
+        )
+        self.assertEqual(metrics["board_macro_supported_classes"], 2)
+        self.assertEqual(metrics["board_macro_supported_class_indices"], [0, 1])
+        self.assertEqual(metrics["board_macro_supported_class_names"], ["empty", "black_P"])
+
     def test_majority_baseline_is_position_specific(self):
         from probes import ProbeTargets, majority_predictions
 

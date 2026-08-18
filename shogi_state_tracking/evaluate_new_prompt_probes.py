@@ -503,6 +503,12 @@ def main():
         "history_distances": list(args.history_distances),
         "sources": sources,
         "amp": amp_name,
+        "state_metric_definition": {
+            "version": "state_probe_metrics_v2_slot_macro",
+            "board_macro_f1": "macro-F1 over the 29-class label universe, excluding classes with zero target support in the reported split",
+            "hand_count_macro_f1": "unweighted mean of 14 owner-by-piece slot macro-F1 values; each slot excludes count classes with zero target support in the reported split",
+            "hand_count_pooled_macro_f1": "legacy diagnostic computed after flattening all 14 hand slots; not a primary metric",
+        },
         "alignment": alignment,
         "causal_prefix_full_alignment": causal_alignment,
         "majority_baseline": state_metrics(extracted["evaluation"][1], *majority),

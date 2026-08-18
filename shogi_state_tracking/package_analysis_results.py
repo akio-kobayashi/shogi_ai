@@ -39,6 +39,8 @@ OPTIONAL_RESULT_NAMES = {
     "policy_relevance_metrics.json",
     "confidence_trajectory.json",
     "attention_metrics.json",
+    "action_condition_metrics.json",
+    "action_condition_matrix.json",
 }
 TRACKED_RESULT_NAMES = EXPECTED_RESULT_NAMES | OPTIONAL_RESULT_NAMES
 
