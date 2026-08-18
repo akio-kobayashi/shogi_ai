@@ -16,7 +16,8 @@ RESULTS_DIR="${2:?reference results directory is required}"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 VOCAB="${VOCAB:-${DATASET_DIR}/vocab.json}"
 SEEDS="${SEEDS:-20260802}"
-CHECKPOINT_NAME="${ACTION_CONDITION_CHECKPOINT:-best.pt}"
+CHECKPOINT_NAME="${ACTION_CONDITION_CHECKPOINT:-last.pt}"
+TARGET_EPOCHS="${TARGET_EPOCHS:-50}"
 
 IFS=',' read -r -a seed_values <<< "${SEEDS}"
 if [[ "${REQUIRE_MULTIPLE_MODEL_SEEDS:-0}" == 1 && "${#seed_values[@]}" -lt 3 ]]; then
@@ -27,6 +28,11 @@ fi
 for path in "${DATASET_DIR}/evaluation.jsonl" "${DATASET_DIR}/validation.jsonl" "${VOCAB}"; do
   [[ -f "${path}" ]] || { echo "missing ${path}" >&2; exit 2; }
 done
+
+checkpoint_epoch() {
+  "${PYTHON_BIN}" -c \
+    'import sys, torch; print(int(torch.load(sys.argv[1], map_location="cpu").get("epoch", -1)))' "$1"
+}
 
 probe_artifact() {
   local run_dir="$1"
@@ -49,7 +55,13 @@ run_condition() {
   local probes
   local evaluation_matching_seed=$((10#${seed} + 2))
   local output_dir="${run_dir}/evaluation/action-condition/${category}"
+  local actual_epoch
   [[ -f "${checkpoint}" ]] || { echo "missing checkpoint: ${checkpoint}" >&2; exit 2; }
+  actual_epoch="$(checkpoint_epoch "${checkpoint}")"
+  [[ "${actual_epoch}" == "${TARGET_EPOCHS}" ]] || {
+    echo "refusing unequal-budget action evaluation: ${checkpoint} is epoch ${actual_epoch}, expected ${TARGET_EPOCHS}" >&2
+    exit 2
+  }
   if ! probes="$(probe_artifact "${run_dir}")"; then
     echo "linear probe artifact is missing; fitting standard state probes for ${condition}, seed=${seed}" >&2
     "${SCRIPT_DIR}/scripts/run_factorized_evaluation.sh" \
@@ -60,7 +72,7 @@ run_condition() {
     }
   fi
   mkdir -p "${output_dir}/figures" "${output_dir}/logs"
-  echo "action-condition: condition=${condition} protocol=${protocol} seed=${seed}" >&2
+  echo "action-condition: condition=${condition} protocol=${protocol} seed=${seed} checkpoint=${CHECKPOINT_NAME} epoch=${actual_epoch}" >&2
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_action_condition.py" \
     --checkpoint "${checkpoint}" \
     --linear-probes "${probes}" \
