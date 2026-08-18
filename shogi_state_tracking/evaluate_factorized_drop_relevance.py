@@ -189,12 +189,24 @@ def verify_prefix_full_consistency(model, samples, sources, vocabulary, device, 
     tolerance = 2e-3 if amp_dtype is not None else 1e-4
     cases = []; max_logit_error = 0.0; max_hidden_error = 0.0
     for item, suffix in selected:
-        prefix = token_ids_for_audit(item["prefix_tokens"], vocabulary, device)
         full = token_ids_for_audit([*item["prefix_tokens"], *suffix], vocabulary, device)
-        query = prefix.shape[1] - 1
+        prefix_length = len(item["prefix_tokens"])
+        query = prefix_length - 1
+        # 短いprefixと長いfullを別形状でforwardすると，AMP/SDPAが異なる
+        # kernelと丸め経路を選び，因果性とは無関係な差が生じ得る．両者を
+        # 同じ形状・同じmaskにし，未来tokenの内容だけをPADへ置換して比較する．
+        # query位置から未来位置はcausal maskで遮断されるため，正しい実装なら
+        # queryのlogitと隠れ状態は未来tokenの内容に依存しない．
+        prefix_padded = full.clone()
+        prefix_padded[:, prefix_length:] = int(vocabulary["<PAD>"])
+        full_mask = torch.ones_like(full, dtype=torch.bool)
         with torch.inference_mode(), amp_context(device, amp_dtype):
-            prefix_output = model(prefix, output_hidden_states=True)
-            full_output = model(full, output_hidden_states=True)
+            prefix_output = model(
+                prefix_padded, attention_mask=full_mask, output_hidden_states=True
+            )
+            full_output = model(
+                full, attention_mask=full_mask, output_hidden_states=True
+            )
         logit_error = float((prefix_output.logits[:, query] - full_output.logits[:, query]).abs().max())
         hidden_error = max(
             float((prefix_output.hidden_states[int(source.split("_", 1)[1])][:, query]
@@ -205,6 +217,9 @@ def verify_prefix_full_consistency(model, samples, sources, vocabulary, device, 
         max_hidden_error = max(max_hidden_error, hidden_error)
         cases.append({"game_id": str(item["game_id"]), "ply": int(item["ply"]),
                       "query_position": query, "future_tokens": len(suffix),
+                      "comparison_shape": list(full.shape),
+                      "future_token_content_replaced_with_pad": True,
+                      "identical_attention_mask": True,
                       "max_absolute_logit_error": logit_error,
                       "max_absolute_hidden_state_error": hidden_error})
     if max(max_logit_error, max_hidden_error) > tolerance:
