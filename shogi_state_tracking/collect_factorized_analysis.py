@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="expected_conditions",
         choices=CONDITIONS,
-        help="必須条件を限定する（複数指定可）．省略時は3条件",
+        help="必須条件を限定する（複数指定可）．省略時はvanilla，RAP 0.15，RAP 0.25，APの4条件",
     )
     parser.add_argument(
         "--expected-dataset",
@@ -85,6 +85,16 @@ def parse_args() -> argparse.Namespace:
         dest="expected_datasets",
         choices=REQUIRED_DATASETS,
         help="必須データセットを限定する（複数指定可）．省略時はstandardとlishogi-non-bot",
+    )
+    parser.add_argument(
+        "--expected-result-type",
+        action="append",
+        dest="expected_result_types",
+        choices=REQUIRED_RESULT_TYPES,
+        help=(
+            "必須成果物を限定する（複数指定可）．省略時はmove_metrics.jsonと"
+            "probe_metrics.json．probesだけの再評価収集ではprobe_metrics.jsonを指定する"
+        ),
     )
     parser.add_argument(
         "--allow-incomplete",
@@ -198,12 +208,14 @@ def required_matrix(
     observed: Mapping[tuple[str, str], set[str]],
     conditions: Iterable[str],
     datasets: Iterable[str],
+    result_types: Iterable[str],
 ) -> list[dict[str, object]]:
+    required = set(result_types)
     missing: list[dict[str, object]] = []
     for condition in conditions:
         for dataset in datasets:
             found = observed.get((condition, dataset), set())
-            absent = sorted(set(REQUIRED_RESULT_TYPES) - found)
+            absent = sorted(required - found)
             if absent:
                 missing.append({"condition": condition, "dataset": dataset, "missing": absent})
     return missing
@@ -325,6 +337,7 @@ def main() -> None:
 
     expected_conditions = tuple(args.expected_conditions or CONDITIONS)
     expected_datasets = tuple(args.expected_datasets or REQUIRED_DATASETS)
+    expected_result_types = tuple(args.expected_result_types or REQUIRED_RESULT_TYPES)
 
     def make_replacements(current_roots: Iterable[Path]) -> list[tuple[str, str]]:
         values = [(str(project), "<PROJECT_DIR>"), (str(Path.home()), "<HOME>")]
@@ -336,7 +349,9 @@ def main() -> None:
     replacements = make_replacements(roots)
     entries, source_files, observed, duplicate_paths = scan_results(roots, args, replacements)
     auto_discovered_roots: list[Path] = []
-    missing_matrix = required_matrix(observed, expected_conditions, expected_datasets)
+    missing_matrix = required_matrix(
+        observed, expected_conditions, expected_datasets, expected_result_types
+    )
 
     # 標準とLishogiを兄弟rootへ出力する従来シェルに対応する．片方のrootだけが
     # 指定されても，親ディレクトリ直下のresults siblingを自動的に追加する．
@@ -346,7 +361,9 @@ def main() -> None:
             roots = roots + auto_discovered_roots
             replacements = make_replacements(roots)
             entries, source_files, observed, duplicate_paths = scan_results(roots, args, replacements)
-            missing_matrix = required_matrix(observed, expected_conditions, expected_datasets)
+            missing_matrix = required_matrix(
+                observed, expected_conditions, expected_datasets, expected_result_types
+            )
 
     if dataset is not None:
         for name in ("dataset_manifest.json", "vocab.json", "split_summary.json", "export_summary.json"):
@@ -386,7 +403,10 @@ def main() -> None:
                     for name in entries
                     if name.endswith(("move_metrics.json", "probe_metrics.json"))
                 ),
-                "hint": "標準評価とLishogiの親results rootを全て指定するか，部分収集なら--allow-incompleteを指定してください",
+                "hint": (
+                    "親results rootを全て指定してください．probesだけを正式に収集する場合は"
+                    "--expected-result-type probe_metrics.jsonを指定してください"
+                ),
             },
             ensure_ascii=False,
             indent=2,
@@ -415,7 +435,7 @@ def main() -> None:
         "expected_matrix": {
             "conditions": list(expected_conditions),
             "datasets": list(expected_datasets),
-            "required_result_types": list(REQUIRED_RESULT_TYPES),
+            "required_result_types": list(expected_result_types),
         },
         "missing_matrix": missing_matrix,
         "missing_action_condition": missing_action_condition,
