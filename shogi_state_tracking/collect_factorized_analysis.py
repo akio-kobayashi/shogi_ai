@@ -29,6 +29,7 @@ from typing import Iterable, Mapping
 CONDITIONS = (
     "vanilla-p0.0",
     "rap-p0.15-proportional-rap-v1",
+    "rap-p0.25-proportional-rap-v1",
     "ap-p1.0-proportional-annotation-v1",
 )
 REQUIRED_DATASETS = ("standard", "lishogi-non-bot")
@@ -91,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         help="必須条件の欠落があってもarchiveを作成する（manifestに欠落を記録）",
     )
     parser.add_argument("--include-probe-artifacts", action="store_true", help="linear_probes.pt等も含める")
+    parser.add_argument(
+        "--require-action-condition",
+        action="store_true",
+        help="同一prefix行動条件実験の4条件，頑健性，主条件のattention遮断，比較matrixを必須とする",
+    )
     parser.add_argument("--no-logs", action="store_true", help="*.logを含めない")
     parser.add_argument(
         "--no-auto-sibling-discovery",
@@ -201,6 +207,31 @@ def required_matrix(
             if absent:
                 missing.append({"condition": condition, "dataset": dataset, "missing": absent})
     return missing
+
+
+def required_action_condition_files(entries: Mapping[str, bytes]) -> list[str]:
+    """行動条件実験が4条件について完遂しているかarchive内pathで検査する。"""
+    paths = set(entries)
+    required = []
+    for condition in CONDITIONS[:3]:
+        base = "/{}/".format(condition)
+        category = "/evaluation/action-condition/primary/"
+        for name in (
+            "action_condition_metrics.json",
+            "action_condition_robustness.json",
+            "action_condition_attention_ablation.json",
+        ):
+            if not any(base in path and category in path and path.endswith("/" + name) for path in paths):
+                required.append("{}:{}{}".format(condition, category, name))
+    ap = CONDITIONS[3]
+    for category_name in ("oracle-native", "sensitivity-no-annotation"):
+        category = "/evaluation/action-condition/{}/".format(category_name)
+        for name in ("action_condition_metrics.json", "action_condition_robustness.json"):
+            if not any("/{}/".format(ap) in path and category in path and path.endswith("/" + name) for path in paths):
+                required.append("{}:{}{}".format(ap, category, name))
+    if not any(path.endswith("/action-condition-reference-summary/action_condition_matrix.json") for path in paths):
+        required.append("action-condition-reference-summary/action_condition_matrix.json")
+    return required
 
 
 def _contains_result_metrics(path: Path) -> bool:
@@ -329,6 +360,16 @@ def main() -> None:
     if not entries:
         raise ValueError("no analysis files were found under the supplied results roots")
 
+    missing_action_condition = (
+        required_action_condition_files(entries) if args.require_action_condition else []
+    )
+    if missing_action_condition:
+        raise SystemExit(json.dumps({
+            "error": "action-condition result matrix is incomplete",
+            "missing": missing_action_condition,
+            "hint": "run_reference_action_condition_experiment.shを完遂してから再収集してください",
+        }, ensure_ascii=False, indent=2))
+
     if missing_matrix and not args.allow_incomplete:
         message = json.dumps(
             {
@@ -364,6 +405,7 @@ def main() -> None:
             "include_probe_artifacts": bool(args.include_probe_artifacts),
             "include_logs": not args.no_logs,
             "allow_incomplete": bool(args.allow_incomplete),
+            "require_action_condition": bool(args.require_action_condition),
         },
         "safety": {
             "model_checkpoints_included": False,
@@ -376,6 +418,7 @@ def main() -> None:
             "required_result_types": list(REQUIRED_RESULT_TYPES),
         },
         "missing_matrix": missing_matrix,
+        "missing_action_condition": missing_action_condition,
         "observed_matrix": {
             f"{condition}/{dataset_name}": sorted(values)
             for (condition, dataset_name), values in sorted(observed.items())
