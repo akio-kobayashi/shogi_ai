@@ -17,7 +17,9 @@ FIXED_RESULTS_DIR="${3:?fixed-epoch results directory is required}"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 MODEL_TYPE="${MODEL_TYPE:-llama}"
 MODEL_SIZE="${MODEL_SIZE:-reference}"
-RAP_RATES="${RAP_RATES:-0.0,0.15,0.25}"
+# q=1.0は当初仕様どおりAP（学習・評価とも常時駒種注釈）として扱う。
+# fixed50と収集器の既定条件を一致させ，APだけ欠けるartifactを作らない。
+RAP_RATES="${RAP_RATES:-0.0,0.15,0.25,1.0}"
 SEEDS="${SEEDS:-20260802}"
 TARGET_EPOCHS="${TARGET_EPOCHS:-50}"
 

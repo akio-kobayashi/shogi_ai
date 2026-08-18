@@ -17,7 +17,8 @@ LISHOGI_DATASET_DIR="${3:?Lishogi evaluation dataset directory is required}"
 PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 MODEL_TYPE="${MODEL_TYPE:-llama}"
 MODEL_SIZE="${MODEL_SIZE:-reference}"
-RAP_RATES="${RAP_RATES:-0.0,0.15,0.25}"
+# q=1.0は当初仕様どおりAPとして評価する。fixed50学習・収集器と同じ4条件を既定にする。
+RAP_RATES="${RAP_RATES:-0.0,0.15,0.25,1.0}"
 SEEDS="${SEEDS:-20260802}"
 TARGET_EPOCHS="${TARGET_EPOCHS:-50}"
 STANDARD_EVAL_STAGE="${STANDARD_EVAL_STAGE:-main}"
@@ -40,25 +41,52 @@ checkpoint_epoch() {
 
 IFS=',' read -r -a rates <<< "${RAP_RATES}"
 IFS=',' read -r -a seeds <<< "${SEEDS}"
+
+resolve_condition() {
+  local rate="$1"
+  local mode=rap
+  [[ "${rate}" == 0 || "${rate}" == 0.0 || "${rate}" == 0.00 ]] && mode=vanilla
+  [[ "${rate}" == 1 || "${rate}" == 1.0 || "${rate}" == 1.00 ]] && mode=ap
+  local run_variant=""
+  [[ "${mode}" == rap ]] && run_variant="proportional-rap-v1"
+  [[ "${mode}" == ap ]] && run_variant="proportional-annotation-v1"
+  RESOLVED_CONDITION="${mode}-p${rate}"
+  [[ -n "${run_variant}" ]] && RESOLVED_CONDITION="${RESOLVED_CONDITION}-${run_variant}"
+}
+
+# 逐次評価の途中で後続条件の欠落が判明すると，先頭条件だけを含む部分artifactが
+# 残る。全条件のfixed50 checkpointを先に検査し，1件でも欠ければ評価を開始しない。
+preflight_failed=0
 for seed in "${seeds[@]}"; do
   for rate in "${rates[@]}"; do
-    mode=rap
-    [[ "${rate}" == 0 || "${rate}" == 0.0 || "${rate}" == 0.00 ]] && mode=vanilla
-    [[ "${rate}" == 1 || "${rate}" == 1.0 || "${rate}" == 1.00 ]] && mode=ap
-    run_variant=""
-    [[ "${mode}" == rap ]] && run_variant="proportional-rap-v1"
-    [[ "${mode}" == ap ]] && run_variant="proportional-annotation-v1"
-    condition="${mode}-p${rate}"
-    [[ -n "${run_variant}" ]] && condition="${condition}-${run_variant}"
+    resolve_condition "${rate}"
+    run_dir="${FIXED_RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${RESOLVED_CONDITION}/seed-${seed}"
+    checkpoint="${run_dir}/last.pt"
+    if [[ ! -f "${checkpoint}" ]]; then
+      echo "missing fixed-epoch checkpoint: ${checkpoint}" >&2
+      preflight_failed=1
+      continue
+    fi
+    actual_epoch="$(checkpoint_epoch "${checkpoint}")"
+    if [[ "${actual_epoch}" != "${TARGET_EPOCHS}" ]]; then
+      echo "refusing unequal-budget evaluation: ${checkpoint} is epoch ${actual_epoch}, expected ${TARGET_EPOCHS}" >&2
+      preflight_failed=1
+    fi
+  done
+done
+[[ "${preflight_failed}" == 0 ]] || {
+  echo "fixed-epoch evaluation preflight failed; no condition was evaluated" >&2
+  exit 2
+}
+
+for seed in "${seeds[@]}"; do
+  for rate in "${rates[@]}"; do
+    resolve_condition "${rate}"
+    condition="${RESOLVED_CONDITION}"
 
     run_dir="${FIXED_RESULTS_DIR}/${MODEL_TYPE}-${MODEL_SIZE}/implicit-initial/${condition}/seed-${seed}"
     checkpoint="${run_dir}/last.pt"
-    [[ -f "${checkpoint}" ]] || { echo "missing fixed-epoch checkpoint: ${checkpoint}" >&2; exit 2; }
     actual_epoch="$(checkpoint_epoch "${checkpoint}")"
-    [[ "${actual_epoch}" == "${TARGET_EPOCHS}" ]] || {
-      echo "refusing unequal-budget evaluation: ${checkpoint} is epoch ${actual_epoch}, expected ${TARGET_EPOCHS}" >&2
-      exit 2
-    }
 
     echo "[standard] ${condition}, seed=${seed}, checkpoint=last.pt, epoch=${actual_epoch}"
     "${SCRIPT_DIR}/scripts/run_factorized_evaluation.sh" \
