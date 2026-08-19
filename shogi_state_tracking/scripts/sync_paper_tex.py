@@ -52,8 +52,14 @@ def inline(text: str, footnotes: dict[str, str]) -> str:
         if part.startswith("`") and part.endswith("`"):
             converted.append(r"\texttt{\detokenize{" + part[1:-1] + "}}")
         else:
-            converted.append(part)
+            # Markdownでは通常文字として使えるが，LaTeXでは構文上の意味を
+            # 持つ文字をエスケープする．特に表中の % を放置すると，それ以降の
+            # 列区切りと行末がコメントとして消え，alignment errorになる．
+            escaped = re.sub(r"(?<!\\)%", r"\\%", part)
+            escaped = re.sub(r"(?<!\\)&", r"\\&", escaped)
+            converted.append(escaped)
     result = "".join(converted)
+    result = re.sub(r"\*\*([^*]+)\*\*", r"\\textbf{\1}", result)
     for key, value in footnotes.items():
         result = result.replace(f"[^{key}]", r"\footnote{" + inline(value, {}) + "}")
     return result
@@ -69,23 +75,32 @@ def parse_table(lines: list[str], start: int, footnotes: dict[str, str], index: 
     header = rows[0]
     body = rows[2:]
     if index == 1:
-        environment = "table*"
-        width = r"\textwidth"
         columns = r">{\raggedright\arraybackslash}p{0.13\textwidth} >{\raggedright\arraybackslash}X r"
         caption = "モデルの語彙"
         label = "tab:vocabulary"
-    else:
-        environment = "table*"
-        width = r"\textwidth"
+    elif index == 2:
         columns = r"l >{\raggedright\arraybackslash}X r r"
         caption = "実験データの分割"
         label = "tab:dataset"
+    else:
+        table_metadata = {
+            3: ("Floodgate評価における指手予測", "tab:move-standard"),
+            4: ("未見局面における指手予測", "tab:move-unseen"),
+            5: ("Lishogi非BOT棋譜における指手予測", "tab:move-lishogi"),
+            6: ("代表層からの局面状態の線形復号", "tab:state-probe"),
+            7: ("持ち駒表現の行動条件差", "tab:action-condition"),
+            8: ("持ち駒関連履歴へのattention接続の遮断", "tab:attention-ablation"),
+        }
+        caption, label = table_metadata.get(index, (f"実験結果{index - 2}", f"tab:result-{index - 2}"))
+        columns = r">{\raggedright\arraybackslash}X " + " ".join("r" for _ in header[1:])
+    environment = "table*"
+    width = r"\textwidth"
     output = [
         rf"\begin{{{environment}}}[t]",
         r"\centering",
         rf"\caption{{{caption}}}",
         rf"\label{{{label}}}",
-        r"\small",
+        r"\footnotesize" if index >= 3 else r"\small",
         rf"\begin{{tabularx}}{{{width}}}{{{columns}}}",
         r"\toprule",
         " & ".join(inline(cell, footnotes) for cell in header) + r" \\",
@@ -134,6 +149,11 @@ def convert(source: str) -> str:
             continue
         if in_display_math or in_code:
             output.append(line)
+            index += 1
+            continue
+        subsubsection = re.match(r"####\s+(?:\d+\.\d+\.\d+\s+)?(.+)", line)
+        if subsubsection:
+            output.extend(["", r"\subsubsection{" + subsubsection.group(1) + "}"])
             index += 1
             continue
         section = re.match(r"##\s+(?:\d+\s+)?(.+)", line)

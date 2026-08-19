@@ -404,7 +404,10 @@ def main() -> None:
                     if name.endswith(("move_metrics.json", "probe_metrics.json"))
                 ),
                 "hint": (
-                    "親results rootを全て指定してください．probesだけを正式に収集する場合は"
+                    "missingに列挙された成果物はscanned_roots内に存在しません．"
+                    "別のresults rootに存在する場合はその親rootも位置引数へ追加してください．"
+                    "未生成の場合は該当評価を実行してください．probe_metrics.jsonだけを"
+                    "正式な収集対象とする場合に限り，"
                     "--expected-result-type probe_metrics.jsonを指定してください"
                 ),
             },
