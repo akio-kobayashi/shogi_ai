@@ -127,9 +127,13 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                     ply = start + distance
                     if distance in wanted and ply < len(record["move_tokens"]):
                         step = steps.get(ply)
-                        prefix = base + history
+                        unannotated_prefix = base + history
+                        prefix = unannotated_prefix
+                        ap_annotation_id = None
                         if args.evaluation_annotation_mode == "ap" and bool(record["move_annotations"][ply].get("eligible", False)):
-                            prefix = prefix + [annotation_piece_token(str(record["move_annotations"][ply]["piece"]))]
+                            annotation = annotation_piece_token(str(record["move_annotations"][ply]["piece"]))
+                            ap_annotation_id = vocabulary[annotation]
+                            prefix = prefix + [annotation]
                         if step is not None and len(prefix) + 3 <= max_seq_len:
                             target = str(record["move_tokens"][ply])
                             target_piece, target_kind = move_piece_and_kind(
@@ -137,6 +141,11 @@ def iter_query_batches(args, vocabulary, max_seq_len, statistics):
                             )
                             batch.append({
                                 "prefix_ids": [vocabulary[token] for token in prefix],
+                                # APのチェス先行研究と同じcanonical PPLを計算するには，
+                                # 現在手の駒種注釈も予測対象へ含める必要がある．従来の
+                                # piece-conditioned評価用prefixとは分けて保持する．
+                                "unannotated_prefix_length": len(unannotated_prefix),
+                                "ap_annotation_id": ap_annotation_id,
                                 "target": target,
                                 "target_piece": target_piece,
                                 "target_piece_group": move_piece_group(target_piece),
@@ -430,6 +439,23 @@ def summarize(total):
     result["move_perplexity"] = math.exp(min(result["move_nll"], 20.0))
     result["canonical_move_perplexity"] = math.exp(min(result["canonical_move_nll"], 20.0))
     result["grammar_normalized_move_perplexity"] = math.exp(min(result["grammar_normalized_move_nll"], 20.0))
+    if total.get("ap_mode_queries", 0):
+        # ToshniwalらのUCI+AP canonical PPLと同じく，駒種注釈を含む
+        # 1指手分の全token NLLを足し，指手数で正規化する．
+        result["ap_annotated_move_nll"] = total["ap_annotated_move_nll"] / n
+        result["ap_annotated_move_perplexity"] = math.exp(
+            min(result["ap_annotated_move_nll"], 20.0)
+        )
+        annotation_examples = int(total.get("ap_annotation_examples", 0))
+        result["ap_annotation_examples"] = annotation_examples
+        result["ap_annotation_cross_entropy"] = (
+            None
+            if not annotation_examples
+            else total["ap_annotation_nll"] / annotation_examples
+        )
+        # 一般の平均処理で作られた内部集計値は公開結果から除く．
+        result.pop("ap_mode_queries", None)
+        result.pop("ap_annotation_nll", None)
     return result
 
 
@@ -504,6 +530,15 @@ def main():
             for row, (query, tokens, ids, generated) in enumerate(zip(batch, targets, target_ids, beam_moves)):
                 prefix_length = len(query["prefix_ids"])
                 nll = canonical_nll = grammar_nll = 0.0
+                annotation_nll = 0.0
+                if query["ap_annotation_id"] is not None:
+                    # logits[:, i]はinput_ids[:, i+1]を予測する．AP prefix末尾の
+                    # 正解駒種tokenを，無償の入力ではなく現在手の一部として採点する．
+                    annotation_position = int(query["unannotated_prefix_length"]) - 1
+                    annotation_vector = logits[row, annotation_position].float()
+                    annotation_nll = -float(
+                        torch.log_softmax(annotation_vector, dim=-1)[query["ap_annotation_id"]]
+                    )
                 component_top1 = component_top5 = True
                 source_top1 = source_top5 = destination_top1 = destination_top5 = 0
                 promotion_correct = promotion_applicable = 0
@@ -553,6 +588,13 @@ def main():
                     "beam_top5_contains_legal_rate": int(any(move in query["legal_moves"] for move in generated_moves[:5])),
                     "beam_legal_probability_lower_bound": legal_beam_mass,
                 }
+                if args.evaluation_annotation_mode == "ap":
+                    values.update({
+                        "ap_mode_queries": 1,
+                        "ap_annotation_examples": int(query["ap_annotation_id"] is not None),
+                        "ap_annotation_nll": annotation_nll,
+                        "ap_annotated_move_nll": nll + annotation_nll,
+                    })
                 add(totals["all"], query, values)
                 add(by_distance[str(query["distance"])], query, values)
                 if query["distance"] in args.primary_history_distances:
@@ -609,7 +651,8 @@ def main():
             },
         },
         "notes": {
-            "canonical_perplexity": "token-level perplexity after masking RAP-only piece-token logits before normalization; intrinsic DROP piece tokens remain available after DROP",
+            "canonical_perplexity": "token-level perplexity after masking RAP-only piece-token logits before normalization; intrinsic DROP piece tokens remain available after DROP. For AP this is a gold-piece-conditioned diagnostic and is not comparable with Toshniwal et al.'s UCI+AP canonical perplexity",
+            "ap_annotated_move_perplexity": "AP only: exp of the mean per-move NLL sum over the current gold piece annotation (when applicable) and all move-component tokens. This follows Toshniwal et al.'s canonical one-move normalization; EOS is excluded because this evaluator samples nonterminal next moves",
             "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
             "greedy_and_beam": "legacy greedy_* fields use the first result of the width-5 grammar-constrained beam; complete_move_evaluation names this beam output explicitly; decoding is not constrained by shogi legality",

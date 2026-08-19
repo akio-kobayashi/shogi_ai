@@ -600,6 +600,28 @@ class FactorizedEvaluationTest(unittest.TestCase):
             prefix,
             ["<BOS>", "<MOVES>", "<P>", "<SQ_7g>", "<SQ_7f>", "<P>"],
         )
+        self.assertEqual(query["unannotated_prefix_length"], 5)
+        self.assertEqual(query["ap_annotation_id"], vocab["<P>"])
+
+    def test_ap_summary_separates_piece_conditioned_and_chess_comparable_perplexity(self):
+        from evaluate_factorized_moves import empty_total, add, summarize
+
+        total = empty_total()
+        add(total, {}, {
+            "move_subtokens": 2,
+            "move_nll": 0.4,
+            "canonical_move_nll": 0.3,
+            "grammar_normalized_move_nll": 0.2,
+            "ap_mode_queries": 1,
+            "ap_annotation_examples": 1,
+            "ap_annotation_nll": 0.7,
+            "ap_annotated_move_nll": 1.1,
+        })
+        result = summarize(total)
+        self.assertAlmostEqual(result["canonical_move_perplexity"], math.exp(0.3))
+        self.assertAlmostEqual(result["ap_annotated_move_perplexity"], math.exp(1.1))
+        self.assertAlmostEqual(result["ap_annotation_cross_entropy"], 0.7)
+        self.assertEqual(result["ap_annotation_examples"], 1)
 
     def test_batched_beam_matches_single_query_beam(self):
         from evaluate_factorized_moves import beam_batch_cached, beam_single_cached
