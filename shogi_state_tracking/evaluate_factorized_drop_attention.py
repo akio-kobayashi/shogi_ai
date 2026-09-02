@@ -199,6 +199,52 @@ def finish_ablation(accum):
     }
 
 
+def clustered_contrast_interval(records, field, seed, repetitions=2000):
+    """対局を再抽出単位とする，関連履歴遮断－対照遮断の信頼区間。"""
+    by_game = defaultdict(list)
+    for record in records:
+        by_game[str(record["game_id"])].append(float(record[field]))
+    games = sorted(by_game)
+    if not games:
+        return {"lower": None, "upper": None, "repetitions": 0, "clusters": 0}
+    observed = sum(sum(values) for values in by_game.values()) / sum(len(values) for values in by_game.values())
+    if len(games) == 1:
+        return {"lower": observed, "upper": observed, "repetitions": 0, "clusters": 1}
+    rng = random.Random(seed)
+    estimates = []
+    for _ in range(repetitions):
+        sampled = [games[rng.randrange(len(games))] for _ in games]
+        values = [value for game in sampled for value in by_game[game]]
+        estimates.append(sum(values) / len(values))
+    estimates.sort()
+    lower = estimates[int(0.025 * (len(estimates) - 1))]
+    upper = estimates[int(0.975 * (len(estimates) - 1))]
+    return {"lower": lower, "upper": upper, "repetitions": repetitions, "clusters": len(games)}
+
+
+def finish_ablation_contrasts(accum, seed):
+    result = {}
+    for index, (name, records) in enumerate(sorted(accum.items())):
+        if not records:
+            continue
+        result[name] = {
+            "examples": len(records),
+            "probability_change_difference": sum(
+                record["probability_change_difference"] for record in records
+            ) / len(records),
+            "probability_change_difference_clustered_95ci": clustered_contrast_interval(
+                records, "probability_change_difference", seed + index
+            ),
+            "log_probability_change_difference": sum(
+                record["log_probability_change_difference"] for record in records
+            ) / len(records),
+            "log_probability_change_difference_clustered_95ci": clustered_contrast_interval(
+                records, "log_probability_change_difference", seed + 1000 + index
+            ),
+        }
+    return result
+
+
 def main():
     args = parse_args()
     random.seed(args.seed); torch.manual_seed(args.seed)
@@ -254,6 +300,7 @@ def main():
     piece_ids = [vocabulary[token] for token in BASIC_PIECE_TOKENS]
     attention_accum = defaultdict(lambda: defaultdict(float))
     ablation_accum = defaultdict(lambda: defaultdict(float))
+    ablation_contrast_accum = defaultdict(list)
     no_mask_max_error = 0.0
     with torch.inference_mode(), amp_context(device, amp_dtype):
         for pair_index, pair in enumerate(pairs):
@@ -293,27 +340,47 @@ def main():
                 pre_baseline = restricted_metrics(pre_logits, first_ids, vocabulary[DROP_TOKEN])
                 drop_baseline = restricted_metrics(drop_logits, piece_ids, piece_ids[piece])
                 for layer_name, layer_indices in layer_sets.items():
+                    masked_by_condition = {}
                     for mask_name, keys in (("relevant", relevant), ("matched_control", controls)):
                         pre_masked_logits = forward_with_edge_ablation(model, pre_ids, pre_query, keys, layer_indices)
                         drop_masked_logits = forward_with_edge_ablation(model, drop_ids, drop_query, keys, layer_indices)
+                        pre_masked = restricted_metrics(pre_masked_logits, first_ids, vocabulary[DROP_TOKEN])
+                        drop_masked = restricted_metrics(drop_masked_logits, piece_ids, piece_ids[piece])
+                        masked_by_condition[mask_name] = {"pre": pre_masked, "after_drop": drop_masked}
                         add_ablation(
                             ablation_accum,
                             "{}:{}:{}:pre".format(group, layer_name, mask_name),
                             pre_baseline,
-                            restricted_metrics(pre_masked_logits, first_ids, vocabulary[DROP_TOKEN]),
+                            pre_masked,
                         )
                         add_ablation(
                             ablation_accum,
                             "{}:{}:{}:after_drop".format(group, layer_name, mask_name),
                             drop_baseline,
-                            restricted_metrics(drop_masked_logits, piece_ids, piece_ids[piece]),
+                            drop_masked,
                         )
+                    for query_name, baseline in (("pre", pre_baseline), ("after_drop", drop_baseline)):
+                        related_metrics = masked_by_condition["relevant"][query_name]
+                        control_metrics = masked_by_condition["matched_control"][query_name]
+                        ablation_contrast_accum["{}:{}:{}".format(group, layer_name, query_name)].append({
+                            "game_id": str(item["game_id"]),
+                            "probability_change_difference": (
+                                related_metrics["target_probability"] - baseline["target_probability"]
+                            ) - (
+                                control_metrics["target_probability"] - baseline["target_probability"]
+                            ),
+                            "log_probability_change_difference": (
+                                related_metrics["target_log_probability"] - baseline["target_log_probability"]
+                            ) - (
+                                control_metrics["target_log_probability"] - baseline["target_log_probability"]
+                            ),
+                        })
             done = pair_index + 1
             if args.progress_every and done // args.progress_every != pair_index // args.progress_every:
                 print(json.dumps({"event": "drop_attention_progress", "pairs": done, "total": len(pairs)}), flush=True)
 
     result = {
-        "format_version": 1,
+        "format_version": 2,
         "checkpoint": args.checkpoint,
         "evaluation_jsonl": args.evaluation_jsonl,
         "model_type": model_type,
@@ -327,12 +394,18 @@ def main():
         "no_mask_forward_max_absolute_logit_error": no_mask_max_error,
         "attention": finish_attention(attention_accum),
         "ablation": finish_ablation(ablation_accum),
+        "ablation_contrasts": finish_ablation_contrasts(ablation_contrast_accum, args.seed),
+        "ablation_contrast_records": {
+            name: records for name, records in sorted(ablation_contrast_accum.items())
+        },
         "definitions": {
             "relevant_marker": "destination token of an earlier move that changed the tracked side/piece hand count",
             "control_marker": "non-relevant move destination selected to match distance to relevant markers",
             "pre": "query at the previous move destination before the current move's first token",
             "after_drop": "query after teacher-forcing <DROP> and before selecting the dropped piece",
             "edge_ablation": "sets only the selected query-to-key attention logits to -infinity and renormalizes",
+            "ablation_contrast": "paired relevant-edge change minus distance- and count-matched control-edge change",
+            "ablation_contrast_ci": "game-cluster bootstrap over paired ablation contrasts",
         },
         "limitations": [
             "Attention mass alone is descriptive and is not an explanation of model behaviour.",

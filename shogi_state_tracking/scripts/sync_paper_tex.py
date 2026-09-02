@@ -76,7 +76,7 @@ def parse_table(lines: list[str], start: int, footnotes: dict[str, str], index: 
     body = rows[2:]
     if index == 1:
         columns = r">{\raggedright\arraybackslash}p{0.13\textwidth} >{\raggedright\arraybackslash}X r"
-        caption = "モデルの語彙"
+        caption = "本実験で使用するトークン"
         label = "tab:vocabulary"
     elif index == 2:
         columns = r"l >{\raggedright\arraybackslash}X r r"
@@ -88,8 +88,10 @@ def parse_table(lines: list[str], start: int, footnotes: dict[str, str], index: 
             4: ("未見局面における指手予測", "tab:move-unseen"),
             5: ("Lishogi非BOT棋譜における指手予測", "tab:move-lishogi"),
             6: ("代表層からの局面状態の線形復号", "tab:state-probe"),
-            7: ("持ち駒表現の行動条件差", "tab:action-condition"),
-            8: ("持ち駒関連履歴へのattention接続の遮断", "tab:attention-ablation"),
+            7: ("持ち駒復号の指手依存差", "tab:action-condition"),
+            8: ("指手分岐後の持ち駒枚数復号", "tab:action-condition-accuracy"),
+            9: ("持ち駒関連履歴への注意接続の遮断", "tab:attention-ablation"),
+            10: ("APによる感度分析", "tab:ap-sensitivity"),
         }
         caption, label = table_metadata.get(index, (f"実験結果{index - 2}", f"tab:result-{index - 2}"))
         columns = r">{\raggedright\arraybackslash}X " + " ".join("r" for _ in header[1:])

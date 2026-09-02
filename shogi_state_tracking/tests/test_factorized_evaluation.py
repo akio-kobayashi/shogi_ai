@@ -244,6 +244,30 @@ class FactorizedEvaluationTest(unittest.TestCase):
         masked = forward_with_edge_ablation(model, ids, 4, [1], {0, 1})
         self.assertFalse(torch.allclose(masked[:, -1], baseline[:, -1]))
 
+    def test_attention_ablation_cluster_interval_resamples_games(self):
+        from evaluate_factorized_drop_attention import (
+            clustered_contrast_interval,
+            finish_ablation_contrasts,
+        )
+
+        records = [
+            {"game_id": "g1", "probability_change_difference": -0.20,
+             "log_probability_change_difference": -0.40},
+            {"game_id": "g1", "probability_change_difference": -0.10,
+             "log_probability_change_difference": -0.20},
+            {"game_id": "g2", "probability_change_difference": -0.30,
+             "log_probability_change_difference": -0.60},
+        ]
+        interval = clustered_contrast_interval(records, "probability_change_difference", 7, repetitions=100)
+        self.assertEqual(interval["clusters"], 2)
+        self.assertLessEqual(interval["lower"], -0.20)
+        self.assertGreaterEqual(interval["upper"], -0.20)
+
+        summary = finish_ablation_contrasts({"drop:all:after_drop": records}, 7)
+        result = summary["drop:all:after_drop"]
+        self.assertAlmostEqual(result["probability_change_difference"], -0.20)
+        self.assertEqual(result["probability_change_difference_clustered_95ci"]["clusters"], 2)
+
     def test_chess_protocol_instance_uses_true_start_and_end_prompts(self):
         from evaluate_factorized_chess_protocol import make_instance
 
@@ -620,6 +644,8 @@ class FactorizedEvaluationTest(unittest.TestCase):
         result = summarize(total)
         self.assertAlmostEqual(result["canonical_move_perplexity"], math.exp(0.3))
         self.assertAlmostEqual(result["ap_annotated_move_perplexity"], math.exp(1.1))
+        self.assertAlmostEqual(result["ap_piece_conditioned_move_perplexity"], math.exp(0.3))
+        self.assertAlmostEqual(result["ap_canonical_move_perplexity"], math.exp(1.1))
         self.assertAlmostEqual(result["ap_annotation_cross_entropy"], 0.7)
         self.assertEqual(result["ap_annotation_examples"], 1)
 

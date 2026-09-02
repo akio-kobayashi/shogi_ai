@@ -446,6 +446,11 @@ def summarize(total):
         result["ap_annotated_move_perplexity"] = math.exp(
             min(result["ap_annotated_move_nll"], 20.0)
         )
+        # 意味が分かる名称も併記する．従来のキーは既存結果との互換性のため残す．
+        result["ap_canonical_move_nll"] = result["ap_annotated_move_nll"]
+        result["ap_canonical_move_perplexity"] = result["ap_annotated_move_perplexity"]
+        result["ap_piece_conditioned_move_nll"] = result["canonical_move_nll"]
+        result["ap_piece_conditioned_move_perplexity"] = result["canonical_move_perplexity"]
         annotation_examples = int(total.get("ap_annotation_examples", 0))
         result["ap_annotation_examples"] = annotation_examples
         result["ap_annotation_cross_entropy"] = (
@@ -652,7 +657,9 @@ def main():
         },
         "notes": {
             "canonical_perplexity": "token-level perplexity after masking RAP-only piece-token logits before normalization; intrinsic DROP piece tokens remain available after DROP. For AP this is a gold-piece-conditioned diagnostic and is not comparable with Toshniwal et al.'s UCI+AP canonical perplexity",
-            "ap_annotated_move_perplexity": "AP only: exp of the mean per-move NLL sum over the current gold piece annotation (when applicable) and all move-component tokens. This follows Toshniwal et al.'s canonical one-move normalization; EOS is excluded because this evaluator samples nonterminal next moves",
+            "ap_canonical_move_perplexity": "AP only: exp of the mean per-move NLL sum over the current gold piece annotation (when applicable) and all move-component tokens. This follows Toshniwal et al.'s canonical one-move normalization; EOS is excluded because this evaluator samples nonterminal next moves",
+            "ap_piece_conditioned_move_perplexity": "AP only: move-component perplexity after supplying the gold piece annotation; the annotation NLL is excluded, so this is diagnostic and is not Toshniwal et al.'s canonical AP perplexity",
+            "legacy_ap_metric_names": "ap_annotated_move_{nll,perplexity} and canonical_move_{nll,perplexity} are retained for compatibility; use ap_canonical_move_* and ap_piece_conditioned_move_* when interpreting AP results",
             "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
             "greedy_and_beam": "legacy greedy_* fields use the first result of the width-5 grammar-constrained beam; complete_move_evaluation names this beam output explicitly; decoding is not constrained by shogi legality",
