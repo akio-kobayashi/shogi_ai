@@ -201,10 +201,14 @@ stage_eval() {
 stage_collect() {
   announce "collect"
   local archive="${OUTPUT_ROOT}/analysis_bundle.tar.gz"
+  # archiveは再生成できる派生物なので既定で上書きする。段階を冪等に保つため。
+  local force=()
+  [[ "${COLLECT_FORCE:-1}" == 1 ]] && force=(--force)
   run "${PYTHON_BIN}" -u "${SCRIPT_DIR}/collect_factorized_analysis.py" \
     "${archive}" "${RESULTS_DIR}" \
     --dataset-dir "${DATA_DIR}" \
     --include-probe-artifacts \
+    "${force[@]}" \
     ${COLLECT_EXTRA_ARGS:-}
   echo "archive: ${archive}" >&2
 }
