@@ -17,7 +17,11 @@ PYTHON_BIN="${PYTHON_BIN:-${SCRIPT_DIR}/.venv/bin/python}"
 [[ -x "${PYTHON_BIN}" ]] || PYTHON_BIN="${PYTHON_FALLBACK:-python3}"
 
 STAGES=""
-STUDY_ROOT="${STUDY_ROOT:-factorized_v3_study}"
+# 既定は現行の実ディレクトリである。新しいrootを切る場合だけ明示的に上書きする。
+DATA_DIR="${DATA_DIR:-factorized_v3_eos_data}"
+RESULTS_DIR="${RESULTS_DIR:-factorized_v3_eos_results_reference_fixed50}"
+SOURCE_RESULTS_DIR="${SOURCE_RESULTS_DIR:-factorized_v3_eos_results_reference}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-}"
 CONDITIONS="${CONDITIONS:-vanilla-p0.0,rap-p0.15-proportional-rap-v1,rap-p0.25-proportional-rap-v1,ap-p1.0-proportional-annotation-v1}"
 SEEDS="${SEEDS:-20260802,20260803,20260804}"
 PRIMARY_RAP_RATES="${PRIMARY_RAP_RATES:-0.0,0.15,0.25}"
@@ -30,11 +34,18 @@ DATA_INPUT="${DATA_INPUT:-}"
 usage() {
   cat >&2 <<'EOF'
 usage: run_full_study.sh --stage {data|train|eval|collect|verify|summarize|report}[,...]
-                         [--study-root DIR] [--conditions LIST] [--seeds LIST]
+                         [--dataset-dir DIR] [--results-dir DIR] [--source-results-dir DIR]
+                         [--output-root DIR] [--conditions LIST] [--seeds LIST]
                          [--data-input METADATA_CSV] [--dry-run]
 
+既定のディレクトリ（現行の実構成）
+  --dataset-dir         factorized_v3_eos_data
+  --results-dir         factorized_v3_eos_results_reference_fixed50   固定50エポック
+  --source-results-dir  factorized_v3_eos_results_reference           early stopping
+  --output-root         --results-dir と同じ（summary，paper，監査reportの出力先）
+
 stages
-  data       datasetを構築し，manifestとvocab hashを凍結する（--data-inputが必要）
+  data       datasetのmanifestとvocab hashを凍結する．--data-inputを与えた場合だけ再構築する
   train      early stopping学習ののち固定エポックへ揃える．主3条件は全seed，APは先頭seedのみ
   eval       全checkpointへcheckpoint単位の11評価を適用し，study単位のaction-conditionを1回実行する
   collect    分析archiveへまとめる
@@ -49,7 +60,10 @@ DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stage)       STAGES="${2:?--stage requires a value}"; shift 2 ;;
-    --study-root)  STUDY_ROOT="${2:?--study-root requires a value}"; shift 2 ;;
+    --dataset-dir) DATA_DIR="${2:?--dataset-dir requires a value}"; shift 2 ;;
+    --results-dir) RESULTS_DIR="${2:?--results-dir requires a value}"; shift 2 ;;
+    --source-results-dir) SOURCE_RESULTS_DIR="${2:?--source-results-dir requires a value}"; shift 2 ;;
+    --output-root) OUTPUT_ROOT="${2:?--output-root requires a value}"; shift 2 ;;
     --conditions)  CONDITIONS="${2:?--conditions requires a value}"; shift 2 ;;
     --seeds)       SEEDS="${2:?--seeds requires a value}"; shift 2 ;;
     --data-input)  DATA_INPUT="${2:?--data-input requires a value}"; shift 2 ;;
@@ -60,10 +74,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "${STAGES}" ]] || usage
 
-DATA_DIR="${STUDY_ROOT}/data"
-RESULTS_DIR="${STUDY_ROOT}/results"
-SOURCE_RESULTS_DIR="${STUDY_ROOT}/results-early-stopping"
-VOCAB="${DATA_DIR}/vocab.json"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${RESULTS_DIR}}"
+STUDY_ROOT="${RESULTS_DIR}"
+VOCAB="${VOCAB:-${DATA_DIR}/vocab.json}"
 IFS=',' read -r -a seed_values <<< "${SEEDS}"
 IFS=',' read -r -a condition_values <<< "${CONDITIONS}"
 ORACLE_SEED="${ORACLE_SEED:-${seed_values[0]}}"
@@ -97,14 +110,21 @@ seeds_for_condition() {
 
 stage_data() {
   announce "data"
-  [[ -n "${DATA_INPUT}" ]] || {
-    echo "--data-input METADATA_CSV is required for the data stage" >&2
-    exit 2
-  }
-  if [[ -f "${DATA_DIR}/dataset_manifest.json" && "${FORCE_DATA:-0}" != 1 ]]; then
-    echo "dataset already exists: ${DATA_DIR} (set FORCE_DATA=1 to rebuild)" >&2
-  else
+  if [[ -n "${DATA_INPUT}" ]]; then
+    if [[ -f "${DATA_DIR}/dataset_manifest.json" && "${FORCE_DATA:-0}" != 1 ]]; then
+      # 再構築するとmanifest hashが変わり，既存checkpointが比較不能になる。
+      echo "refusing to rebuild an existing dataset: ${DATA_DIR}" >&2
+      echo "existing checkpoints become incomparable once the manifest hash changes;" >&2
+      echo "set FORCE_DATA=1 only if you intend to retrain every condition" >&2
+      exit 2
+    fi
     run "${SCRIPT_DIR}/scripts/setup_factorized_v3_data.sh" "${DATA_INPUT}" "${DATA_DIR}"
+  else
+    [[ -f "${DATA_DIR}/dataset_manifest.json" ]] || {
+      echo "dataset is missing: ${DATA_DIR}; pass --data-input to build it" >&2
+      exit 2
+    }
+    echo "using the existing dataset: ${DATA_DIR}" >&2
   fi
   # 凍結の記録．学習開始後にdatasetが変わっていないことを後から照合できる。
   run "${PYTHON_BIN}" -u "${SCRIPT_DIR}/freeze_dataset.py" "${DATA_DIR}"
@@ -180,7 +200,7 @@ stage_eval() {
 
 stage_collect() {
   announce "collect"
-  local archive="${STUDY_ROOT}/analysis_bundle.tar.gz"
+  local archive="${OUTPUT_ROOT}/analysis_bundle.tar.gz"
   run "${PYTHON_BIN}" -u "${SCRIPT_DIR}/collect_factorized_analysis.py" \
     "${archive}" "${RESULTS_DIR}" \
     --dataset-dir "${DATA_DIR}" \
@@ -198,7 +218,7 @@ stage_verify() {
     --seeds "${SEEDS}" \
     --oracle-seed "${ORACLE_SEED}" \
     --target-epochs "${TARGET_EPOCHS}" \
-    --report "${STUDY_ROOT}/integrity_report.json" \
+    --report "${OUTPUT_ROOT}/integrity_report.json" \
     ${VERIFY_EXTRA_ARGS:-}
 }
 
@@ -211,8 +231,8 @@ stage_summarize() {
     exit 3
   }
   run "${PYTHON_BIN}" -u "${script}" \
-    --bundle "${STUDY_ROOT}/analysis_bundle" \
-    --output "${STUDY_ROOT}/summary"
+    --bundle "${OUTPUT_ROOT}/analysis_bundle" \
+    --output "${OUTPUT_ROOT}/summary"
 }
 
 stage_report() {
@@ -224,12 +244,15 @@ stage_report() {
     exit 3
   }
   run "${PYTHON_BIN}" -u "${script}" \
-    --summary "${STUDY_ROOT}/summary/study_summary.json" \
-    --output "${STUDY_ROOT}/paper"
+    --summary "${OUTPUT_ROOT}/summary/study_summary.json" \
+    --output "${OUTPUT_ROOT}/paper"
 }
 
-mkdir -p "${STUDY_ROOT}"
-echo "study root: ${STUDY_ROOT}" >&2
+mkdir -p "${OUTPUT_ROOT}"
+echo "dataset:    ${DATA_DIR}" >&2
+echo "results:    ${RESULTS_DIR}" >&2
+echo "source:     ${SOURCE_RESULTS_DIR}" >&2
+echo "output:     ${OUTPUT_ROOT}" >&2
 echo "conditions: ${CONDITIONS}" >&2
 echo "seeds:      ${SEEDS} (oracle: ${ORACLE_SEED})" >&2
 echo "stages:     ${STAGES}" >&2
@@ -246,7 +269,7 @@ for stage in ${STAGES//,/ }; do
     summarize)
       # 監査を通していない集約は許さない。同じ実行内でverifyしたか，直近のreportがpassしていること。
       if [[ "${VERIFIED}" != 1 ]]; then
-        report="${STUDY_ROOT}/integrity_report.json"
+        report="${OUTPUT_ROOT}/integrity_report.json"
         [[ -f "${report}" ]] && "${PYTHON_BIN}" -c \
           'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["summary"]["passed"] else 1)' \
           "${report}" || {
