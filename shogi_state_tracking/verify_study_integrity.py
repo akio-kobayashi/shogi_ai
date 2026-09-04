@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -19,6 +20,7 @@ CONDITIONS = (
 )
 PRIMARY_CONDITIONS = CONDITIONS[:3]
 DEFAULT_SEEDS = ("20260802", "20260803", "20260804")
+DATASET_DIR_PLACEHOLDER = "<DATASET_DIR>"
 
 
 @dataclass
@@ -28,15 +30,28 @@ class Finding:
     run: str | None
     detail: str
     path: str | None = None
+    stage: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="factorized-v3 study integrity gate")
     parser.add_argument("--study-root", required=True)
     parser.add_argument("--report")
-    parser.add_argument("--allow-missing", default="", help="comma-separated check names")
+    parser.add_argument(
+        "--allow-missing",
+        default="",
+        help="comma-separated CHECK, CHECK:STAGE, CHECK:RUN or CHECK:RUN:STAGE selectors",
+    )
     parser.add_argument("--conditions", default=",".join(CONDITIONS))
     parser.add_argument("--seeds", default=",".join(DEFAULT_SEEDS))
+    parser.add_argument(
+        "--oracle-seed",
+        help="seed used for the AP oracle condition (default: first entry of --seeds)",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        help="dataset directory used to resolve run_manifest dataset paths",
+    )
     parser.add_argument("--target-epochs", type=int, default=50)
     parser.add_argument("--causal-threshold", type=float, default=1e-4)
     return parser.parse_args()
@@ -67,9 +82,15 @@ def results_root(study_root: Path) -> Path:
     return nested if nested.is_dir() else study_root
 
 
-def expected_runs(conditions: Iterable[str], seeds: Iterable[str]) -> Iterable[tuple[str, str]]:
+def expected_runs(
+    conditions: Iterable[str], seeds: Iterable[str], oracle_seed: str | None = None
+) -> Iterable[tuple[str, str]]:
+    seed_values = tuple(seeds)
+    if not seed_values:
+        raise ValueError("at least one seed is required")
+    oracle = oracle_seed or seed_values[0]
     for condition in conditions:
-        selected = tuple(seeds) if condition in PRIMARY_CONDITIONS else (tuple(seeds)[0],)
+        selected = seed_values if condition in PRIMARY_CONDITIONS else (oracle,)
         for seed in selected:
             yield condition, seed
 
@@ -114,15 +135,61 @@ def artifact_contract(condition: str) -> dict[str, tuple[Path, ...]]:
     return common
 
 
-def checkpoint_epoch(path: Path) -> int | None:
+def history_epoch(path: Path) -> int | None:
+    """Read the last completed epoch from training_history.json.
+
+    Epoch numbering stays continuous across a fixed-epoch continuation, so the
+    maximum entry is the completed epoch count.
+    """
     if not path.is_file():
         return None
     try:
-        import torch
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-        return int(payload.get("epoch", -1))
-    except Exception:
+        history = load_json(path).get("history")
+    except (OSError, ValueError, json.JSONDecodeError):
         return None
+    if not isinstance(history, list) or not history:
+        return None
+    epochs = [entry.get("epoch") for entry in history if isinstance(entry, dict)]
+    values = [int(value) for value in epochs if isinstance(value, int)]
+    return max(values) if values else None
+
+
+def checkpoint_epoch(path: Path) -> tuple[int | None, str | None]:
+    """Return (epoch, error) read from a checkpoint. Only used as a fallback."""
+    if not path.is_file():
+        return None, "checkpoint is missing"
+    try:
+        import torch
+    except ImportError as error:
+        return None, f"torch unavailable: {error}"
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as error:  # noqa: BLE001 - torch raises a wide range of errors
+        return None, f"checkpoint unreadable: {error}"
+    value = payload.get("epoch") if isinstance(payload, dict) else None
+    return (int(value), None) if isinstance(value, int) else (None, "checkpoint has no epoch")
+
+
+def resolve_manifest(value: Any, bases: Iterable[Path]) -> Path | None:
+    """Resolve a run_manifest dataset path against a list of candidate bases."""
+    if not isinstance(value, str) or not value:
+        return None
+    candidates: list[Path] = []
+    base_list = [base for base in bases if base is not None]
+    if DATASET_DIR_PLACEHOLDER in value:
+        for base in base_list:
+            candidates.append(Path(value.replace(DATASET_DIR_PLACEHOLDER, str(base))))
+    else:
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute():
+            candidates.append(candidate)
+        else:
+            candidates.extend(base / candidate for base in base_list)
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
 
 
 def provenance_commit(payload: dict[str, Any]) -> str | None:
@@ -134,111 +201,196 @@ def provenance_commit(payload: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def working_tree_status(repository: Path) -> tuple[bool | None, str]:
+    """Return (clean, detail) for the repository holding this script."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"git unavailable: {error}"
+    if completed.returncode != 0:
+        return None, f"git exited {completed.returncode}: {completed.stderr.strip()}"
+    dirty = [line for line in completed.stdout.splitlines() if line.strip()]
+    if not dirty:
+        return True, "working tree is clean"
+    preview = ", ".join(line[3:] for line in dirty[:5])
+    suffix = ", ..." if len(dirty) > 5 else ""
+    return False, f"{len(dirty)} modified or untracked entries: {preview}{suffix}"
+
+
+def selector_matches(check: str, run: str | None, stage: str | None, allowed: set[str]) -> bool:
+    keys = {check}
+    if stage:
+        keys.add(f"{check}:{stage}")
+    if run:
+        keys.add(f"{check}:{run}")
+        if stage:
+            keys.add(f"{check}:{run}:{stage}")
+    return bool(keys & allowed)
+
+
 def main() -> int:
     args = parse_args()
     study = Path(args.study_root).expanduser().resolve()
     root = results_root(study)
     conditions, seeds = csv_values(args.conditions), csv_values(args.seeds)
+    if not seeds:
+        print("at least one seed is required")
+        return 2
     allowed = set(csv_values(args.allow_missing))
+    dataset_dir = Path(args.dataset_dir).expanduser().resolve() if args.dataset_dir else None
     findings: list[Finding] = []
     dataset_signatures: dict[str, tuple[str | None, str | None]] = {}
 
-    def add(check: str, ok: bool, detail: str, run: str | None = None, path: Path | None = None) -> None:
-        status = "pass" if ok else ("allowed" if check in allowed else "fail")
-        findings.append(Finding(check, status, run, detail, str(path) if path else None))
+    def add(
+        check: str,
+        ok: bool,
+        detail: str,
+        run: str | None = None,
+        path: Path | None = None,
+        stage: str | None = None,
+    ) -> None:
+        if ok:
+            status = "pass"
+        elif selector_matches(check, run, stage, allowed):
+            status = "allowed"
+        else:
+            status = "fail"
+        findings.append(Finding(check, status, run, detail, str(path) if path else None, stage))
 
-    for condition, seed in expected_runs(conditions, seeds):
+    def read_json(path: Path, run: str | None, stage: str | None = None) -> dict[str, Any] | None:
+        """Load JSON, recording a finding instead of raising on malformed input."""
+        try:
+            return load_json(path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            add("artifact-json", False, str(error), run, path, stage)
+            return None
+
+    for condition, seed in expected_runs(conditions, seeds, args.oracle_seed):
         label = f"{condition}/seed-{seed}"
         run_dir = locate_run(root, condition, seed)
         if not run_dir.is_dir():
             add("checkpoint", False, "run directory is missing", label, run_dir)
             continue
 
+        history_path = run_dir / "training_history.json"
         checkpoint = run_dir / "last.pt"
-        epoch = checkpoint_epoch(checkpoint)
-        add("epoch", epoch == args.target_epochs,
-            f"epoch={epoch}, expected={args.target_epochs}", label, checkpoint)
+        epoch = history_epoch(history_path)
+        source: Path = history_path
+        error: str | None = None
+        if epoch is None:
+            epoch, error = checkpoint_epoch(checkpoint)
+            source = checkpoint
+        detail = f"epoch={epoch}, expected={args.target_epochs}, source={source.name}"
+        if error:
+            detail = f"{detail} ({error})"
+        add("epoch", epoch == args.target_epochs, detail, label, source)
 
         manifest_path = run_dir / "run_manifest.json"
-        try:
-            manifest = load_json(manifest_path)
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            add("run-manifest", False, str(error), label, manifest_path)
+        manifest = read_json(manifest_path, label, "run-manifest")
+        if manifest is None:
+            add("run-manifest", False, "run_manifest.json is unreadable", label, manifest_path)
             manifest = {}
         dataset = manifest.get("dataset") if isinstance(manifest.get("dataset"), dict) else {}
         schema = dataset.get("schema_version")
         add("schema-version", schema == 4, f"dataset schema_version={schema}, expected=4", label, manifest_path)
-        manifest_hash = None
-        manifest_value = dataset.get("manifest")
-        if isinstance(manifest_value, str):
-            candidate = Path(manifest_value)
-            if not candidate.is_absolute():
-                candidate = (Path.cwd() / candidate).resolve()
-            if candidate.is_file():
-                manifest_hash = sha256_file(candidate)
+
+        resolved_manifest = resolve_manifest(
+            dataset.get("manifest"), (dataset_dir, Path.cwd(), study, run_dir)
+        )
+        manifest_hash = sha256_file(resolved_manifest) if resolved_manifest else None
         vocab_hash = dataset.get("vocab_sha256") if isinstance(dataset.get("vocab_sha256"), str) else None
         dataset_signatures[label] = (manifest_hash, vocab_hash)
-        add("dataset-hash", bool(manifest_hash and vocab_hash),
-            f"manifest_sha256={manifest_hash}, vocab_sha256={vocab_hash}", label, manifest_path)
+        hash_detail = f"manifest_sha256={manifest_hash}, vocab_sha256={vocab_hash}"
+        if resolved_manifest is None:
+            hash_detail = (
+                f"{hash_detail}; could not resolve {dataset.get('manifest')!r}"
+                " (pass --dataset-dir)"
+            )
+        add("dataset-hash", bool(manifest_hash and vocab_hash), hash_detail, label, manifest_path)
 
         evaluation = run_dir / "evaluation"
+        # Each artifact is parsed once here and reused by the checks below.
+        payloads: dict[Path, dict[str, Any]] = {}
         for stage, relatives in artifact_contract(condition).items():
             for relative in relatives:
                 artifact = evaluation / relative
                 exists = artifact.is_file()
-                add("artifacts", exists, f"{stage}: {'present' if exists else 'missing'}", label, artifact)
+                add(
+                    "artifacts",
+                    exists,
+                    f"{stage} ({relative.as_posix()}): {'present' if exists else 'missing'}",
+                    label,
+                    artifact,
+                    stage,
+                )
                 if exists and artifact.suffix == ".json":
-                    try:
-                        payload = load_json(artifact)
+                    payload = read_json(artifact, label, stage)
+                    if payload is not None:
+                        payloads[artifact] = payload
                         commit = provenance_commit(payload)
-                        add("artifact-commit", bool(commit), f"git_commit={commit}", label, artifact)
-                    except (OSError, ValueError, json.JSONDecodeError) as error:
-                        add("artifact-json", False, str(error), label, artifact)
+                        add("artifact-commit", bool(commit), f"git_commit={commit}", label, artifact, stage)
 
         probe_path = evaluation / "probes/probe_metrics.json"
         if probe_path.is_file():
-            probe = load_json(probe_path)
-            add("game-splits", probe.get("game_splits_disjoint") is True,
-                f"game_splits_disjoint={probe.get('game_splits_disjoint')}", label, probe_path)
-            alignment = probe.get("causal_prefix_full_alignment")
-            maxima = []
-            passed = True
-            if isinstance(alignment, dict):
-                for split in alignment.values():
-                    if not isinstance(split, dict):
-                        passed = False
-                        continue
-                    passed = passed and split.get("passed") is True
-                    values = split.get("max_abs_diff", {})
-                    if isinstance(values, dict):
-                        maxima.extend(float(value) for value in values.values())
-            else:
-                passed = False
-            maximum = max(maxima, default=float("inf"))
-            add("causal-mask", passed and maximum <= args.causal_threshold,
-                f"max_abs_diff={maximum:g}, threshold={args.causal_threshold:g}", label, probe_path)
+            probe = payloads.get(probe_path)
+            if probe is not None:
+                add("game-splits", probe.get("game_splits_disjoint") is True,
+                    f"game_splits_disjoint={probe.get('game_splits_disjoint')}", label, probe_path)
+                alignment = probe.get("causal_prefix_full_alignment")
+                maxima = []
+                passed = True
+                if isinstance(alignment, dict):
+                    for split in alignment.values():
+                        if not isinstance(split, dict):
+                            passed = False
+                            continue
+                        passed = passed and split.get("passed") is True
+                        values = split.get("max_abs_diff", {})
+                        if isinstance(values, dict):
+                            maxima.extend(float(value) for value in values.values())
+                else:
+                    passed = False
+                maximum = max(maxima, default=float("inf"))
+                add("causal-mask", passed and maximum <= args.causal_threshold,
+                    f"max_abs_diff={maximum:g}, threshold={args.causal_threshold:g}", label, probe_path)
 
         action_paths = [path for paths in artifact_contract(condition).values() for path in paths
                         if path.name == "action_condition_attention_ablation.json"]
         for relative in action_paths:
             path = evaluation / relative
             if path.is_file():
-                payload = load_json(path)
-                records = payload.get("ablation_contrast_records")
-                present = isinstance(records, (list, dict)) and bool(records)
-                add("example-records", present, "ablation_contrast_records present" if present else
-                    "ablation_contrast_records missing or empty", label, path)
+                payload = payloads.get(path)
+                if payload is not None:
+                    records = payload.get("ablation_contrast_records")
+                    present = isinstance(records, (list, dict)) and bool(records)
+                    add("example-records", present, "ablation_contrast_records present" if present else
+                        "ablation_contrast_records missing or empty", label, path, "action-condition")
 
         stage_log = evaluation / "stage_log.json"
         add("stage-log", stage_log.is_file(), "present" if stage_log.is_file() else "missing", label, stage_log)
 
-    complete_signatures = {value for value in dataset_signatures.values() if all(value)}
-    add("dataset-consistency", len(complete_signatures) == 1,
-        f"distinct complete dataset signatures={len(complete_signatures)}")
+    incomplete = sorted(label for label, value in dataset_signatures.items() if not all(value))
+    distinct = {value for value in dataset_signatures.values() if all(value)}
+    consistent = bool(dataset_signatures) and not incomplete and len(distinct) == 1
+    consistency_detail = (
+        f"runs={len(dataset_signatures)}, unresolved={len(incomplete)}, distinct signatures={len(distinct)}"
+    )
+    if incomplete:
+        consistency_detail = f"{consistency_detail}; unresolved: {', '.join(incomplete)}"
+    add("dataset-consistency", consistent, consistency_detail)
+
+    clean, tree_detail = working_tree_status(Path(__file__).resolve().parent)
+    add("working-tree", clean is True, tree_detail)
 
     failed = [finding for finding in findings if finding.status == "fail"]
     report = {
-        "format_version": 1,
+        "format_version": 2,
         "study_root": str(study),
         "target_epochs": args.target_epochs,
         "causal_threshold": args.causal_threshold,
