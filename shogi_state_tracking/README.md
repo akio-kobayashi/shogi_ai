@@ -285,7 +285,7 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
   factorized_v3_eos_results
 ```
 
-`q=1.0`はAP（Always Piece Type）条件として扱い，結果を`ap-p1.0-proportional-annotation-v1`へ保存する．APはRAPと異なり，学習時だけでなく評価時の履歴にも全通常移動の駒種を与えるoracle条件である．評価対象となる現在指手についても正解駒種をpromptとして与え，その後の指手subtokenを評価する．APだけを追加実行する場合は次を用いる．
+`q=1.0`はAP（Always Piece Type）条件として扱い，結果を`ap-p1.0-proportional-annotation-v1`へ保存する．APはRAPと異なり，学習時だけでなく評価時の履歴にも全通常移動の駒種を与えるoracle条件である．指手評価では，正解駒種を与えた後だけの診断値`ap_piece_conditioned_move_perplexity`と，現在手の駒種トークン自体も予測対象に含めたAP正準値`ap_canonical_move_perplexity`を分けて出力する．チェスAPのcanonical move perplexityと方法上対応するのは後者である．従来の`canonical_move_perplexity`および`ap_annotated_move_perplexity`も，既存結果との互換性のため同じ値の別名として残す．APだけを追加実行する場合は次を用いる．
 
 ```bash
 MEMORY_MAX=100G MEMORY_HIGH=90G \
@@ -301,11 +301,11 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
 ### 既存checkpointを固定50 epochへ揃えた比較
 
 early stopping済みの`last.pt`から不足epochだけを継続し，RAPなし，RAP=0.15，
-RAP=0.25を固定50 epochで比較する場合は次を使う．元のresults rootは変更せず，
+RAP=0.25，AP（`q=1.0`）を固定50 epochで比較する場合は次を使う．元のresults rootは変更せず，
 第3引数の固定epoch用results rootへcheckpointと履歴を複製してから再開する．
 
 ```bash
-RAP_RATES=0.0,0.15,0.25 \
+RAP_RATES=0.0,0.15,0.25,1.0 \
 MODEL_TYPE=llama MODEL_SIZE=reference TARGET_EPOCHS=50 \
 MEMORY_MAX=100G MEMORY_HIGH=90G \
   ./scripts/run_factorized_fixed_epoch_experiment.sh \
@@ -339,8 +339,9 @@ MEMORY_MAX=100G MEMORY_HIGH=90G \
   data/lishogi-non-bot-factorized-eval
 ```
 
-固定epoch評価では`best.pt`を使わない．評価スクリプトが`last.pt`内のepochを検査し，
-1条件でも`TARGET_EPOCHS`と異なれば評価を中止する．標準結果は各runの
+固定epoch評価では`best.pt`を使わない．`q=1.0`はAPへ切り替わり，学習・評価とも
+常時駒種注釈を用いる．評価スクリプトは実行前に4条件すべての`last.pt`とepochを検査し，
+1条件でも欠落又は`TARGET_EPOCHS`と不一致なら，どの条件も評価せず中止する．標準結果は各runの
 `evaluation/`，Lishogi結果は`evaluation/lishogi-non-bot/`へ保存されるため，
 既存の分析結果収集スクリプトで回収できる．
 
@@ -512,11 +513,23 @@ attention経路は現在reference LLaMAだけに対応する．`SKIP_DROP_ATTENT
 reference LLaMAのRAPなし，RAP=0.15，RAP=0.25を同じ注釈なしprotocolで主比較し，
 APはoracle native入力と注釈除去感度分析を別枠へ保存する．
 
+4条件を未だfixed50へ揃えていない場合は，先に次を実行する．
+
+```bash
+RAP_RATES=0.0,0.15,0.25,1.0 \
+MODEL_TYPE=llama MODEL_SIZE=reference TARGET_EPOCHS=50 \
+MEMORY_MAX=100G MEMORY_HIGH=90G \
+  ./scripts/run_factorized_fixed_epoch_training.sh \
+  factorized_v3_eos_data \
+  factorized_v3_eos_results_reference \
+  factorized_v3_eos_results_reference_fixed50
+```
+
 ```bash
 MEMORY_MAX=100G MEMORY_HIGH=90G \
   ./scripts/run_reference_action_condition_experiment.sh \
   factorized_v3_eos_data \
-  factorized_v3_eos_results_reference
+  factorized_v3_eos_results_reference_fixed50
 ```
 
 軽量確認では，例えば次を指定する．
@@ -526,13 +539,35 @@ MAX_ACTION_CONDITION_PAIRS=50 \
 MAX_ACTION_CALIBRATION_EXAMPLES=100 \
 MEMORY_MAX=100G MEMORY_HIGH=90G \
   ./scripts/run_reference_action_condition_experiment.sh \
-  factorized_v3_eos_data factorized_v3_eos_results_reference
+  factorized_v3_eos_data factorized_v3_eos_results_reference_fixed50
 ```
 
 各runの`evaluation/action-condition/`へ数値，SVG，logを保存し，全条件の要約を
-`factorized_v3_eos_results_reference/action-condition-reference-summary/action_condition_matrix.json`
+`factorized_v3_eos_results_reference_fixed50/action-condition-reference-summary/action_condition_matrix.json`
 へ出力する．AP結果は主比較へpoolしない．この介入は候補行動tokenを外から与えるため，
 モデルが未入力の状態でその行動を自発的に選んだことの証拠ではない．
+
+このシェルは既定で固定50 epochの`last.pt`だけを受け付ける．各checkpointの
+`epoch`が`TARGET_EPOCHS=50`と一致しない場合は，条件間で学習量が異なるため評価を中止する．
+
+同じシェルは，旧`h_pre`プローブによる予備解析に加え，次の検証を必ず実行する．
+
+- 評価対局を対局単位でprobe学習60%，較正20%，最終評価20%へ固定分割する．
+- `pre`，`<DROP>`後，合法な通常手先頭後を均等に含む持ち駒線形probeを学習する．
+- 各位置専用probeを全3位置で評価し，位置間交差汎化行列を得る．
+- 通常手分岐を既定3本用い，選んだ通常手による効果のばらつきを報告する．
+- `<DROP>`後の正解駒種確率をモデル自身の出力分布から測る．
+- prefix単独入力と未来token付き入力の隠れ状態が一致することを実測する．
+- 主3条件では関連履歴へのattentionと，対応する直接attention接続の遮断を測る．
+
+主結果は`action_condition_robustness.json`の`pooled_probe_within_prefix`である．
+`cross_position_generalization`は位置固有の表現回転を調べる診断，
+`behavior_after_drop`はprobeを介さない行動予測指標である．`branch_hand_probes.pt`には
+この実験内で学習したprobeを保存する．`SKIP_ACTION_CAUSAL_AUDIT=1`を指定した場合だけ，
+高コストなattention遮断を省略できるが，その実行結果は完全な比較matrixとして収集しない．
+最終的な統計的主張では独立学習seedを3個以上指定し，
+`REQUIRE_MULTIPLE_MODEL_SEEDS=1 SEEDS=20260802,20260803,20260804`のように実行する．
+単一seedの結果はモデル学習のばらつきを含まない予備結果として扱う．
 
 ## 出力
 
@@ -639,6 +674,19 @@ Lishogiだけを確認用に収集する場合は，必須データセットを�
 tar -xOzf factorized_v3_analysis_reference_full.tar.gz \
   analysis_bundle/COLLECTION_MANIFEST.json \
   | jq '{expected_matrix,observed_matrix,missing_matrix}'
+```
+
+`EVAL_STAGE=probes`又は`STANDARD_EVAL_STAGE=probes`で状態プローブだけを
+再評価した結果を収集する場合，`move_metrics.json`を必須にしてはならない．
+この場合は部分収集を黙認する`--allow-incomplete`ではなく，必須成果物を明示する．
+
+```bash
+./scripts/collect_factorized_analysis.sh \
+  factorized_v3_analysis_reference_fixed50_slot_macro.tar.gz \
+  factorized_v3_eos_results_reference_fixed50 \
+  --dataset-dir factorized_v3_eos_data \
+  --expected-result-type probe_metrics.json \
+  --no-auto-sibling-discovery
 ```
 
 `collect_factorized_analysis.py`は入力rootを読み取るだけで，元のresultsやcheckpointを

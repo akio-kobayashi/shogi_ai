@@ -39,6 +39,7 @@ TRACKED_RESULT_NAMES = {
     "run_manifest.json",
     "training_history.json",
     "move_metrics.json",
+    "distribution_baselines.json",
     "token_probe_metrics.json",
     "probe_metrics.json",
     "action_probe_metrics.json",
