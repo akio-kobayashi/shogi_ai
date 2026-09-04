@@ -36,6 +36,7 @@ from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from probes import LinearStateProbe, predictions_from_logits
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 def parse_args():
@@ -398,7 +399,7 @@ def main():
         },
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(output, result)
     print(json.dumps({"event": "hand_dynamics_evaluation_complete", "output": str(output), "events": len(events), "drops": len(drops)}, ensure_ascii=False), flush=True)
 
 

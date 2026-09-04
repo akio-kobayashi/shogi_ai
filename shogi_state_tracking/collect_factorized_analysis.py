@@ -24,6 +24,7 @@ import re
 import subprocess
 import tarfile
 from typing import Iterable, Mapping
+from provenance import cshogi_provenance
 
 
 CONDITIONS = (
@@ -421,6 +422,7 @@ def main() -> None:
         "created_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "source_commit": git_value(project, "rev-parse", "HEAD"),
         "source_dirty": bool(git_value(project, "status", "--short")),
+        "cshogi": cshogi_provenance(),
         "input_results_roots": ["<RESULTS_ROOT>" for _ in roots],
         "auto_discovered_sibling_roots": len(auto_discovered_roots),
         "dataset_root": "<DATASET_DIR>" if dataset is not None else None,

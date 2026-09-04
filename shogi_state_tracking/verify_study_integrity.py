@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--target-epochs", type=int, default=50)
     parser.add_argument("--causal-threshold", type=float, default=1e-4)
+    parser.add_argument(
+        "--check-torch-provenance",
+        action="store_true",
+        help="also verify provenance inside .pt artifacts (requires torch)",
+    )
     return parser.parse_args()
 
 
@@ -201,6 +206,21 @@ def provenance_commit(payload: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def torch_payload_commit(path: Path) -> tuple[str | None, str | None]:
+    """Return (commit, error) for a .pt artifact. Only used with --check-torch-provenance."""
+    try:
+        import torch
+    except ImportError as error:
+        return None, f"torch unavailable: {error}"
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as error:  # noqa: BLE001 - torch raises a wide range of errors
+        return None, f"artifact unreadable: {error}"
+    if not isinstance(payload, dict):
+        return None, "artifact is not a dict"
+    return provenance_commit(payload), None
+
+
 def working_tree_status(repository: Path) -> tuple[bool | None, str]:
     """Return (clean, detail) for the repository holding this script."""
     try:
@@ -335,6 +355,10 @@ def main() -> int:
                         payloads[artifact] = payload
                         commit = provenance_commit(payload)
                         add("artifact-commit", bool(commit), f"git_commit={commit}", label, artifact, stage)
+                elif exists and artifact.suffix == ".pt" and args.check_torch_provenance:
+                    commit, error = torch_payload_commit(artifact)
+                    detail = f"git_commit={commit}" if error is None else error
+                    add("artifact-commit", bool(commit), detail, label, artifact, stage)
 
         probe_path = evaluation / "probes/probe_metrics.json"
         if probe_path.is_file():

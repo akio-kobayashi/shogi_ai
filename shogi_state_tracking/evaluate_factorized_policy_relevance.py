@@ -21,6 +21,7 @@ from models import ModelConfig, build_model
 from models.layers import prepare_sdpa_mask
 from probes import BOARD_CLASS_COUNT, LinearStateProbe
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 ROLE_NAMES = (
@@ -563,7 +564,7 @@ def main():
         ],
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(output, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

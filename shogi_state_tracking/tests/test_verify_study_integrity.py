@@ -28,6 +28,7 @@ def run_gate(study: Path, report: Path, **overrides: str) -> dict:
         "dataset_dir": None,
         "target_epochs": 50,
         "causal_threshold": 1e-4,
+        "check_torch_provenance": False,
     }
     arguments.update(overrides)
     namespace = type("Args", (), arguments)()
@@ -167,6 +168,35 @@ class AllowSelectorTest(unittest.TestCase):
             verify.selector_matches("artifacts", "run-a", "moves", {"artifacts:run-a:moves"})
         )
         self.assertTrue(verify.selector_matches("artifacts", None, None, {"artifacts"}))
+
+
+
+
+class TorchProvenanceOptInTest(unittest.TestCase):
+    """The .pt provenance check must be opt-in so the gate needs no torch by default."""
+
+    def _gate(self, check_torch: bool):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "dataset_manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+            run = write_run(root / "study", verify.CONDITIONS[0], "20260802", str(manifest))
+            (run / "evaluation/probes/linear_probes.pt").write_bytes(b"stub")
+            report = run_gate(
+                root / "study", root / "report.json",
+                seeds="20260802", conditions=verify.CONDITIONS[0],
+                check_torch_provenance=check_torch,
+            )
+            return [item for item in findings_for(report, "artifact-commit")
+                    if (item["path"] or "").endswith(".pt")]
+
+    def test_disabled_by_default(self):
+        self.assertEqual(self._gate(False), [])
+
+    def test_enabled_reports_a_finding_without_crashing(self):
+        findings = self._gate(True)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["status"], "fail")
 
 
 if __name__ == "__main__":

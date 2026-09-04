@@ -32,6 +32,7 @@ from factorized_prompt import (
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 EXCLUDED_PAWN_TYPES = {"<P>", "<PRO_P>"}
@@ -674,7 +675,7 @@ def main():
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(path, output)
     print(json.dumps({"event": "chess_protocol_complete", "output": str(path), **selection}, ensure_ascii=False))
 
 

@@ -34,6 +34,7 @@ from probes import (
     stratified_metrics,
     subset_targets,
 )
+from provenance import with_provenance
 
 
 # ``probe_metrics_detail.json``には層別・距離別・局面スコープ別の全指標を残す。
@@ -1071,15 +1072,17 @@ def main() -> None:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
     torch.save(
-        {
-            "checkpoint": str(args.checkpoint),
-            "model_type": model_type,
-            "sources": sources,
-            "probe_state_dicts": saved_probes,
-        },
+        with_provenance(
+            {
+                "checkpoint": str(args.checkpoint),
+                "model_type": model_type,
+                "sources": sources,
+                "probe_state_dicts": saved_probes,
+            }
+        ),
         output_dir / "linear_probes.pt",
     )
-    torch.save(prediction_payload, output_dir / "probe_predictions.pt")
+    torch.save(with_provenance(prediction_payload), output_dir / "probe_predictions.pt")
     print(
         "run_complete output_dir={} elapsed_sec={:.1f}".format(
             output_dir, time.perf_counter() - run_started_at

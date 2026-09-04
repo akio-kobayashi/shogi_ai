@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from create_dataset import import_cshogi, make_position_hash
+from provenance import write_metrics_json
 
 
 FREQUENCY_BINS = (
@@ -248,7 +249,7 @@ def main():
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(path, output)
     print(json.dumps({"event": "distribution_baseline_complete", "output": str(path), "queries": len(queries)}, ensure_ascii=False))
 
 

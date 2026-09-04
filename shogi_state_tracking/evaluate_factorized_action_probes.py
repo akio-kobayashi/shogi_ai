@@ -23,6 +23,7 @@ from data import load_vocabulary
 from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PROMOTE_TOKEN, TERMINAL_ENCODING, annotation_piece_token, factorize_history_move, factorize_usi
 from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
+from provenance import with_provenance, write_metrics_json
 
 
 TASK_SPECS = {
@@ -502,8 +503,8 @@ def main():
         del task_features, task_labels
     del model, checkpoint, all_queries
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
-    (output / "action_probe_metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    torch.save(saved, output / "action_probes.pt")
+    write_metrics_json((output / "action_probe_metrics.json"), result)
+    torch.save(with_provenance(saved), output / "action_probes.pt")
     print(json.dumps({"event": "action_probe_complete", "output": str(output), "tasks": list(result["tasks"])}, ensure_ascii=False), flush=True)
 
 

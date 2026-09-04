@@ -10,7 +10,7 @@ if [[ "$(uname -s)" == Linux && "${SHOGI_MEMORY_GUARD_ACTIVE:-0}" != 1 && "${ALL
   }
   exec "${SCRIPT_DIR}/scripts/run_memory_bounded.sh" "$0" "$@"
 fi
-CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB OUTPUT_DIR [main|moves|token|chess|probes|action-probes|all]}"
+CHECKPOINT="${1:?usage: $0 CHECKPOINT DATASET_DIR VOCAB OUTPUT_DIR [main|moves|token|chess|probes|terminal|action-probes|all]}"
 DATASET_DIR="${2:?dataset directory is required}"
 VOCAB="${3:?factorized vocabulary is required}"
 OUTPUT_DIR="${4:?output directory is required}"
@@ -103,7 +103,7 @@ if [[ "${STAGE}" == probes || "${STAGE}" == main || "${STAGE}" == all ]]; then
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/probe_evaluation.log"
 fi
 
-if [[ "${STAGE}" == main || "${STAGE}" == all ]]; then
+if [[ "${STAGE}" == terminal || "${STAGE}" == main || "${STAGE}" == all ]]; then
   "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_action_probes.py" \
     --checkpoint "${CHECKPOINT}" \
     --vocab "${VOCAB}" \
@@ -142,4 +142,4 @@ if [[ "${STAGE}" == action-probes || "${STAGE}" == all ]]; then
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/action_probe_evaluation.log"
 fi
 
-case "${STAGE}" in main|moves|token|chess|probes|action-probes|all) ;; *) echo "stage must be main, moves, token, chess, probes, action-probes, or all" >&2; exit 2 ;; esac
+case "${STAGE}" in main|moves|token|chess|probes|terminal|action-probes|all) ;; *) echo "stage must be main, moves, token, chess, probes, terminal, action-probes, or all" >&2; exit 2 ;; esac

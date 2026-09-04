@@ -21,6 +21,7 @@ from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PIE
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 MAJOR_PIECE_TYPES = {"<B>", "<R>", "<HORSE>", "<DRAGON>"}
@@ -668,7 +669,7 @@ def main():
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(path, output)
     print(json.dumps({"event": "evaluation_complete", "output": str(path), "queries": statistics["queries"], "elapsed_sec": round(time.perf_counter() - started, 1)}, ensure_ascii=False))
 
 

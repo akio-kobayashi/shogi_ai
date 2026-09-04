@@ -22,6 +22,7 @@ from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_histor
 from models import ModelConfig, build_model
 from probes import LinearStateProbe
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 def parse_args():
@@ -463,7 +464,7 @@ def main():
         ],
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(output, result)
     print(json.dumps({"event": "drop_relevance_complete", "output": str(output), "pairs": len(pairs), "samples": len(samples)}, ensure_ascii=False), flush=True)
 
 

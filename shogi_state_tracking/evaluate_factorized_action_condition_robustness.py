@@ -37,6 +37,7 @@ from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, TER
 from models import ModelConfig, build_model
 from probes import HAND_MAX_COUNTS
 from train_model import amp_context, resolve_amp
+from provenance import with_provenance, write_metrics_json
 
 
 BRANCHES = ("pre", "drop", "normal")
@@ -434,10 +435,10 @@ def main():
         ],
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(output, result)
     probe_output = Path(args.probe_output); probe_output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"format_version": 1, "checkpoint": args.checkpoint, "sources": sources,
-                "probe_families": PROBE_FAMILIES, "state_dicts": saved}, probe_output)
+    torch.save(with_provenance({"format_version": 1, "checkpoint": args.checkpoint, "sources": sources,
+                                "probe_families": PROBE_FAMILIES, "state_dicts": saved}), probe_output)
     print(json.dumps({"event": "action_condition_robustness_complete", "output": str(output)},
                      ensure_ascii=False), flush=True)
 

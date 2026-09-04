@@ -16,6 +16,7 @@ from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, TRAINING_OBJECTI
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_selection, evaluation_annotation_mode, distances, statistics):
@@ -215,7 +216,7 @@ def main():
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(path, output)
     print(json.dumps({"event": "token_probe_complete", "output": str(path), "queries": totals["queries"]}, ensure_ascii=False))
 
 

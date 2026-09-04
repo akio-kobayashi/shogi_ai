@@ -25,6 +25,7 @@ from factorized_drop_relevance import (
 from factorized_prompt import BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, TERMINAL_ENCODING
 from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
+from provenance import write_metrics_json
 
 
 def parse_args():
@@ -414,7 +415,7 @@ def main():
         ],
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_metrics_json(output, result)
     print(json.dumps({"event": "drop_attention_complete", "output": str(output), "pairs": len(pairs)}, ensure_ascii=False), flush=True)
 
 

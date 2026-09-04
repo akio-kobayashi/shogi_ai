@@ -21,6 +21,7 @@ from new_prompt import piece_token, move_token
 from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_history_move, factorize_usi
 from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics, linear_probe_loss, majority_predictions, predictions_from_logits, replay_probe_targets, state_metrics
 from train_model import amp_context, resolve_amp
+from provenance import with_provenance, write_metrics_json
 
 
 def parse_args():
@@ -545,8 +546,8 @@ def main():
             ),
         }
         states[source] = probe.cpu().state_dict()
-    (output / "probe_metrics.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    torch.save({"checkpoint": args.checkpoint, "sources": sources, "probe_state_dicts": states, "board_label_map": board_map, "hand_names": hand_names}, output / "linear_probes.pt")
+    write_metrics_json((output / "probe_metrics.json"), result)
+    torch.save(with_provenance({"checkpoint": args.checkpoint, "sources": sources, "probe_state_dicts": states, "board_label_map": board_map, "hand_names": hand_names}), output / "linear_probes.pt")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     feature_cache.cleanup()
 
