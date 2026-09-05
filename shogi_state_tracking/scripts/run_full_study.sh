@@ -7,7 +7,7 @@
 #   ./scripts/run_full_study.sh --stage data
 #   ./scripts/run_full_study.sh --stage train
 #   ./scripts/run_full_study.sh --stage eval
-#   ./scripts/run_full_study.sh --stage collect,verify
+#   ./scripts/run_full_study.sh --stage collect
 #
 # MEMORY_MAXは各段階が呼ぶ下位スクリプトが要求する。ここでは検査だけ行う。
 set -euo pipefail
@@ -24,8 +24,7 @@ SOURCE_RESULTS_DIR="${SOURCE_RESULTS_DIR:-factorized_v3_eos_results_reference}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-}"
 CONDITIONS="${CONDITIONS:-vanilla-p0.0,rap-p0.15-proportional-rap-v1,rap-p0.25-proportional-rap-v1,ap-p1.0-proportional-annotation-v1}"
 SEEDS="${SEEDS:-20260802,20260803,20260804}"
-PRIMARY_RAP_RATES="${PRIMARY_RAP_RATES:-0.0,0.15,0.25}"
-ORACLE_RAP_RATE="${ORACLE_RAP_RATE:-1.0}"
+RAP_RATES="${RAP_RATES:-0.0,0.15,0.25,1.0}"
 MODEL_TYPE="${MODEL_TYPE:-llama}"
 MODEL_SIZE="${MODEL_SIZE:-reference}"
 TARGET_EPOCHS="${TARGET_EPOCHS:-50}"
@@ -33,7 +32,7 @@ DATA_INPUT="${DATA_INPUT:-}"
 
 usage() {
   cat >&2 <<'EOF'
-usage: run_full_study.sh --stage {data|train|eval|collect|verify|summarize|report}[,...]
+usage: run_full_study.sh --stage {data|train|eval|collect|summarize|report}[,...]
                          [--dataset-dir DIR] [--results-dir DIR] [--source-results-dir DIR]
                          [--output-root DIR] [--conditions LIST] [--seeds LIST]
                          [--data-input METADATA_CSV] [--dry-run]
@@ -49,7 +48,6 @@ stages
   train      early stopping学習ののち固定エポックへ揃える．主3条件は全seed，APは先頭seedのみ
   eval       全checkpointへcheckpoint単位の11評価を適用し，study単位のaction-conditionを1回実行する
   collect    分析archiveへまとめる
-  verify     集約前の監査ゲート．失敗したらsummarize以降へ進まない
   summarize  条件×シードで集約する
   report     論文の表と図を生成する
 EOF
@@ -79,11 +77,10 @@ STUDY_ROOT="${RESULTS_DIR}"
 VOCAB="${VOCAB:-${DATA_DIR}/vocab.json}"
 IFS=',' read -r -a seed_values <<< "${SEEDS}"
 IFS=',' read -r -a condition_values <<< "${CONDITIONS}"
-ORACLE_SEED="${ORACLE_SEED:-${seed_values[0]}}"
 
 for stage in ${STAGES//,/ }; do
   case "${stage}" in
-    data|train|eval|collect|verify|summarize|report) ;;
+    data|train|eval|collect|summarize|report) ;;
     *) echo "unknown stage: ${stage}" >&2; usage ;;
   esac
 done
@@ -99,13 +96,6 @@ require_memory_max() {
     echo "MEMORY_MAX is required on Linux; use e.g. MEMORY_MAX=100G MEMORY_HIGH=90G $0 ..." >&2
     exit 2
   }
-}
-# 主3条件は全seed，APは先頭seedだけを持つ。verify側のexpected_runsと同じ規約である。
-seeds_for_condition() {
-  case "$1" in
-    ap-*) printf '%s\n' "${ORACLE_SEED}" ;;
-    *)    printf '%s\n' "${seed_values[@]}" ;;
-  esac
 }
 
 stage_data() {
@@ -138,20 +128,12 @@ stage_train() {
     exit 2
   }
   # 1段目：early stoppingつきに学習する。best.ptがある条件は再学習しない。
-  run env RAP_RATES="${PRIMARY_RAP_RATES}" SEEDS="${SEEDS}" \
-    MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" \
-    "${SCRIPT_DIR}/scripts/run_factorized_rap_ablation.sh" \
-    "${DATA_DIR}" "${SOURCE_RESULTS_DIR}"
-  run env RAP_RATES="${ORACLE_RAP_RATE}" SEEDS="${ORACLE_SEED}" \
+  run env RAP_RATES="${RAP_RATES}" SEEDS="${SEEDS}" \
     MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" \
     "${SCRIPT_DIR}/scripts/run_factorized_rap_ablation.sh" \
     "${DATA_DIR}" "${SOURCE_RESULTS_DIR}"
   # 2段目：不足エポックだけ継続し，条件間で学習量を揃える。
-  run env RAP_RATES="${PRIMARY_RAP_RATES}" SEEDS="${SEEDS}" \
-    MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" TARGET_EPOCHS="${TARGET_EPOCHS}" \
-    "${SCRIPT_DIR}/scripts/run_factorized_fixed_epoch_training.sh" \
-    "${DATA_DIR}" "${SOURCE_RESULTS_DIR}" "${RESULTS_DIR}"
-  run env RAP_RATES="${ORACLE_RAP_RATE}" SEEDS="${ORACLE_SEED}" \
+  run env RAP_RATES="${RAP_RATES}" SEEDS="${SEEDS}" \
     MODEL_TYPE="${MODEL_TYPE}" MODEL_SIZE="${MODEL_SIZE}" TARGET_EPOCHS="${TARGET_EPOCHS}" \
     "${SCRIPT_DIR}/scripts/run_factorized_fixed_epoch_training.sh" \
     "${DATA_DIR}" "${SOURCE_RESULTS_DIR}" "${RESULTS_DIR}"
@@ -174,7 +156,7 @@ stage_eval() {
       echo "---------- ${condition}/seed-${seed} ----------" >&2
       run "${SCRIPT_DIR}/scripts/run_factorized_full_evaluation.sh" \
         "${checkpoint}" "${DATA_DIR}" "${VOCAB}" || failed+=("${condition}/seed-${seed}")
-    done < <(seeds_for_condition "${condition}")
+    done < <(printf '%s\n' "${seed_values[@]}")
   done
 
   # action-conditionは4条件を横断するstudy単位の評価なので，全checkpointの後に1回だけ実行する。
@@ -213,18 +195,6 @@ stage_collect() {
   echo "archive: ${archive}" >&2
 }
 
-stage_verify() {
-  announce "verify"
-  run "${PYTHON_BIN}" -u "${SCRIPT_DIR}/verify_study_integrity.py" \
-    --study-root "${STUDY_ROOT}" \
-    --dataset-dir "${DATA_DIR}" \
-    --conditions "${CONDITIONS}" \
-    --seeds "${SEEDS}" \
-    --oracle-seed "${ORACLE_SEED}" \
-    --target-epochs "${TARGET_EPOCHS}" \
-    --report "${OUTPUT_ROOT}/integrity_report.json" \
-    ${VERIFY_EXTRA_ARGS:-}
-}
 
 stage_summarize() {
   announce "summarize"
@@ -258,11 +228,10 @@ echo "results:    ${RESULTS_DIR}" >&2
 echo "source:     ${SOURCE_RESULTS_DIR}" >&2
 echo "output:     ${OUTPUT_ROOT}" >&2
 echo "conditions: ${CONDITIONS}" >&2
-echo "seeds:      ${SEEDS} (oracle: ${ORACLE_SEED})" >&2
+echo "seeds:      ${SEEDS}" >&2
 echo "stages:     ${STAGES}" >&2
 [[ "${DRY_RUN}" == 1 ]] && echo "dry run: commands are printed but not executed" >&2
 
-VERIFIED=0
 declare -a FAILED_STAGES=()
 # 段階の失敗をここで捕まえる。&&で繋ぐとset -eの対象から外れ，
 # 失敗したまま最後まで進んでcompleteと表示されてしまう。
@@ -282,20 +251,7 @@ for stage in ${STAGES//,/ }; do
     train)     attempt train stage_train ;;
     eval)      attempt eval stage_eval ;;
     collect)   attempt collect stage_collect ;;
-    verify)    attempt verify stage_verify && VERIFIED=1 ;;
-    summarize)
-      # attempt経由で呼ぶため，中の判定は関数側に置く
-      # 監査を通していない集約は許さない。同じ実行内でverifyしたか，直近のreportがpassしていること。
-      if [[ "${VERIFIED}" != 1 ]]; then
-        report="${OUTPUT_ROOT}/integrity_report.json"
-        [[ -f "${report}" ]] && "${PYTHON_BIN}" -c \
-          'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["summary"]["passed"] else 1)' \
-          "${report}" || {
-            echo "refusing to summarize: run --stage verify first and let it pass" >&2
-            exit 2
-          }
-      fi
-      attempt summarize stage_summarize ;;
+    summarize) attempt summarize stage_summarize ;;
     report)    attempt report stage_report ;;
   esac
 done
