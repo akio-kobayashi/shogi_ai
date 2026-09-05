@@ -15,8 +15,8 @@ import torch
 from data import load_vocabulary
 from evaluate_new_prompt_probes import label_maps
 from factorized_drop_relevance import (
-    matching_balance, read_positions, rebind_pairs, select_anchors_and_controls,
-    selected_keys_for_pairs, trajectory_samples,
+    action_condition_game_partition, matching_balance, read_positions, rebind_pairs,
+    select_anchors_and_controls, selected_keys_for_pairs, trajectory_samples,
 )
 from factorized_prompt import MOVE_ENCODING, TERMINAL_ENCODING, factorize_history_move
 from models import ModelConfig, build_model
@@ -30,7 +30,15 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--linear-probes", required=True)
     parser.add_argument("--evaluation-jsonl", required=True)
-    parser.add_argument("--calibration-jsonl")
+    parser.add_argument(
+        "--calibration-jsonl",
+        help="省略時は--evaluation-jsonlのcalibration区画を使う。"
+             "evaluation_stepsを持つsplitだけを指定できる（validation.jsonlは持たない）。",
+    )
+    parser.add_argument(
+        "--partition-seed", type=int, default=20260802,
+        help="対局単位60/20/20分割の種。action-condition実験と同じ分割を使う。",
+    )
     parser.add_argument("--vocab", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--sources", default="available")
@@ -376,10 +384,18 @@ def main():
         probes[source] = probe
 
     print(json.dumps({"event": "drop_relevance_scan_start", "path": args.evaluation_jsonl}), flush=True)
-    lightweight_positions, census = read_positions(
+    all_positions, census = read_positions(
         args.evaluation_jsonl, metadata["state_prompt_mode"], annotation_mode,
         hand_names, config.max_seq_len,
     )
+    # 校正と本分析は対局単位で分離する。action-condition実験と同じ60/20/20分割を使う。
+    # evaluation_stepsを持つのはevaluation splitだけなので，校正もここから取る。
+    partitions = defaultdict(list)
+    for item in all_positions:
+        partitions[action_condition_game_partition(str(item["game_id"]), args.partition_seed)].append(item)
+    lightweight_positions = partitions["evaluation"]
+    if not lightweight_positions:
+        raise ValueError("the evaluation partition contains no positions")
     lightweight_pairs, matching = select_anchors_and_controls(
         lightweight_positions, args.max_drops, args.seed
     )
@@ -401,12 +417,18 @@ def main():
     )
     temperatures = {source: 1.0 for source in sources}
     calibration = {"enabled": False, "examples": 0}
-    if args.calibration_jsonl:
-        print(json.dumps({"event": "drop_relevance_calibration_scan_start", "path": args.calibration_jsonl}), flush=True)
-        calibration_light, calibration_census = read_positions(
-            args.calibration_jsonl, metadata["state_prompt_mode"], annotation_mode,
-            hand_names, config.max_seq_len,
-        )
+    calibration_source = args.calibration_jsonl or args.evaluation_jsonl
+    if calibration_source:
+        print(json.dumps({"event": "drop_relevance_calibration_scan_start",
+                          "path": calibration_source,
+                          "partition": None if args.calibration_jsonl else "calibration"}), flush=True)
+        if args.calibration_jsonl:
+            calibration_light, calibration_census = read_positions(
+                args.calibration_jsonl, metadata["state_prompt_mode"], annotation_mode,
+                hand_names, config.max_seq_len,
+            )
+        else:
+            calibration_light, calibration_census = partitions["calibration"], census
         calibration_light = [item for item in calibration_light if int(item["ply"]) > 0]
         calibration_light.sort(key=lambda item: random.Random(
             "{}:{}:{}".format(args.seed, item["game_id"], item["ply"])
@@ -417,7 +439,7 @@ def main():
             raise ValueError("calibration split contains no eligible non-initial positions")
         calibration_keys = {(str(item["game_id"]), int(item["ply"])) for item in calibration_light}
         calibration_samples, _ = read_positions(
-            args.calibration_jsonl, metadata["state_prompt_mode"], annotation_mode,
+            calibration_source, metadata["state_prompt_mode"], annotation_mode,
             hand_names, config.max_seq_len, selected_keys=calibration_keys, materialize=True,
         )
         temperatures = calibration_temperatures(
@@ -433,8 +455,25 @@ def main():
         model, probes, samples, vocabulary, device, amp_dtype,
         args.batch_size, args.progress_every, temperatures, args.seed,
     )
+    analysis_games = {str(item["game_id"]) for item in lightweight_positions}
+    calibration_games = (
+        set() if args.calibration_jsonl
+        else {str(item["game_id"]) for item in partitions["calibration"]}
+    )
+    split_audit = {
+        "partition_seed": args.partition_seed,
+        "calibration_source": "external" if args.calibration_jsonl else "evaluation_jsonl_calibration_partition",
+        "game_counts": {name: len({str(item["game_id"]) for item in values})
+                        for name, values in sorted(partitions.items())},
+        "analysis_games": len(analysis_games),
+        "calibration_games": len(calibration_games),
+        "overlap": sorted(analysis_games & calibration_games),
+        "passed": not (analysis_games & calibration_games),
+    }
+    if not split_audit["passed"]:
+        raise ValueError("calibration and analysis share {} game(s)".format(len(split_audit["overlap"])))
     result = {
-        "format_version": 1,
+        "format_version": 2,
         "checkpoint": args.checkpoint,
         "linear_probes": args.linear_probes,
         "evaluation_jsonl": args.evaluation_jsonl,
@@ -444,6 +483,7 @@ def main():
         "amp": amp_name,
         "settings": vars(args),
         "census": census,
+        "split_audit": split_audit,
         "materialization_census": materialization_census,
         "matching": matching,
         "matching_balance": matching_balance(lightweight_pairs),
@@ -458,7 +498,7 @@ def main():
             "confidence": "temperature-scaled softmax probability from the frozen fitted linear state probe when calibration_jsonl is provided",
         },
         "limitations": [
-            "Without --calibration-jsonl, probe probabilities remain uncalibrated; accuracy, NLL, Brier score and ECE are still reported.",
+            "Calibration uses the calibration partition of --evaluation-jsonl unless --calibration-jsonl is given; the two are disjoint at the game level (see split_audit).",
             "High linear decodability does not by itself prove causal use by the language model.",
             "Matching is deterministic nearest-neighbour matching and does not remove all strategic confounding.",
         ],

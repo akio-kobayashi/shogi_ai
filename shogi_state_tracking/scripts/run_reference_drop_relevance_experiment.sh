@@ -38,11 +38,16 @@ PROBE_ARTIFACT="${PROBE_DIR}/linear_probes.pt"
 
 mkdir -p "${OUTPUT_DIR}/figures" "${OUTPUT_DIR}/logs"
 
+# 校正は既定でevaluation.jsonlのcalibration区画を使う。対局単位で本分析と分離する。
+# validation.jsonlはevaluation_stepsを持たないため指定できない。
+calibration_args=()
+[[ -n "${DROP_CALIBRATION_JSONL:-}" ]] && calibration_args=(--calibration-jsonl "${DROP_CALIBRATION_JSONL}")
+
 "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_drop_relevance.py" \
+  "${calibration_args[@]+"${calibration_args[@]}"}" \
   --checkpoint "${CHECKPOINT}" \
   --linear-probes "${PROBE_ARTIFACT}" \
   --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
-  --calibration-jsonl "${DATASET_DIR}/validation.jsonl" \
   --vocab "${VOCAB}" \
   --output "${OUTPUT_DIR}/confidence_trajectory.json" \
   --sources "${DROP_RELEVANCE_SOURCES:-available}" \
@@ -51,6 +56,7 @@ mkdir -p "${OUTPUT_DIR}/figures" "${OUTPUT_DIR}/logs"
   --max-calibration-examples "${MAX_DROP_CALIBRATION_EXAMPLES:-5000}" \
   --batch-size "${DROP_RELEVANCE_BATCH_SIZE:-64}" \
   --seed "${EVALUATION_SEED:-20260802}" \
+  --partition-seed "${DROP_PARTITION_SEED:-20260802}" \
   --amp "${EVAL_AMP:-auto}" \
   --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/logs/confidence.log"
 
