@@ -263,14 +263,28 @@ echo "stages:     ${STAGES}" >&2
 [[ "${DRY_RUN}" == 1 ]] && echo "dry run: commands are printed but not executed" >&2
 
 VERIFIED=0
+declare -a FAILED_STAGES=()
+# 段階の失敗をここで捕まえる。&&で繋ぐとset -eの対象から外れ，
+# 失敗したまま最後まで進んでcompleteと表示されてしまう。
+attempt() {
+  local name="$1"; shift
+  if "$@"; then
+    return 0
+  fi
+  FAILED_STAGES+=("${name}")
+  echo "stage failed: ${name}" >&2
+  return 1
+}
+
 for stage in ${STAGES//,/ }; do
   case "${stage}" in
-    data)      stage_data ;;
-    train)     stage_train ;;
-    eval)      stage_eval ;;
-    collect)   stage_collect ;;
-    verify)    stage_verify && VERIFIED=1 ;;
+    data)      attempt data stage_data ;;
+    train)     attempt train stage_train ;;
+    eval)      attempt eval stage_eval ;;
+    collect)   attempt collect stage_collect ;;
+    verify)    attempt verify stage_verify && VERIFIED=1 ;;
     summarize)
+      # attempt経由で呼ぶため，中の判定は関数側に置く
       # 監査を通していない集約は許さない。同じ実行内でverifyしたか，直近のreportがpassしていること。
       if [[ "${VERIFIED}" != 1 ]]; then
         report="${OUTPUT_ROOT}/integrity_report.json"
@@ -281,10 +295,14 @@ for stage in ${STAGES//,/ }; do
             exit 2
           }
       fi
-      stage_summarize ;;
-    report)    stage_report ;;
+      attempt summarize stage_summarize ;;
+    report)    attempt report stage_report ;;
   esac
 done
 
 echo >&2
+if [[ "${#FAILED_STAGES[@]}" -gt 0 ]]; then
+  echo "run_full_study FAILED: ${FAILED_STAGES[*]}" >&2
+  exit 1
+fi
 echo "run_full_study complete: ${STAGES}" >&2
