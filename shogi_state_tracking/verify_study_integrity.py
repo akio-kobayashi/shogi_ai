@@ -21,6 +21,9 @@ CONDITIONS = (
 PRIMARY_CONDITIONS = CONDITIONS[:3]
 DEFAULT_SEEDS = ("20260802", "20260803", "20260804")
 DATASET_DIR_PLACEHOLDER = "<DATASET_DIR>"
+# 意図的にunstageのまま運用するファイル。結果の再現性に影響しないため
+# working-tree検査の対象から外す。
+WORKING_TREE_EXEMPT = (".gitignore",)
 
 
 @dataclass
@@ -235,12 +238,16 @@ def working_tree_status(repository: Path) -> tuple[bool | None, str]:
         return None, f"git unavailable: {error}"
     if completed.returncode != 0:
         return None, f"git exited {completed.returncode}: {completed.stderr.strip()}"
-    dirty = [line for line in completed.stdout.splitlines() if line.strip()]
+    entries = [line[3:] for line in completed.stdout.splitlines() if line.strip()]
+    exempt = [name for name in entries
+              if Path(name).name in WORKING_TREE_EXEMPT]
+    dirty = [name for name in entries if name not in exempt]
+    note = f" ({len(exempt)} exempt)" if exempt else ""
     if not dirty:
-        return True, "working tree is clean"
-    preview = ", ".join(line[3:] for line in dirty[:5])
+        return True, f"working tree is clean{note}"
+    preview = ", ".join(dirty[:5])
     suffix = ", ..." if len(dirty) > 5 else ""
-    return False, f"{len(dirty)} modified or untracked entries: {preview}{suffix}"
+    return False, f"{len(dirty)} modified or untracked entries{note}: {preview}{suffix}"
 
 
 def selector_matches(check: str, run: str | None, stage: str | None, allowed: set[str]) -> bool:

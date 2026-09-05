@@ -198,6 +198,35 @@ class TorchProvenanceOptInTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["status"], "fail")
 
+class WorkingTreeExemptionTest(unittest.TestCase):
+    """.gitignoreは意図的にunstageのまま運用するので検査対象から外す。"""
+
+    def _status(self, porcelain: str):
+        import subprocess
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=porcelain, stderr="")
+        original = subprocess.run
+        subprocess.run = lambda *a, **k: completed
+        try:
+            return verify.working_tree_status(Path("."))
+        finally:
+            subprocess.run = original
+
+    def test_only_gitignore_counts_as_clean(self):
+        clean, detail = self._status(" M .gitignore\n")
+        self.assertTrue(clean)
+        self.assertIn("1 exempt", detail)
+
+    def test_other_changes_still_fail(self):
+        clean, detail = self._status(" M .gitignore\n M scripts/eval.sh\n")
+        self.assertFalse(clean)
+        self.assertIn("scripts/eval.sh", detail)
+        self.assertNotIn(".gitignore", detail.split(":")[-1])
+
+    def test_fully_clean_tree_has_no_exempt_note(self):
+        clean, detail = self._status("")
+        self.assertTrue(clean)
+        self.assertNotIn("exempt", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
