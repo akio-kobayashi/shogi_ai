@@ -69,6 +69,8 @@ if [[ "${SKIP_DROP_ATTENTION:-0}" != 1 ]]; then
     --max-pairs "${MAX_DROP_ATTENTION_PAIRS:-1000}" \
     --max-ablation-pairs "${MAX_DROP_ABLATION_PAIRS:-250}" \
     --ablation-layers "${DROP_ABLATION_LAYERS:-middle,late,all}" \
+    --game-partition evaluation \
+    --partition-seed "${DROP_PARTITION_SEED:-20260802}" \
     --seed "${EVALUATION_SEED:-20260802}" \
     --amp "${ATTENTION_AMP:-off}" \
     --device "${DEVICE:-auto}" 2>&1 | tee "${OUTPUT_DIR}/logs/attention.log"
