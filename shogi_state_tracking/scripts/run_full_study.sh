@@ -204,8 +204,11 @@ stage_summarize() {
     echo "see STUDY_PIPELINE_DESIGN.md section 5.4" >&2
     exit 3
   }
+  # 集約はresults rootを直接読む。archiveは配布用であり，展開は不要である。
   run "${PYTHON_BIN}" -u "${script}" \
-    --bundle "${OUTPUT_ROOT}/analysis_bundle" \
+    --bundle "${SUMMARIZE_INPUT:-${RESULTS_DIR}}" \
+    --conditions "${CONDITIONS}" \
+    --seeds "${SEEDS}" \
     --output "${OUTPUT_ROOT}/summary"
 }
 

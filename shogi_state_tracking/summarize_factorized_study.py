@@ -205,6 +205,180 @@ def extract_terminal_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
+CHESS_TASKS = ("start_actual", "start_other", "end_actual", "end_other")
+CHESS_FIELDS = {
+    "queries": "queries",
+    "lgm": "legal_move_accuracy",
+    "r_precision": "legal_r_precision",
+    "square_top1": "square_top1_rate",
+    "exm": "exact_move_accuracy",
+    "exm_queries": "exact_move_queries",
+}
+CHESS_CARDINALITY_BINS = ("1", "2_3", "4_7", "8_plus")
+CHESS_PIECE_GROUPS = ("major", "minor", "king")
+
+
+def extract_chess_protocol(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Toshniwalら対応のStart／End課題。偶然水準とoracle baselineも取る。
+
+    LgMとExMは合法集合の広さに強く依存するため，集合サイズと偶然水準を
+    数値と一緒に持ち出す。これらを外すと表の解釈ができない。
+    """
+    values: dict[str, Any] = {}
+    metrics = dig(payload, "metrics") or {}
+    for task in CHESS_TASKS:
+        block = dig(metrics, task) or {}
+        for name, key in CHESS_FIELDS.items():
+            values[f"chess_{task}_{name}"] = block.get(key)
+        for statistic in ("mean", "median", "p25", "p75", "p90"):
+            values[f"chess_{task}_legal_set_{statistic}"] = dig(block, "legal_set_cardinality", statistic)
+        for name in ("uniform_81_squares_legal_accuracy",
+                     "uniform_125_vocabulary_legal_accuracy",
+                     "uniform_legal_set_exact_accuracy"):
+            values[f"chess_{task}_chance_{name}"] = dig(block, "chance_baselines", name)
+        for bin_name in CHESS_CARDINALITY_BINS:
+            values[f"chess_{task}_lgm_card{bin_name}"] = dig(
+                block, "by_legal_set_cardinality", bin_name, "legal_move_accuracy")
+            values[f"chess_{task}_queries_card{bin_name}"] = dig(
+                block, "by_legal_set_cardinality", bin_name, "queries")
+        for group in CHESS_PIECE_GROUPS:
+            values[f"chess_{task}_lgm_{group}"] = dig(block, "by_piece_group", group, "legal_move_accuracy")
+            values[f"chess_{task}_exm_{group}"] = dig(block, "by_piece_group", group, "exact_move_accuracy")
+    # End課題だけが持つ規則ベースのoracle baseline（幾何集合Gと疑似合法集合P）。
+    oracle = dig(metrics, "end_actual", "oracle_rule_baselines") or {}
+    for name in ("coverage", "geometry_candidate_count_mean", "pseudo_legal_candidate_count_mean",
+                 "uniform_geometry_legal_accuracy", "uniform_pseudo_legal_legal_accuracy",
+                 "uniform_geometry_exact_accuracy", "uniform_pseudo_legal_exact_accuracy"):
+        values[f"chess_oracle_{name}"] = oracle.get(name)
+    values["chess_selected_instances"] = dig(payload, "selection", "selected_instances")
+    values["chess_eligible_candidates"] = dig(payload, "selection", "eligible_candidates")
+    values["chess_instance_sha256"] = dig(payload, "selection", "selected_instance_sha256")
+    return values
+
+
+# 持ち駒遷移の事象区分。captureは駒取りで増加，dropは駒打ちで減少する事象である。
+HAND_EVENT_GROUPS = ("all", "capture", "drop")
+HAND_FIELDS = (
+    "events",
+    "before_hand_exact_match", "after_hand_exact_match",
+    "before_slot_accuracy", "after_slot_accuracy",
+    "changed_slot_before_accuracy", "changed_slot_after_accuracy",
+    "changed_slot_delta_accuracy",
+    "unrelated_slots_unchanged_rate", "full_hand_delta_exact_match",
+)
+DROP_VALIDITY_FIELDS = (
+    "queries",
+    "mean_drop_first_probability",
+    "mean_probability_mass_on_held_pieces_given_drop",
+    "top_piece_in_hand_rate_given_drop",
+    "selected_piece_has_legal_destination_rate",
+    "mean_legal_destination_mass_for_top_piece",
+    "forced_drop_top1_legal_rate", "forced_drop_top1_target_accuracy",
+    "free_greedy_drop_rate", "free_greedy_legal_rate", "free_greedy_target_accuracy",
+)
+
+
+def extract_hand_dynamics(payload: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+    """持ち駒の遷移追跡と駒打ちの正当性。
+
+    層は状態プローブが選んだ層に揃える。同じ`linear_probes.pt`を使うため，
+    別の層を報告すると静的復号との対応が取れなくなる。
+    """
+    values: dict[str, Any] = {}
+    probe = dig(payload, "hand_transition_probe") or {}
+    layers = sorted(probe, key=layer_index)
+    selected_index = context.get("probe_selected_layer")
+    selected = f"layer_{selected_index}" if selected_index is not None else None
+    if selected not in probe:
+        selected = layers[-1] if layers else None
+    values["hand_probe_layer"] = layer_index(selected) if selected else None
+    for group in HAND_EVENT_GROUPS:
+        block = dig(probe, selected, group) if selected else None
+        for field in HAND_FIELDS:
+            values[f"hand_{group}_{field}"] = dig(block, field)
+    validity = dig(payload, "drop_validity") or {}
+    for field in DROP_VALIDITY_FIELDS:
+        values[f"handdrop_{field}"] = validity.get(field)
+    values["hand_sampled_events"] = dig(payload, "sampling", "sampled_events")
+    values["hand_sampled_actual_drops"] = dig(payload, "sampling", "sampled_actual_drops")
+    values["hand_games"] = dig(payload, "sampling", "games")
+    return values
+
+
+# 次手との関係で区分した盤面マスの役割。backgroundが対照である。
+POLICY_ROLES = ("actual_source", "actual_destination", "actual_move", "endpoint_attacker",
+                "actual_local_context", "candidate_source", "candidate_destination",
+                "candidate_related", "background")
+POLICY_STEERING_ROLES = ("actual_source", "actual_destination", "endpoint_attacker")
+POLICY_STEERING_STRENGTHS = ("0.5", "1.0", "2.0")
+
+
+def extract_policy_relevance(payload: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+    """次手関連マスの復号精度と，プローブ方向への局所介入。
+
+    層は状態プローブの選択層に揃える。素の正解率は空マスが多数を占めるため
+    高く出る。役割間の比較には，座標と駒種と最終更新からの距離を揃えた
+    `within_position_piece_recency_matched`のdifferenceを主に使う。
+    """
+    values: dict[str, Any] = {}
+    decoding = dig(payload, "decoding") or {}
+    selected_index = context.get("probe_selected_layer")
+    selected = f"layer_{selected_index}" if selected_index is not None else None
+    if selected not in decoding:
+        layers = sorted(decoding, key=layer_index)
+        selected = layers[-1] if layers else None
+    values["policy_layer"] = layer_index(selected) if selected else None
+    for role in POLICY_ROLES:
+        block = dig(decoding, selected, "all", role) if selected else None
+        values[f"policy_{role}_observations"] = dig(block, "observations")
+        values[f"policy_{role}_accuracy"] = dig(block, "accuracy")
+        for matching, short in (("within_position_piece_recency_matched", "within"),
+                                ("coordinate_piece_recency_matched", "coordinate")):
+            values[f"policy_{role}_{short}_difference"] = dig(block, matching, "difference")
+            values[f"policy_{role}_{short}_relevant"] = dig(block, matching, "relevant_accuracy")
+            values[f"policy_{role}_{short}_background"] = dig(block, matching, "background_accuracy")
+            values[f"policy_{role}_{short}_matched_observations"] = dig(block, matching, "matched_observations")
+    steering = dig(payload, "steering") or {}
+    steering_layer = selected if selected in steering else (
+        sorted(steering, key=layer_index)[-1] if steering else None)
+    values["policy_steering_layer"] = layer_index(steering_layer) if steering_layer else None
+    for role in POLICY_STEERING_ROLES:
+        for strength in POLICY_STEERING_STRENGTHS:
+            block = dig(steering, steering_layer, role, strength) if steering_layer else None
+            tag = strength.replace(".", "")
+            values[f"steer_{role}_s{tag}_damage"] = dig(block, "differential_damage")
+            values[f"steer_{role}_s{tag}_examples"] = dig(block, "examples")
+    values["policy_evaluated_queries"] = payload.get("evaluated_queries")
+    values["policy_eligible_queries"] = payload.get("eligible_queries")
+    return values
+
+
+def extract_drop_confidence(payload: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+    """駒打ち直前の持ち駒信頼度。offset 0の対応差が主結果である。"""
+    values: dict[str, Any] = {}
+    metrics = dig(payload, "metrics") or {}
+    selected_index = context.get("probe_selected_layer")
+    selected = f"layer_{selected_index}" if selected_index is not None else None
+    if selected not in metrics:
+        layers = sorted(metrics, key=layer_index)
+        selected = layers[-1] if layers else None
+    values["droprel_layer"] = layer_index(selected) if selected else None
+    paired = dig(metrics, selected, "offset_zero_paired") if selected else None
+    values["droprel_pairs"] = dig(paired, "pairs")
+    for name, short in (("count_probability_difference", "count"),
+                        ("held_probability_difference", "held")):
+        values[f"droprel_{short}_difference"] = dig(paired, f"mean_{name}")
+        values[f"droprel_{short}_difference_ci_lower"] = dig(paired, f"{name}_95ci", "lower")
+        values[f"droprel_{short}_difference_ci_upper"] = dig(paired, f"{name}_95ci", "upper")
+        values[f"droprel_{short}_difference_clusters"] = dig(paired, f"{name}_95ci", "clusters")
+    values["droprel_calibration_enabled"] = dig(payload, "calibration", "enabled")
+    values["droprel_calibration_examples"] = dig(payload, "calibration", "examples")
+    values["droprel_split_passed"] = dig(payload, "split_audit", "passed")
+    values["droprel_analysis_games"] = dig(payload, "split_audit", "analysis_games")
+    values["droprel_calibration_games"] = dig(payload, "split_audit", "calibration_games")
+    return values
+
+
 def extract_action_condition(payload: Mapping[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for layer in ACTION_CONDITION_LAYERS:
@@ -222,25 +396,25 @@ def extract_action_condition(payload: Mapping[str, Any]) -> dict[str, Any]:
     return values
 
 
-def extract_attention_ablation(payload: Mapping[str, Any]) -> dict[str, Any]:
+def extract_attention_ablation(payload: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
     values: dict[str, Any] = {}
     for scope in ABLATION_SCOPES:
         for group in ("relevant", "matched_control"):
             block = dig(payload, "ablation", f"drop:{scope}:{group}:after_drop")
             base = dig(block, "baseline_probability")
             masked = dig(block, "masked_probability")
-            values[f"ablation_{scope}_{group}_baseline"] = base
-            values[f"ablation_{scope}_{group}_masked"] = masked
-            values[f"ablation_{scope}_{group}_delta"] = (
+            values[f"{prefix}ablation_{scope}_{group}_baseline"] = base
+            values[f"{prefix}ablation_{scope}_{group}_masked"] = masked
+            values[f"{prefix}ablation_{scope}_{group}_delta"] = (
                 None if base is None or masked is None else masked - base
             )
-            values[f"ablation_{scope}_{group}_examples"] = dig(block, "examples")
+            values[f"{prefix}ablation_{scope}_{group}_examples"] = dig(block, "examples")
         # 対応付き差分とそのクラスタCI（実装後の成果物にだけ存在する）
         contrast = dig(payload, "ablation_contrasts", f"drop:{scope}:after_drop")
-        values[f"ablation_{scope}_contrast_mean"] = dig(contrast, "probability_change_difference")
-        values[f"ablation_{scope}_contrast_ci_lower"] = dig(
+        values[f"{prefix}ablation_{scope}_contrast_mean"] = dig(contrast, "probability_change_difference")
+        values[f"{prefix}ablation_{scope}_contrast_ci_lower"] = dig(
             contrast, "probability_change_difference_clustered_95ci", "lower")
-        values[f"ablation_{scope}_contrast_ci_upper"] = dig(
+        values[f"{prefix}ablation_{scope}_contrast_ci_upper"] = dig(
             contrast, "probability_change_difference_clustered_95ci", "upper")
     values["ablation_matched_pairs"] = dig(payload, "matching", "matched_pairs")
     values["ablation_mask_logit_error"] = payload.get("no_mask_forward_max_absolute_logit_error")
@@ -248,19 +422,29 @@ def extract_attention_ablation(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # artifact key -> (relative path, extractor). 欠けている成果物はNoneのまま残す。
-ARTIFACTS: tuple[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]], ...] = (
-    ("moves", "move_metrics.json", extract_moves),
+# 抽出器は(payload, context)を受け取る。contextはそのrunで既に取り出した値で，
+# 後段の抽出器が状態プローブの選択層などを参照できるようにする。順序に意味がある。
+ARTIFACTS: tuple[tuple[str, str, Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]]], ...] = (
+    ("moves", "move_metrics.json", lambda payload, ctx: extract_moves(payload)),
     ("lishogi-moves", "lishogi-non-bot/moves/move_metrics.json",
-     lambda payload: extract_moves(payload, prefix="lishogi_")),
-    ("probes", "probes/probe_metrics.json", extract_probes),
+     lambda payload, ctx: extract_moves(payload, prefix="lishogi_")),
+    ("probes", "probes/probe_metrics.json", lambda payload, ctx: extract_probes(payload)),
     ("lishogi-probes", "lishogi-non-bot/linear-probes/probe_metrics.json",
-     lambda payload: extract_probes(payload, prefix="lishogi_")),
-    ("token-probe", "token_probe_metrics.json", extract_token_probe),
-    ("terminal-probe", "terminal-probe/action_probe_metrics.json", extract_terminal_probe),
+     lambda payload, ctx: extract_probes(payload, prefix="lishogi_")),
+    ("token-probe", "token_probe_metrics.json", lambda payload, ctx: extract_token_probe(payload)),
+    ("chess-protocol", "chess-protocol/chess_protocol_metrics.json",
+     lambda payload, ctx: extract_chess_protocol(payload)),
+    ("terminal-probe", "terminal-probe/action_probe_metrics.json",
+     lambda payload, ctx: extract_terminal_probe(payload)),
+    ("hand-dynamics", "hand-evaluation/hand_dynamics_metrics.json", extract_hand_dynamics),
+    ("policy-relevance", "policy-relevance/policy_relevance_metrics.json", extract_policy_relevance),
+    ("drop-relevance", "drop-relevance/confidence_trajectory.json", extract_drop_confidence),
+    ("drop-relevance", "drop-relevance/attention_metrics.json",
+     lambda payload, ctx: extract_attention_ablation(payload, prefix="droprel_")),
     ("action-condition", "action-condition/primary/action_condition_robustness.json",
-     extract_action_condition),
+     lambda payload, ctx: extract_action_condition(payload)),
     ("attention-ablation", "action-condition/primary/action_condition_attention_ablation.json",
-     extract_attention_ablation),
+     lambda payload, ctx: extract_attention_ablation(payload)),
 )
 # APはprimaryではなくoracle-native側へ保存されるため，参照先を差し替える。
 ORACLE_REPLACEMENTS = {
@@ -273,13 +457,12 @@ ORACLE_EXCLUDED = ("attention-ablation",)
 ORACLE_ONLY: tuple[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]], ...] = (
     ("action-condition-no-annotation",
      "action-condition/sensitivity-no-annotation/action_condition_robustness.json",
-     lambda payload: {f"noann_{key}": value
-                      for key, value in extract_action_condition(payload).items()}),
+     lambda payload, ctx: {f"noann_{key}": value
+                           for key, value in extract_action_condition(payload).items()}),
 )
 # 指標仕様が未定義の成果物。生成されたら抽出器を追加する。
 # distribution-baselinesは収集はされるが，フィールド名を実物で確認できていない。
-PENDING_ARTIFACTS = ("chess-protocol", "hand-dynamics", "policy-relevance",
-                     "drop-relevance", "distribution-baselines")
+PENDING_ARTIFACTS = ("distribution-baselines",)
 # 契約にあるが意図的に集約しない成果物と，その理由。
 # tests/test_pipeline_contracts.pyがこの宣言と契約を突き合わせ，
 # 宣言のない取りこぼしを失敗として検出する。
@@ -331,14 +514,14 @@ def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str
         if payload is None:
             missing.append(key)
             continue
-        values.update(extractor(payload))
+        values.update(extractor(payload, values))
     if oracle:
         for key, relative, extractor in ORACLE_ONLY:
             payload = load_json(evaluation / relative)
             if payload is None:
                 missing.append(key)
                 continue
-            values.update(extractor(payload))
+            values.update(extractor(payload, values))
     epoch = dig(load_json(run_dir / "training_history.json") or {}, "history")
     if isinstance(epoch, list) and epoch:
         values["epoch"] = max(
