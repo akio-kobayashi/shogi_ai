@@ -127,6 +127,40 @@ def extract_moves(payload: Mapping[str, Any], prefix: str = "") -> dict[str, Any
     return values
 
 
+# 指手予測の下限。モデルを使わず，同じ局面が学習データにあるかを引いて答える。
+# `accuracy_all_queries_uncovered_wrong`が，モデルのmove_top1と同じ母数で比べられる値である。
+BASELINE_FIELDS = {
+    "baseline_queries": ("queries",),
+    "baseline_global_move_top1": ("global_train_move_majority_accuracy",),
+    "baseline_train_position_top1": ("train_position_majority", "accuracy_all_queries_uncovered_wrong"),
+    "baseline_train_position_top1_covered": ("train_position_majority", "accuracy_covered_queries"),
+    "baseline_train_position_coverage": ("train_position_majority", "coverage"),
+    "baseline_mean_distinct_next_moves": ("train_position_distribution", "mean_distinct_next_moves_per_query"),
+    "baseline_mean_majority_share": ("train_position_distribution", "mean_majority_share_per_query"),
+    "baseline_mean_entropy_bits": ("train_position_distribution", "mean_entropy_bits_per_query"),
+}
+
+
+def extract_distribution_baselines(payload: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, Any]:
+    """指手予測の暗記ベースライン。データセットの性質であり，モデルの成績ではない。"""
+    values: dict[str, Any] = {}
+    primary = dig(payload, "metrics", "primary") or {}
+    for name, keys in BASELINE_FIELDS.items():
+        values[name] = dig(primary, *keys)
+    for distance, block in (dig(payload, "metrics", "by_history_distance") or {}).items():
+        if not isinstance(block, Mapping):
+            continue
+        for name, keys in BASELINE_FIELDS.items():
+            values[f"{name}_h{distance}"] = dig(block, *keys)
+    values["baseline_global_move_share"] = dig(payload, "global_train_move", "share")
+    concentration = dig(payload, "metrics", "evaluation_position_concentration") or {}
+    # in_sample_position_majority_accuracy_descriptive_only は成果物側が
+    # 「予測ベースラインではない」と警告を持つため，取り込まない。
+    for name in ("unique_positions", "repeated_position_query_rate", "macro_entropy_bits"):
+        values[f"baseline_evaluation_{name}"] = concentration.get(name)
+    return values
+
+
 PROBE_FIELDS = (
     "board_macro_f1",
     "hand_count_macro_f1",
@@ -445,6 +479,7 @@ ARTIFACTS: tuple[tuple[str, str, Callable[[Mapping[str, Any], Mapping[str, Any]]
      lambda payload, ctx: extract_action_condition(payload)),
     ("attention-ablation", "action-condition/primary/action_condition_attention_ablation.json",
      lambda payload, ctx: extract_attention_ablation(payload)),
+    ("distribution-baselines", "distribution_baselines.json", extract_distribution_baselines),
 )
 # APはprimaryではなくoracle-native側へ保存されるため，参照先を差し替える。
 ORACLE_REPLACEMENTS = {
@@ -461,8 +496,10 @@ ORACLE_ONLY: tuple[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]
                            for key, value in extract_action_condition(payload).items()}),
 )
 # 指標仕様が未定義の成果物。生成されたら抽出器を追加する。
-# distribution-baselinesは収集はされるが，フィールド名を実物で確認できていない。
-PENDING_ARTIFACTS = ("distribution-baselines",)
+PENDING_ARTIFACTS: tuple[str, ...] = ()
+# データセット依存でモデルに依らない指標の接頭辞。全runで同じ値になるため，
+# シード間の標準偏差は0であり，条件比較の行へ並べてはならない。
+DATASET_LEVEL_PREFIX = "baseline_"
 # 契約にあるが意図的に集約しない成果物と，その理由。
 # tests/test_pipeline_contracts.pyがこの宣言と契約を突き合わせ，
 # 宣言のない取りこぼしを失敗として検出する。
@@ -629,6 +666,12 @@ def main() -> int:
         condition for condition, entry in by_condition.items()
         if entry["runs"] < 3 and condition in PRIMARY_CONDITIONS
     )
+    dataset_level = [name for name in metric_names if name.startswith(DATASET_LEVEL_PREFIX)]
+    inconsistent = sorted(
+        name for name in dataset_level
+        if len({row[name] for row in by_run if row.get(name) is not None}) > 1
+    )
+
     document = {
         "format_version": 1,
         "bundle": str(bundle),
@@ -636,12 +679,16 @@ def main() -> int:
         "primary_conditions": list(PRIMARY_CONDITIONS),
         "metric_names": metric_names,
         "pending_artifacts": list(PENDING_ARTIFACTS),
+        "dataset_level_metrics": dataset_level,
+        "inconsistent_dataset_level_metrics": inconsistent,
         "single_seed_conditions": single_seed,
         "interpretation_limits": [
             "clustered_95ci fields describe evaluation-game variation, not training-seed variation.",
             "std is the sample standard deviation across training seeds and is null when a condition has one run.",
             "Conditions listed in single_seed_conditions carry no seed variance and stay exploratory.",
             "Oracle AP results come from the oracle-native protocol and are not pooled with the primary conditions.",
+            "Metrics in dataset_level_metrics come from the dataset, not the model; they repeat across runs, "
+            "so their std is 0 and they belong beside a table as a floor, never as a condition row.",
         ],
         "runs": by_run,
         "by_condition": by_condition,
@@ -660,6 +707,10 @@ def main() -> int:
     for row in by_run:
         if row["missing_artifacts"]:
             print(f"MISSING [{row['condition']}/seed-{row['seed']}] {row['missing_artifacts']}")
+    if inconsistent:
+        # データセット水準の値がrunごとに違うなら，別の評価設定が混ざっている。
+        print("INCONSISTENT dataset-level metrics differ across runs: " + ", ".join(inconsistent))
+        return 1
     return 0
 
 

@@ -146,3 +146,81 @@ class SingleSeedFlagTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DistributionBaselineTest(unittest.TestCase):
+    """暗記ベースラインの抽出。実物のフィールド名に合わせてある。"""
+
+    PAYLOAD = {
+        "evaluation": "factorized_move_distribution_baselines_v1",
+        "global_train_move": {"majority_move": "7g7f", "share": 0.031},
+        "metrics": {
+            "primary": {
+                "queries": 10000,
+                "global_train_move_majority_accuracy": 0.031,
+                "train_position_majority": {
+                    "covered_queries": 6595,
+                    "coverage": 0.6595,
+                    "accuracy_all_queries_uncovered_wrong": 0.4102,
+                    "accuracy_covered_queries": 0.6220,
+                },
+                "train_position_distribution": {
+                    "mean_occurrences_per_query": 12.4,
+                    "mean_distinct_next_moves_per_query": 3.87,
+                    "mean_majority_share_per_query": 0.641,
+                    "mean_entropy_bits_per_query": 1.204,
+                },
+            },
+            "by_history_distance": {
+                "8": {"queries": 5000,
+                      "train_position_majority": {"coverage": 0.93,
+                                                  "accuracy_all_queries_uncovered_wrong": 0.61}},
+                "32": {"queries": 5000,
+                       "train_position_majority": {"coverage": 0.39,
+                                                   "accuracy_all_queries_uncovered_wrong": 0.21}},
+            },
+            "evaluation_position_concentration": {
+                "queries": 10000,
+                "unique_positions": 9814,
+                "repeated_position_query_rate": 0.019,
+                "macro_entropy_bits": 0.04,
+                "in_sample_position_majority_accuracy_descriptive_only": 0.99,
+                "warning": "in-sample descriptive statistic; it is not a predictive baseline",
+            },
+        },
+    }
+
+    def test_primary_fields_are_read(self):
+        values = summarize.extract_distribution_baselines(self.PAYLOAD, {})
+        self.assertEqual(values["baseline_train_position_top1"], 0.4102)
+        self.assertEqual(values["baseline_train_position_top1_covered"], 0.6220)
+        self.assertEqual(values["baseline_train_position_coverage"], 0.6595)
+        self.assertEqual(values["baseline_global_move_top1"], 0.031)
+        self.assertEqual(values["baseline_mean_entropy_bits"], 1.204)
+        self.assertEqual(values["baseline_global_move_share"], 0.031)
+
+    def test_history_distance_is_split(self):
+        values = summarize.extract_distribution_baselines(self.PAYLOAD, {})
+        self.assertEqual(values["baseline_train_position_coverage_h8"], 0.93)
+        self.assertEqual(values["baseline_train_position_coverage_h32"], 0.39)
+
+    def test_in_sample_statistic_stays_out(self):
+        """成果物側が「予測ベースラインではない」と警告する値は取り込まない。"""
+        values = summarize.extract_distribution_baselines(self.PAYLOAD, {})
+        self.assertNotIn(
+            "baseline_evaluation_in_sample_position_majority_accuracy_descriptive_only", values)
+        self.assertEqual(values["baseline_evaluation_unique_positions"], 9814)
+
+    def test_every_field_carries_the_dataset_level_prefix(self):
+        """条件比較の行へ紛れ込ませないための印。"""
+        values = summarize.extract_distribution_baselines(self.PAYLOAD, {})
+        self.assertTrue(values)
+        for name in values:
+            self.assertTrue(name.startswith(summarize.DATASET_LEVEL_PREFIX), name)
+
+    def test_missing_blocks_do_not_raise(self):
+        values = summarize.extract_distribution_baselines({}, {})
+        self.assertIsNone(values["baseline_train_position_top1"])
+
+    def test_nothing_is_pending_any_more(self):
+        self.assertEqual(summarize.PENDING_ARTIFACTS, ())
