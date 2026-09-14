@@ -485,9 +485,11 @@ ARTIFACTS: tuple[tuple[str, str, Callable[[Mapping[str, Any], Mapping[str, Any]]
 ORACLE_REPLACEMENTS = {
     "action-condition": "action-condition/oracle-native/action_condition_robustness.json",
 }
-# APは過去の通常移動へ正解駒種注釈を含むoracle条件なので，注意遮断を実行しない。
-# 欠損ではなく設計上の除外であり，missing_artifactsへ数えない。
-ORACLE_EXCLUDED = ("attention-ablation",)
+# APは過去の通常移動へ正解駒種注釈を含むoracle条件なので，注意遮断と
+# drop-relevanceを実行しない。欠損ではなく設計上の除外であり，
+# missing_artifactsへ数えない。駆動スクリプト側の`record ... excluded`と
+# 対応しており，tests/test_pipeline_contracts.pyが両者の一致を検査する。
+ORACLE_EXCLUDED = ("attention-ablation", "drop-relevance")
 # oracle条件だけが持つ注釈除去プロトコル。主比較へpoolせず別prefixで保持する。
 ORACLE_ONLY: tuple[tuple[str, str, Callable[[Mapping[str, Any]], dict[str, Any]]], ...] = (
     ("action-condition-no-annotation",

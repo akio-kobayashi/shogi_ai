@@ -148,3 +148,43 @@ class ConditionContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OracleExclusionDriftTest(unittest.TestCase):
+    """oracle条件で飛ばす段階が，駆動側と集約側で一致していることを検査する。
+
+    片方だけを直すと，設計上の除外が「欠損」として報告されるか，逆に本当の
+    欠損が除外として黙殺される。どちらも静かに起きるのでテストで固定する。
+
+    除外は2つのスクリプトに分かれて書かれている。checkpoint単位の駆動は
+    `record <段階> excluded`で明示し，study単位のaction-condition実験は
+    `category == primary`のガードで飛ばす。前者だけが機械的に読める。
+    """
+
+    ACTION_DRIVER = ROOT / "scripts/run_reference_action_condition_experiment.sh"
+
+    def driver_excluded_stages(self) -> set[str]:
+        source = DRIVER.read_text(encoding="utf-8")
+        return set(re.findall(r"^\s*record\s+([a-z-]+)\s+excluded\b", source, re.M))
+
+    def test_driver_exclusions_are_declared_in_the_summarizer(self):
+        """駆動が飛ばす段階を集約がmissingへ数えないこと。"""
+        undeclared = self.driver_excluded_stages() - set(summarize.ORACLE_EXCLUDED)
+        self.assertEqual(undeclared, set(),
+                         "driver skips these for oracle but the summarizer counts them missing: "
+                         + ", ".join(sorted(undeclared)))
+
+    def test_attention_ablation_is_guarded_to_primary_conditions(self):
+        """ガードが外れればAPでも遮断が走り，除外宣言のほうが誤りになる。"""
+        source = self.ACTION_DRIVER.read_text(encoding="utf-8")
+        guard = re.search(r'if \[\[ "\$\{category\}" == primary.*?evaluate_factorized_drop_attention\.py',
+                          source, re.S)
+        self.assertIsNotNone(guard, "attention ablation is no longer guarded to primary conditions")
+        self.assertIn("attention-ablation", summarize.ORACLE_EXCLUDED)
+
+    def test_excluded_stages_are_real_artifact_keys(self):
+        keys = {key for key, _, _ in summarize.ARTIFACTS}
+        self.assertEqual(set(summarize.ORACLE_EXCLUDED) - keys, set())
+
+    def test_exclusion_is_not_silently_empty(self):
+        self.assertTrue(self.driver_excluded_stages())
