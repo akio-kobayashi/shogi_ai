@@ -723,6 +723,25 @@ def main() -> int:
         condition for condition, entry in by_condition.items()
         if entry["runs"] < 3 and condition in PRIMARY_CONDITIONS
     )
+    # 同一条件のシード間で指標名の集合が食い違うのは，成果物が別バージョンの
+    # 評価器で作られた場合である。値は出てしまうので，名前の差として検出する。
+    # 条件をまたぐ差はoracle除外など設計上のものなので，比較しない。
+    partial_metrics: list[str] = []
+    incomplete_runs: list[str] = []
+    for condition in conditions:
+        present = {row["seed"]: {name for name in metric_names if row.get(name) is not None}
+                   for row in by_run if row["condition"] == condition}
+        if len(present) < 2:
+            continue
+        union = set.union(*present.values())
+        common = set.intersection(*present.values())
+        if union == common:
+            continue
+        partial_metrics.extend(sorted(union - common))
+        incomplete_runs.extend(f"{condition}/seed-{seed}"
+                               for seed, names in sorted(present.items()) if union - names)
+    partial_metrics = sorted(set(partial_metrics))
+
     dataset_level = [name for name in metric_names if name.startswith(DATASET_LEVEL_PREFIX)]
     inconsistent = sorted(
         name for name in dataset_level
@@ -737,6 +756,8 @@ def main() -> int:
         "metric_names": metric_names,
         "pending_artifacts": list(PENDING_ARTIFACTS),
         "dataset_level_metrics": dataset_level,
+        "partial_metrics": partial_metrics,
+        "runs_missing_some_metrics": incomplete_runs,
         "inconsistent_dataset_level_metrics": inconsistent,
         "single_seed_conditions": single_seed,
         "interpretation_limits": [
@@ -746,6 +767,9 @@ def main() -> int:
             "Oracle AP results come from the oracle-native protocol and are not pooled with the primary conditions.",
             "Metrics in dataset_level_metrics come from the dataset, not the model; they repeat across runs, "
             "so their std is 0 and they belong beside a table as a floor, never as a condition row.",
+            "partial_metrics are present for some seeds of a condition and absent for others, which "
+            "usually means the artifacts came from different versions of an evaluator; the affected "
+            "runs need rerunning before the metric is comparable.",
         ],
         "runs": by_run,
         "by_condition": by_condition,
@@ -764,6 +788,12 @@ def main() -> int:
     for row in by_run:
         if row["missing_artifacts"]:
             print(f"MISSING [{row['condition']}/seed-{row['seed']}] {row['missing_artifacts']}")
+    if partial_metrics:
+        print(f"PARTIAL {len(partial_metrics)} metric(s) exist for only some runs; "
+              f"{len(incomplete_runs)} run(s) affected: {', '.join(incomplete_runs[:4])}"
+              + (" ..." if len(incomplete_runs) > 4 else ""))
+        print(f"        examples: {', '.join(partial_metrics[:6])}"
+              + (" ..." if len(partial_metrics) > 6 else ""))
     if inconsistent:
         # データセット水準の値がrunごとに違うなら，別の評価設定が混ざっている。
         print("INCONSISTENT dataset-level metrics differ across runs: " + ", ".join(inconsistent))
