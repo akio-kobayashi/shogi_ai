@@ -32,6 +32,28 @@ SELF_CHECK_GAMES="${SELF_CHECK_GAMES:-2}"
 SELF_CHECK_TOLERANCE="${SELF_CHECK_TOLERANCE:-1e-3}"
 # 自己検査は既定でfp32。採点位置の検証を数値精度から切り離すため。
 SELF_CHECK_AMP="${SELF_CHECK_AMP:-off}"
+# 評価器を変更した後の成果物は指標が欠けるので，ファイルの有無だけでキャッシュ
+# 判定してはいけない。成果物のprovenance.git_commitが，評価器を最後に変更した
+# commitより古ければ作り直す。
+EVALUATOR="${SCRIPT_DIR}/evaluate_factorized_full_history_moves.py"
+
+stale() {
+  local artifact="$1" recorded evaluator_commit
+  [[ -f "${artifact}" ]] || return 0
+  evaluator_commit="$(git -C "${SCRIPT_DIR}" log -1 --format=%H -- "${EVALUATOR}" 2>/dev/null || true)"
+  [[ -n "${evaluator_commit}" ]] || return 1
+  recorded="$("${PYTHON_BIN}" -c "
+import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get('provenance', {}).get('git_commit') or '')
+except Exception:
+    print('')
+" "${artifact}" 2>/dev/null)"
+  [[ -n "${recorded}" ]] || return 0
+  # 成果物のcommitが評価器の最終変更を含んでいれば新しい。
+  git -C "${SCRIPT_DIR}" merge-base --is-ancestor "${evaluator_commit}" "${recorded}" 2>/dev/null && return 1
+  return 0
+}
 COMPARE="${COMPARE:-1}"
 SMOKE=0
 OUTPUT_NAME="${OUTPUT_NAME:-full_history_move_metrics.json}"
@@ -87,9 +109,13 @@ for condition in "${condition_values[@]}"; do
       continue
     fi
     if [[ -f "${output}" && "${FORCE}" != 1 ]]; then
-      DONE+=("${condition}/seed-${seed}")
-      echo "cached ${condition}/seed-${seed}: ${output}" >&2
-      continue
+      if stale "${output}"; then
+        echo "stale ${condition}/seed-${seed}: produced before the evaluator changed; rerunning" >&2
+      else
+        DONE+=("${condition}/seed-${seed}")
+        echo "cached ${condition}/seed-${seed}: ${output}" >&2
+        continue
+      fi
     fi
     echo >&2
     echo "---------- ${condition}/seed-${seed} ----------" >&2
