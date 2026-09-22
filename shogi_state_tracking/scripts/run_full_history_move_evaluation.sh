@@ -29,7 +29,9 @@ MAX_GAMES="${MAX_GAMES:-0}"
 GAMES_PER_BATCH="${GAMES_PER_BATCH:-8}"
 FORCE="${FORCE:-0}"
 SELF_CHECK_GAMES="${SELF_CHECK_GAMES:-2}"
-SELF_CHECK_TOLERANCE="${SELF_CHECK_TOLERANCE:-1e-2}"
+SELF_CHECK_TOLERANCE="${SELF_CHECK_TOLERANCE:-1e-3}"
+# 自己検査は既定でfp32。採点位置の検証を数値精度から切り離すため。
+SELF_CHECK_AMP="${SELF_CHECK_AMP:-off}"
 COMPARE="${COMPARE:-1}"
 SMOKE=0
 OUTPUT_NAME="${OUTPUT_NAME:-full_history_move_metrics.json}"
@@ -101,6 +103,7 @@ for condition in "${condition_values[@]}"; do
       --games-per-batch "${GAMES_PER_BATCH}" \
       --self-check-games "${SELF_CHECK_GAMES}" \
       --self-check-tolerance "${SELF_CHECK_TOLERANCE}" \
+      --self-check-amp "${SELF_CHECK_AMP}" \
       "${compare_args[@]}" \
       --device "${DEVICE:-auto}" \
       --amp "${EVAL_AMP:-auto}" 2>&1 | tee "${run_dir}/evaluation/${OUTPUT_NAME%.json}.log"; then

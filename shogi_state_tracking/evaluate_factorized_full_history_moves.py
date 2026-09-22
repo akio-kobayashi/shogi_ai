@@ -68,12 +68,14 @@ def parse_args() -> argparse.Namespace:
         help="先頭N対局について，接頭辞だけを入力した場合とNLLが一致するか検査する。0で無効",
     )
     parser.add_argument(
-        "--self-check-tolerance", type=float, default=1e-2,
-        help="自己検査で許すNLLの絶対差。bfloat16では1e-3程度の差が出る",
+        "--self-check-tolerance", type=float, default=1e-3,
+        help="自己検査で許すNLLの絶対差",
     )
     parser.add_argument(
-        "--self-check-amp", default=None,
-        help="自己検査だけ別のAMP設定で行う。offを指定すると精度由来の差を切り分けられる",
+        "--self-check-amp", default="off",
+        help=("自己検査のAMP設定。既定のoffは，採点位置の検証を数値精度から切り離すため。"
+              "bfloat16では位置が正しくても1e-2程度の差が出るので判定に使えない。"
+              "本番の採点は--ampの設定で行う"),
     )
     parser.add_argument(
         "--compare-with", default=None,
@@ -442,10 +444,9 @@ def main() -> int:
     scan = {"games": 0, "games_with_truncation": 0, "truncated_moves": 0, "total_plies": 0}
     started = time.perf_counter()
     pending: list[dict] = []
-    if args.self_check_amp is None:
-        self_check_dtype, self_check_amp_name = amp_dtype, amp_name
-    else:
-        self_check_dtype, _, self_check_amp_name = resolve_amp(args.self_check_amp, device)
+    # 採点位置がずれていればNLLは数nat単位で食い違うので，許容差を厳しくしても
+    # 実際の誤りは捕まる。逆に精度由来の差で落ちると検査が使えなくなる。
+    self_check_dtype, _, self_check_amp_name = resolve_amp(args.self_check_amp, device)
     self_check_report = {"games": 0, "checked_subtokens": 0, "max_abs_nll_difference": 0.0,
                          "max_abs_nll_difference_at": None, "amp": self_check_amp_name,
                          "tolerance": args.self_check_tolerance, "passed": None}
@@ -526,6 +527,8 @@ def main() -> int:
                                    "scoring because of the causal mask",
             "canonical_move_nll": "RAP annotation piece logits are masked before softmax, "
                                   "except immediately after <DROP>",
+            "self_check": "prefix-only and full-sequence NLL are compared at self_check.amp, "
+                          "which is independent of the amp used for scoring",
             "ply_0": "the position before the first move is reported separately; it is "
                      "identical for every game",
             "cross_check_ply_8_and_32": "the same target plies the sampled evaluation uses, "
