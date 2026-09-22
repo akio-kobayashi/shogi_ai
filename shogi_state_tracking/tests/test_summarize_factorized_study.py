@@ -271,3 +271,42 @@ class ProvenanceReportingTest(unittest.TestCase):
                         {}):
             self.assertEqual(summarize.provenance_commit(payload),
                              verify.provenance_commit(payload), payload)
+
+
+class PartialMetricsTest(unittest.TestCase):
+    """シード間の指標の揃い具合。評価器の版の混在を検出するための検査。"""
+
+    def row(self, seed, condition="vanilla-p0.0", **values):
+        return {"condition": condition, "seed": seed, **values}
+
+    def test_metric_missing_in_one_seed_is_reported(self):
+        rows = [self.row("1", fh_x=1.0), self.row("2", fh_x=2.0), self.row("3")]
+        partial, runs = summarize.find_partial_metrics(rows, ["fh_x"], ["vanilla-p0.0"])
+        self.assertEqual(partial, ["fh_x"])
+        self.assertEqual(runs, ["vanilla-p0.0/seed-3"])
+
+    def test_zero_sample_bin_is_not_reported(self):
+        """標本0件で値が出ない欠落は，版の混在ではない。"""
+        rows = [self.row("1", chess_a_lgm_card4_7=1.0, chess_a_queries_card4_7=1),
+                self.row("2", chess_a_queries_card4_7=0)]
+        partial, runs = summarize.find_partial_metrics(
+            rows, ["chess_a_lgm_card4_7", "chess_a_queries_card4_7"], ["vanilla-p0.0"])
+        self.assertEqual(partial, [])
+        self.assertEqual(runs, [])
+
+    def test_missing_bin_with_nonzero_samples_is_reported(self):
+        rows = [self.row("1", chess_a_lgm_card4_7=1.0, chess_a_queries_card4_7=1),
+                self.row("2", chess_a_queries_card4_7=5)]
+        partial, _ = summarize.find_partial_metrics(
+            rows, ["chess_a_lgm_card4_7", "chess_a_queries_card4_7"], ["vanilla-p0.0"])
+        self.assertEqual(partial, ["chess_a_lgm_card4_7"])
+
+    def test_differences_across_conditions_are_not_compared(self):
+        """APのoracle除外のような条件間の差は設計上のもの。"""
+        rows = [self.row("1", condition="vanilla-p0.0", droprel=1.0),
+                self.row("2", condition="vanilla-p0.0", droprel=1.0),
+                self.row("1", condition="ap-p1.0-proportional-annotation-v1"),
+                self.row("2", condition="ap-p1.0-proportional-annotation-v1")]
+        partial, _ = summarize.find_partial_metrics(
+            rows, ["droprel"], ["vanilla-p0.0", "ap-p1.0-proportional-annotation-v1"])
+        self.assertEqual(partial, [])

@@ -373,7 +373,11 @@ def compare_with_sampled(path: str, metrics: dict) -> dict:
     8手・32手は抽出評価が対象にしている手数そのものなので，教師強制の指標は
     一致するはずである。一致しなければ移植のどこかが違う．
     """
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    source = Path(path)
+    if not source.is_file():
+        return {"reference": path, "by_ply": {}, "max_abs_difference": None,
+                "comparable": False, "note": "reference file does not exist"}
+    payload = json.loads(source.read_text(encoding="utf-8"))
     sampled = payload.get("metrics", {}).get("by_history_distance", {}) or {}
     shared = ("move_nll", "canonical_move_nll", "grammar_normalized_move_nll",
               "source_top1", "source_top5", "destination_given_source_top1",

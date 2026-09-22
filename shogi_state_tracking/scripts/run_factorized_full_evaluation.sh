@@ -136,6 +136,7 @@ run_stage full-history-moves \
   --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
   --vocab "${VOCAB}" \
   --output "${OUTPUT_DIR}/full_history_move_metrics.json" \
+  --compare-with "${OUTPUT_DIR}/move_metrics.json" \
   --games-per-batch "${FULL_HISTORY_GAMES_PER_BATCH:-8}" \
   --device "${DEVICE:-auto}" \
   --amp "${EVAL_AMP:-auto}"

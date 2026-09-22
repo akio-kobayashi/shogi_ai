@@ -571,6 +571,40 @@ NOT_SUMMARIZED = {
 SERIES_PROBE_FIELDS = ("board_macro_f1", "hand_count_macro_f1", "full_state_exact_match")
 
 
+def find_partial_metrics(by_run: list[dict[str, Any]], metric_names: list[str],
+                         conditions: Iterable[str]) -> tuple[list[str], list[str]]:
+    """同一条件のシード間で，一部のrunにしか無い指標を返す。
+
+    成果物が別バージョンの評価器で作られると，値は出たまま指標名の集合が
+    食い違う。条件をまたぐ差はoracle除外など設計上のものなので比較しない。
+    合法手集合の大きさ別など，標本数が0のとき値を出さない指標の欠落は，
+    コードの版ではなく標本で決まるので数えない。
+    """
+    partial: set[str] = set()
+    incomplete: list[str] = []
+    for condition in conditions:
+        rows = {row["seed"]: row for row in by_run if row["condition"] == condition}
+        if len(rows) < 2:
+            continue
+        present = {seed: {name for name in metric_names if row.get(name) is not None}
+                   for seed, row in rows.items()}
+        union = set.union(*present.values())
+
+        def explained(name: str, seed: str) -> bool:
+            if "_lgm_" not in name and "_exm_" not in name:
+                return False
+            count = name.replace("_lgm_", "_queries_").replace("_exm_", "_queries_")
+            value = rows[seed].get(count)
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+        for seed in sorted(present):
+            lacking = {name for name in union - present[seed] if not explained(name, seed)}
+            if lacking:
+                partial |= lacking
+                incomplete.append(f"{condition}/seed-{seed}")
+    return sorted(partial), incomplete
+
+
 def collect_series(run_dir: Path, condition: str) -> dict[str, Any]:
     """Per-layer series for the figures. Kept out of the CSVs, which stay scalar."""
     evaluation = run_dir / "evaluation"
@@ -744,24 +778,7 @@ def main() -> int:
         condition for condition, entry in by_condition.items()
         if entry["runs"] < 3 and condition in PRIMARY_CONDITIONS
     )
-    # 同一条件のシード間で指標名の集合が食い違うのは，成果物が別バージョンの
-    # 評価器で作られた場合である。値は出てしまうので，名前の差として検出する。
-    # 条件をまたぐ差はoracle除外など設計上のものなので，比較しない。
-    partial_metrics: list[str] = []
-    incomplete_runs: list[str] = []
-    for condition in conditions:
-        present = {row["seed"]: {name for name in metric_names if row.get(name) is not None}
-                   for row in by_run if row["condition"] == condition}
-        if len(present) < 2:
-            continue
-        union = set.union(*present.values())
-        common = set.intersection(*present.values())
-        if union == common:
-            continue
-        partial_metrics.extend(sorted(union - common))
-        incomplete_runs.extend(f"{condition}/seed-{seed}"
-                               for seed, names in sorted(present.items()) if union - names)
-    partial_metrics = sorted(set(partial_metrics))
+    partial_metrics, incomplete_runs = find_partial_metrics(by_run, metric_names, conditions)
 
     dataset_level = [name for name in metric_names if name.startswith(DATASET_LEVEL_PREFIX)]
     inconsistent = sorted(
