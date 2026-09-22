@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
         help="自己検査で許すNLLの絶対差。bfloat16では1e-3程度の差が出る",
     )
     parser.add_argument(
+        "--self-check-amp", default=None,
+        help="自己検査だけ別のAMP設定で行う。offを指定すると精度由来の差を切り分けられる",
+    )
+    parser.add_argument(
         "--compare-with", default=None,
         help="既存の抽出評価のmove_metrics.json。8手・32手の値を突き合わせて差を記録する",
     )
@@ -312,23 +316,34 @@ def self_check(model, game: dict, device, amp_dtype, vocabulary: dict) -> dict:
     全系列を1回通す方式は，因果マスクがある限り各局面を独立に採点した場合と
     一致する．一致しなければ採点位置がずれている．研究本体が隠れ状態について
     行っている``causal_prefix_full_alignment``と同じ趣旨の検査である．
+
+    ``attention_mask``を省くとSDPAが``is_causal=True``の別経路を使い，明示
+    マスクを渡す採点側とカーネルが変わる．bfloat16ではそれだけで1e-2程度の差が
+    出るため，両方とも全要素Trueのマスクを明示して経路を揃える．
     """
     token_ids = game["token_ids"]
-    ids = torch.tensor([token_ids], dtype=torch.long, device=device)
-    with torch.inference_mode(), amp_context(device, amp_dtype):
-        full_logits = model(ids, output_hidden_states=False).logits[0].float().cpu()
+
+    def logits_for(prefix_length: int) -> torch.Tensor:
+        ids = torch.tensor([token_ids[:prefix_length]], dtype=torch.long, device=device)
+        mask = torch.ones((1, prefix_length), dtype=torch.bool, device=device)
+        with torch.inference_mode(), amp_context(device, amp_dtype):
+            return model(ids, attention_mask=mask, output_hidden_states=False).logits[0].float().cpu()
+
+    full_logits = logits_for(len(token_ids))
     checked = 0
     worst = 0.0
+    worst_at = None
     for move in game["moves"]:
         for position, target_id in zip(move["positions"], move["target_ids"]):
-            prefix = torch.tensor([token_ids[: position + 1]], dtype=torch.long, device=device)
-            with torch.inference_mode(), amp_context(device, amp_dtype):
-                prefix_logits = model(prefix, output_hidden_states=False).logits[0, -1]
+            prefix_logits = logits_for(position + 1)
             from_full = -float(torch.log_softmax(full_logits[position], dim=-1)[target_id])
-            from_prefix = -float(torch.log_softmax(prefix_logits.float().cpu(), dim=-1)[target_id])
-            worst = max(worst, abs(from_full - from_prefix))
+            from_prefix = -float(torch.log_softmax(prefix_logits[-1], dim=-1)[target_id])
+            difference = abs(from_full - from_prefix)
+            if difference > worst:
+                worst, worst_at = difference, {"ply": move["ply"], "position": position}
             checked += 1
-    return {"checked_subtokens": checked, "max_abs_nll_difference": worst}
+    return {"checked_subtokens": checked, "max_abs_nll_difference": worst,
+            "max_abs_nll_difference_at": worst_at}
 
 
 def compare_with_sampled(path: str, metrics: dict) -> dict:
@@ -350,15 +365,27 @@ def compare_with_sampled(path: str, metrics: dict) -> dict:
         if not ours or not theirs:
             report["by_ply"][str(ply)] = {"available": False}
             continue
-        entry: dict = {"available": True, "our_queries": ours["queries"],
+        # 対象局面が同じでなければ値が一致する理由がない。--max-gamesを
+        # 絞った試運転では必ずここで弾かれる。
+        comparable = int(ours["queries"]) == int(theirs.get("queries") or -1)
+        entry: dict = {"available": True, "comparable": comparable,
+                       "our_queries": ours["queries"],
                        "their_queries": theirs.get("queries"), "differences": {}}
         for key in shared:
             if ours.get(key) is None or theirs.get(key) is None:
                 continue
             difference = abs(float(ours[key]) - float(theirs[key]))
             entry["differences"][key] = difference
-            report["max_abs_difference"] = max(report["max_abs_difference"], difference)
+            if comparable:
+                report["max_abs_difference"] = max(report["max_abs_difference"], difference)
         report["by_ply"][str(ply)] = entry
+    comparable_plies = [value for value in report["by_ply"].values()
+                        if value.get("available") and value.get("comparable")]
+    report["comparable"] = bool(comparable_plies)
+    if not comparable_plies:
+        report["max_abs_difference"] = None
+        report["note"] = ("query counts differ, so the values are not expected to match; "
+                          "run without --max-games to compare")
     return report
 
 
@@ -415,7 +442,12 @@ def main() -> int:
     scan = {"games": 0, "games_with_truncation": 0, "truncated_moves": 0, "total_plies": 0}
     started = time.perf_counter()
     pending: list[dict] = []
+    if args.self_check_amp is None:
+        self_check_dtype, self_check_amp_name = amp_dtype, amp_name
+    else:
+        self_check_dtype, _, self_check_amp_name = resolve_amp(args.self_check_amp, device)
     self_check_report = {"games": 0, "checked_subtokens": 0, "max_abs_nll_difference": 0.0,
+                         "max_abs_nll_difference_at": None, "amp": self_check_amp_name,
                          "tolerance": args.self_check_tolerance, "passed": None}
 
     def flush() -> None:
@@ -439,11 +471,12 @@ def main() -> int:
                 scan["games_with_truncation"] += 1
                 scan["truncated_moves"] += game["truncated_moves"]
             if self_check_report["games"] < args.self_check_games:
-                report = self_check(model, game, device, amp_dtype, vocabulary)
+                report = self_check(model, game, device, self_check_dtype, vocabulary)
                 self_check_report["games"] += 1
                 self_check_report["checked_subtokens"] += report["checked_subtokens"]
-                self_check_report["max_abs_nll_difference"] = max(
-                    self_check_report["max_abs_nll_difference"], report["max_abs_nll_difference"])
+                if report["max_abs_nll_difference"] > self_check_report["max_abs_nll_difference"]:
+                    self_check_report["max_abs_nll_difference"] = report["max_abs_nll_difference"]
+                    self_check_report["max_abs_nll_difference_at"] = report["max_abs_nll_difference_at"]
             pending.append(game)
             if len(pending) >= args.games_per_batch:
                 flush()
@@ -510,6 +543,7 @@ def main() -> int:
         "canonical_move_perplexity": round(metrics["all"]["canonical_move_perplexity"], 4),
         "self_check_passed": self_check_report["passed"],
         "self_check_max_abs_nll_difference": self_check_report["max_abs_nll_difference"],
+        "comparison_comparable": (comparison or {}).get("comparable"),
         "comparison_max_abs_difference": (comparison or {}).get("max_abs_difference"),
         "seconds": round(time.perf_counter() - started, 1),
     }, ensure_ascii=False))
