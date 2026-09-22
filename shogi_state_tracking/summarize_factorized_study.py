@@ -845,10 +845,10 @@ def main() -> int:
         print(f"        examples: {', '.join(partial_metrics[:6])}"
               + (" ..." if len(partial_metrics) > 6 else ""))
     problems = {
-        "MISSING": [f"{row['condition']}/seed-{row['seed']}" for row in by_run
-                    if row["missing_artifacts"]],
-        "NO-PROVENANCE": [f"{row['condition']}/seed-{row['seed']}" for row in by_run
-                          if row["unprovenanced_artifacts"]],
+        "MISSING": [f"{row['condition']}/seed-{row['seed']} [{row['missing_artifacts']}]"
+                    for row in by_run if row["missing_artifacts"]],
+        "NO-PROVENANCE": [f"{row['condition']}/seed-{row['seed']} [{row['unprovenanced_artifacts']}]"
+                          for row in by_run if row["unprovenanced_artifacts"]],
         "PARTIAL": incomplete_runs,
         "INCONSISTENT": inconsistent,
     }
@@ -857,7 +857,9 @@ def main() -> int:
         if found:
             print("STRICT CHECK FAILED: the study is not complete; do not collect yet")
             for name, values in found.items():
-                print(f"  {name}: {len(values)} -> {', '.join(values)}")
+                print(f"  {name}: {len(values)}")
+                for value in values:
+                    print(f"    {value}")
             return 1
         print("STRICT CHECK PASSED: all runs complete, provenanced and consistent")
     if inconsistent:
