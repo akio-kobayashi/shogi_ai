@@ -19,9 +19,16 @@ WORK_DIR="${WORK_DIR:-${OUTPUT_DIR}/.extracted}"
 
 [[ -f "${ARCHIVE}" ]] || { echo "archive does not exist: ${ARCHIVE}" >&2; exit 2; }
 
+# 集約が読むのはJSONだけである。probeの.ptや図・ログまで展開すると数十GBになる
+# ので既定では展開しない。全部要る場合は EXTRACT_ALL=1 を指定する。
 echo "展開中: ${ARCHIVE}" >&2
 mkdir -p "${WORK_DIR}"
-tar xzf "${ARCHIVE}" -C "${WORK_DIR}"
+if [[ "${EXTRACT_ALL:-0}" == 1 ]]; then
+  tar xzf "${ARCHIVE}" -C "${WORK_DIR}"
+else
+  tar xzf "${ARCHIVE}" -C "${WORK_DIR}" --include '*.json' || \
+    tar xzf "${ARCHIVE}" -C "${WORK_DIR}" --wildcards '*.json'
+fi
 
 # tar.gzの中身はanalysis_bundle/以下か，results rootそのもののことがある。
 BUNDLE="$(find "${WORK_DIR}" -maxdepth 2 -type d -name analysis_bundle | head -1)"
