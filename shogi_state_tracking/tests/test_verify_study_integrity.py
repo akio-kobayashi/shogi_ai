@@ -58,8 +58,23 @@ class StudyIntegrityContractTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(verify.expected_runs(verify.CONDITIONS, ()))
 
-    def test_primary_contract_has_all_twelve_stages(self):
-        self.assertEqual(len(verify.artifact_contract(verify.CONDITIONS[0])), 12)
+    # 段階名で固定する。件数だけでは、増減したときに何が変わったか分からない。
+    PRIMARY_STAGES = {
+        "action-condition", "chess-protocol", "distribution-baselines", "drop-relevance",
+        "full-history-moves", "hand-dynamics", "lishogi-moves", "lishogi-probes",
+        "moves", "policy-relevance", "probes", "terminal-probe", "token-probe",
+    }
+    # APはoracle条件なので，駒打ち関連履歴の遮断を設計上実行しない。
+    ORACLE_ONLY_EXCLUSIONS = {"drop-relevance"}
+
+    def test_primary_contract_stages(self):
+        self.assertEqual(set(verify.artifact_contract(verify.CONDITIONS[0])),
+                         self.PRIMARY_STAGES)
+
+    def test_oracle_contract_excludes_only_the_declared_stages(self):
+        oracle = set(verify.artifact_contract(verify.CONDITIONS[-1]))
+        self.assertEqual(self.PRIMARY_STAGES - oracle, self.ORACLE_ONLY_EXCLUSIONS)
+        self.assertEqual(oracle - self.PRIMARY_STAGES, set())
 
     def test_locates_nested_study_results(self):
         with tempfile.TemporaryDirectory() as temporary:

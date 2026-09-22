@@ -161,6 +161,60 @@ def extract_distribution_baselines(payload: Mapping[str, Any], context: Mapping[
     return values
 
 
+# 評価集合の全指手を対象とする教師強制評価。抽出評価(8手・32手)は母集団を持たない
+# 平均なので，こちらを全手の値として別prefixで保持する。生成が必要な指標は
+# 含まれないため，指手top1などは教師強制版である点に注意する。
+FULL_HISTORY_FIELDS = {
+    "fh_move_perplexity": "canonical_move_perplexity",
+    "fh_move_perplexity_raw": "move_perplexity",
+    "fh_move_nll": "canonical_move_nll",
+    "fh_source_top1": "source_top1",
+    "fh_source_top5": "source_top5",
+    "fh_destination_given_source_top1": "destination_given_source_top1",
+    "fh_destination_given_source_top5": "destination_given_source_top5",
+    "fh_teacher_forced_top1": "teacher_forced_full_top1",
+    "fh_teacher_forced_top5": "teacher_forced_full_top5",
+    "fh_promotion_decision_top1": "promotion_decision_top1",
+    "fh_drop_piece_top1": "drop_piece_top1",
+    "fh_drop_piece_top5": "drop_piece_top5",
+    "fh_drop_move_rate": "drop_move_rate",
+    "fh_queries": "queries",
+    "fh_move_perplexity_ap_canonical": "ap_annotated_move_perplexity",
+}
+# 手数の層と指手の種類の層。終盤ほど駒打ちが増えるため，手数だけの比較は
+# 指手の構成変化と交絡する。両方を保持して分離できるようにする。
+FULL_HISTORY_GROUPS = (
+    "ply_0", "ply_1_8", "ply_9_16", "ply_17_32", "ply_33_64", "ply_65_128", "ply_129_plus",
+    "kind_drop", "kind_normal", "kind_promotion",
+)
+
+
+def extract_full_history_moves(payload: Mapping[str, Any],
+                               context: Mapping[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    metrics = dig(payload, "metrics") or {}
+    for name, key in FULL_HISTORY_FIELDS.items():
+        values[name] = dig(metrics, "all", key)
+    for group in FULL_HISTORY_GROUPS:
+        block = metrics.get(group)
+        if not isinstance(block, Mapping):
+            continue
+        for name, key in FULL_HISTORY_FIELDS.items():
+            if block.get(key) is not None:
+                values[f"{name}_{group}"] = block[key]
+    # 取りこぼしと自己検査の結果。値の信頼性はここで判断する。
+    values["fh_scanned_games"] = dig(payload, "scan", "games")
+    values["fh_total_plies"] = dig(payload, "scan", "total_plies")
+    values["fh_truncated_moves"] = dig(payload, "scan", "truncated_moves")
+    values["fh_self_check_passed"] = dig(payload, "self_check", "passed")
+    values["fh_self_check_max_abs_nll_difference"] = dig(
+        payload, "self_check", "max_abs_nll_difference")
+    comparison = dig(payload, "comparison_with_sampled_evaluation") or {}
+    values["fh_comparison_comparable"] = comparison.get("comparable")
+    values["fh_comparison_max_abs_difference"] = comparison.get("max_abs_difference")
+    return values
+
+
 PROBE_FIELDS = (
     "board_macro_f1",
     "hand_count_macro_f1",
@@ -480,6 +534,7 @@ ARTIFACTS: tuple[tuple[str, str, Callable[[Mapping[str, Any], Mapping[str, Any]]
     ("attention-ablation", "action-condition/primary/action_condition_attention_ablation.json",
      lambda payload, ctx: extract_attention_ablation(payload)),
     ("distribution-baselines", "distribution_baselines.json", extract_distribution_baselines),
+    ("full-history-moves", "full_history_move_metrics.json", extract_full_history_moves),
 )
 # APはprimaryではなくoracle-native側へ保存されるため，参照先を差し替える。
 ORACLE_REPLACEMENTS = {

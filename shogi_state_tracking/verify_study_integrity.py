@@ -114,6 +114,7 @@ def locate_run(root: Path, condition: str, seed: str) -> Path:
 def artifact_contract(condition: str) -> dict[str, tuple[Path, ...]]:
     common = {
         "moves": (Path("move_metrics.json"),),
+        "full-history-moves": (Path("full_history_move_metrics.json"),),
         "distribution-baselines": (Path("distribution_baselines.json"),),
         "lishogi-moves": (Path("lishogi-non-bot/moves/move_metrics.json"),),
         "probes": (Path("probes/probe_metrics.json"), Path("probes/linear_probes.pt")),

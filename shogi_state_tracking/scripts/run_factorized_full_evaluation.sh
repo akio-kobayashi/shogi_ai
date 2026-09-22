@@ -35,13 +35,14 @@ IS_ORACLE=0
 
 # 段階名 -> 完了を判定する成果物（依存順）。
 STAGE_NAMES=(
-  moves token probes terminal chess
+  moves full-history-moves token probes terminal chess
   lishogi-moves lishogi-probes
   hand-dynamics policy-relevance drop-relevance
 )
 stage_artifact() {
   case "$1" in
     moves)            printf '%s\n' "move_metrics.json" "distribution_baselines.json" ;;
+    full-history-moves) printf '%s\n' "full_history_move_metrics.json" ;;
     token)            printf '%s\n' "token_probe_metrics.json" ;;
     probes)           printf '%s\n' "probes/probe_metrics.json" "probes/linear_probes.pt" ;;
     terminal)         printf '%s\n' "terminal-probe/action_probe_metrics.json" ;;
@@ -129,6 +130,15 @@ evaluation_stage() {
 }
 
 run_stage moves    evaluation_stage moves
+run_stage full-history-moves \
+  "${PYTHON_BIN}" -u "${SCRIPT_DIR}/evaluate_factorized_full_history_moves.py" \
+  --checkpoint "${CHECKPOINT}" \
+  --evaluation-jsonl "${DATASET_DIR}/evaluation.jsonl" \
+  --vocab "${VOCAB}" \
+  --output "${OUTPUT_DIR}/full_history_move_metrics.json" \
+  --games-per-batch "${FULL_HISTORY_GAMES_PER_BATCH:-8}" \
+  --device "${DEVICE:-auto}" \
+  --amp "${EVAL_AMP:-auto}"
 run_stage token    evaluation_stage token
 run_stage probes   evaluation_stage probes
 run_stage terminal evaluation_stage terminal
