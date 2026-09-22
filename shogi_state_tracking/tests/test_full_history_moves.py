@@ -211,3 +211,82 @@ class PlyBucketTest(unittest.TestCase):
         self.assertEqual(buckets[0][0], 1, "ply 0 is reported separately")
         for (_, high), (low, _) in zip(buckets, buckets[1:]):
             self.assertEqual(low, high + 1, "buckets must not overlap or leave gaps")
+
+
+@unittest.skipIf(torch is None, "PyTorch is not installed")
+class MoveKindTest(unittest.TestCase):
+    """指手の種類の判定。終盤で駒打ち比率が上がるため，手数と交絡する。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import evaluate_factorized_full_history_moves as full
+        from data import load_vocabulary
+        path = find_vocabulary()
+        if path is None:
+            raise unittest.SkipTest("vocab.json is not available")
+        cls.full = full
+        cls.vocabulary = load_vocabulary(path)
+
+    def kind(self, tokens):
+        return self.full.move_kind([self.vocabulary[token] for token in tokens], self.vocabulary)
+
+    def test_normal(self):
+        self.assertEqual(self.kind(["<SQ_7g>", "<SQ_7f>"]), "normal")
+
+    def test_promotion(self):
+        self.assertEqual(self.kind(["<SQ_2b>", "<PROMOTE>", "<SQ_3c>"]), "promotion")
+
+    def test_drop(self):
+        self.assertEqual(self.kind(["<DROP>", "<P>", "<SQ_5e>"]), "drop")
+
+    def test_build_game_records_the_kind(self):
+        record = {
+            "start_candidates": [{"start_ply": 0}],
+            "move_tokens": ["7g7f", "P*5e", "2b3c+"],
+            "move_annotations": [{"piece": "PAWN", "eligible": False}] * 3,
+        }
+        args = SimpleNamespace(state_prompt_mode="implicit_initial",
+                               evaluation_annotation_mode="vanilla")
+        game = self.full.build_game(record, args, self.vocabulary, 2560)
+        self.assertEqual([move["kind"] for move in game["moves"]],
+                         ["normal", "drop", "promotion"])
+
+
+@unittest.skipIf(torch is None, "PyTorch is not installed")
+class DenominatorTest(unittest.TestCase):
+    """分母の違う指標が，全指手で割られていないこと。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import evaluate_factorized_full_history_moves as full
+        cls.full = full
+
+    def base_total(self, **extra):
+        total = {"queries": 10.0, "move_subtokens": 23.0, "move_nll": 10.0,
+                 "canonical_move_nll": 10.0, "grammar_normalized_move_nll": 10.0,
+                 "drop_moves": 2.0}
+        total.update(extra)
+        return total
+
+    def test_drop_piece_uses_drop_moves_as_the_denominator(self):
+        result = self.full.summarize(self.base_total(
+            drop_piece_correct=1.0, drop_piece_correct_top5=2.0, drop_piece_applicable=2.0))
+        self.assertAlmostEqual(result["drop_piece_top1"], 0.5)
+        self.assertAlmostEqual(result["drop_piece_top5"], 1.0)
+        self.assertEqual(result["drop_piece_examples"], 2)
+
+    def test_raw_drop_piece_counters_do_not_appear_as_averages(self):
+        result = self.full.summarize(self.base_total(
+            drop_piece_correct=1.0, drop_piece_correct_top5=2.0, drop_piece_applicable=2.0))
+        for key in ("drop_piece_correct", "drop_piece_correct_top5", "drop_piece_applicable"):
+            self.assertNotIn(key, result)
+
+    def test_promotion_uses_its_own_denominator(self):
+        result = self.full.summarize(self.base_total(
+            promotion_decision_correct=3.0, promotion_decision_applicable=4.0))
+        self.assertAlmostEqual(result["promotion_decision_top1"], 0.75)
+        self.assertEqual(result["promotion_decision_examples"], 4)
+
+    def test_groups_without_drops_omit_the_drop_piece_metrics(self):
+        result = self.full.summarize(self.base_total())
+        self.assertNotIn("drop_piece_top1", result)

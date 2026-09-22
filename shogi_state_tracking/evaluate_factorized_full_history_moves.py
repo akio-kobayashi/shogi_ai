@@ -129,6 +129,15 @@ def slot_tables(vocabulary: dict) -> tuple[dict, dict]:
     return allowed, masked
 
 
+def move_kind(token_ids: list[int], vocabulary: dict) -> str:
+    """指手の種類．終盤で駒打ちの比率が上がるため，手数と交絡する．"""
+    if token_ids[0] == vocabulary[DROP_TOKEN]:
+        return "drop"
+    if len(token_ids) > 2 and token_ids[1] == vocabulary[PROMOTE_TOKEN]:
+        return "promotion"
+    return "normal"
+
+
 def classify_slots(token_ids: list[int], vocabulary: dict) -> list[str]:
     """1指手のsub-token列に対し，各tokenの予測位置の種別を返す．"""
     drop = vocabulary[DROP_TOKEN]
@@ -186,7 +195,7 @@ def build_game(record: dict, args: argparse.Namespace, vocabulary: dict,
                 "annotation_id": vocabulary[block[0]],
                 "positions": [start + 1 + index - 1 for index in range(len(ids))],
                 "target_ids": ids, "slots": slots,
-                "is_drop": "*" in usi,
+                "is_drop": "*" in usi, "kind": move_kind(ids, vocabulary),
             })
         else:
             moves.append({
@@ -194,7 +203,7 @@ def build_game(record: dict, args: argparse.Namespace, vocabulary: dict,
                 "annotation_position": None, "annotation_id": None,
                 "positions": [start + index - 1 for index in range(len(ids))],
                 "target_ids": ids, "slots": slots,
-                "is_drop": "*" in usi,
+                "is_drop": "*" in usi, "kind": move_kind(ids, vocabulary),
             })
     if not moves:
         return None
@@ -246,6 +255,7 @@ def score_batch(model, games: list[dict], allowed, masked, device, amp_dtype,
             source_top1 = source_top5 = 0
             destination_top1 = destination_top5 = 0
             promotion_applicable = promotion_correct = 0
+            drop_piece_applicable = drop_piece_top1 = drop_piece_top5 = 0
             for offset, (position, target_id, slot) in enumerate(
                     zip(move["positions"], move["target_ids"], move["slots"])):
                 vector = logits[row, position]
@@ -274,6 +284,10 @@ def score_batch(model, games: list[dict], allowed, masked, device, amp_dtype,
                 if offset == 1 and move["target_ids"][0] in square_ids:
                     promotion_applicable = 1
                     promotion_correct = int((top[0] == promote_id) == (target_id == promote_id))
+                if offset == 1 and slot == SLOT_DROP_PIECE:
+                    drop_piece_applicable = 1
+                    drop_piece_top1 = int(top[0] == target_id)
+                    drop_piece_top5 = int(target_id in top)
                 full_top1 = full_top1 and top[0] == target_id
                 full_top5 = full_top5 and target_id in top
             values = {
@@ -287,6 +301,9 @@ def score_batch(model, games: list[dict], allowed, masked, device, amp_dtype,
                 "destination_given_source_top5": destination_top5,
                 "promotion_decision_correct": promotion_correct,
                 "promotion_decision_applicable": promotion_applicable,
+                "drop_piece_correct": drop_piece_top1,
+                "drop_piece_correct_top5": drop_piece_top5,
+                "drop_piece_applicable": drop_piece_applicable,
                 "teacher_forced_full_top1": int(full_top1),
                 "teacher_forced_full_top5": int(full_top5),
                 "drop_moves": int(move["is_drop"]),
@@ -304,7 +321,9 @@ def score_batch(model, games: list[dict], allowed, masked, device, amp_dtype,
                 values["ap_annotation_examples"] = int(move["annotation_position"] is not None)
                 values["ap_annotated_move_nll"] = annotation_nll + canonical_nll
 
-            for group in ("all", ply_bucket(move["ply"])):
+            bucket = ply_bucket(move["ply"])
+            kind = move["kind"]
+            for group in ("all", bucket, f"kind_{kind}", f"{bucket}__{kind}"):
                 for key, value in values.items():
                     accumulators[group][key] += value
             if move["ply"] in CROSS_CHECK_PLIES:
@@ -399,12 +418,18 @@ def summarize(total: dict) -> dict | None:
     result: dict = {"queries": n}
     for key, value in total.items():
         if key not in {"queries", "move_subtokens", "promotion_decision_correct",
-                       "promotion_decision_applicable", "ap_mode_queries",
-                       "ap_annotation_examples"}:
+                       "promotion_decision_applicable", "drop_piece_correct",
+                       "drop_piece_correct_top5", "drop_piece_applicable",
+                       "ap_mode_queries", "ap_annotation_examples"}:
             result[key] = value / n
     result["move_subtokens"] = subtokens
     result["drop_move_rate"] = total.get("drop_moves", 0) / n
     result.pop("drop_moves", None)
+    if total.get("drop_piece_applicable", 0):
+        # 駒打ちだけが分母である．全指手で割ると通常移動に薄められる．
+        result["drop_piece_top1"] = total["drop_piece_correct"] / total["drop_piece_applicable"]
+        result["drop_piece_top5"] = total["drop_piece_correct_top5"] / total["drop_piece_applicable"]
+        result["drop_piece_examples"] = int(total["drop_piece_applicable"])
     if total.get("promotion_decision_applicable", 0):
         result["promotion_decision_top1"] = (
             total["promotion_decision_correct"] / total["promotion_decision_applicable"]
@@ -531,6 +556,10 @@ def main() -> int:
                           "which is independent of the amp used for scoring",
             "ply_0": "the position before the first move is reported separately; it is "
                      "identical for every game",
+            "kind_groups": "drop / normal / promotion; the drop share rises with ply, so "
+                           "ply-wise change confounds tracking with move composition",
+            "drop_piece_top1": "which piece is dropped, given that a drop is being made; "
+                               "the denominator is drop moves only",
             "cross_check_ply_8_and_32": "the same target plies the sampled evaluation uses, "
                                         "so the two scripts can be compared directly",
         },
