@@ -109,9 +109,9 @@ class OracleContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary) / "seed-20260802"
             (run / "evaluation").mkdir(parents=True)
-            _, missing = summarize.collect_run(run, "ap-p1.0-proportional-annotation-v1")
+            _, missing, _ = summarize.collect_run(run, "ap-p1.0-proportional-annotation-v1")
             self.assertNotIn("attention-ablation", missing)
-            _, primary_missing = summarize.collect_run(run, "vanilla-p0.0")
+            _, primary_missing, _ = summarize.collect_run(run, "vanilla-p0.0")
             self.assertIn("attention-ablation", primary_missing)
 
 
@@ -224,3 +224,50 @@ class DistributionBaselineTest(unittest.TestCase):
 
     def test_nothing_is_pending_any_more(self):
         self.assertEqual(summarize.PENDING_ARTIFACTS, ())
+
+
+class ProvenanceReportingTest(unittest.TestCase):
+    """来歴のない成果物を名指しできること。
+
+    ``verify_study_integrity``のartifact-commitと同じ判定だが，verifyは日常的に
+    実行されていない。集約側で毎回検査しないと，古いコードで作られた成果物が
+    値だけ出して混ざる。
+    """
+
+    def write(self, run: Path, payload: dict) -> None:
+        (run / "evaluation").mkdir(parents=True, exist_ok=True)
+        (run / "evaluation/move_metrics.json").write_text(
+            json.dumps(payload), encoding="utf-8")
+
+    def test_missing_provenance_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "seed-20260802"
+            self.write(run, {"metrics": {"primary": {"queries": 1}}})
+            _, _, unprovenanced = summarize.collect_run(run, "vanilla-p0.0")
+            self.assertIn("move_metrics.json", unprovenanced)
+
+    def test_present_provenance_is_not_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "seed-20260802"
+            self.write(run, {"provenance": {"git_commit": "abc123"},
+                             "metrics": {"primary": {"queries": 1}}})
+            _, _, unprovenanced = summarize.collect_run(run, "vanilla-p0.0")
+            self.assertEqual(unprovenanced, [])
+
+    def test_empty_commit_counts_as_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = Path(temporary) / "seed-20260802"
+            self.write(run, {"provenance": {"git_commit": ""},
+                             "metrics": {"primary": {"queries": 1}}})
+            _, _, unprovenanced = summarize.collect_run(run, "vanilla-p0.0")
+            self.assertIn("move_metrics.json", unprovenanced)
+
+    def test_matches_the_verifier(self):
+        """判定をverify側と一致させる。片方だけ緩むと検査が意味を失う。"""
+        import verify_study_integrity as verify
+        for payload in ({"provenance": {"git_commit": "abc"}},
+                        {"provenance": {"git_commit": ""}},
+                        {"git_commit": "abc"},
+                        {}):
+            self.assertEqual(summarize.provenance_commit(payload),
+                             verify.provenance_commit(payload), payload)

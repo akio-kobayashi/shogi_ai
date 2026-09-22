@@ -594,10 +594,25 @@ def collect_series(run_dir: Path, condition: str) -> dict[str, Any]:
     return series
 
 
-def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str]]:
+def provenance_commit(payload: Mapping[str, Any]) -> str | None:
+    """成果物に記録されたgit commit。verify_study_integrityと同じ判定にする。"""
+    provenance = payload.get("provenance")
+    if isinstance(provenance, Mapping):
+        value = provenance.get("git_commit")
+        if isinstance(value, str) and value:
+            return value
+    value = payload.get("git_commit")
+    return value if isinstance(value, str) and value else None
+
+
+def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str], list[str]]:
     evaluation = run_dir / "evaluation"
     values: dict[str, Any] = {}
     missing: list[str] = []
+    # 来歴のない成果物は，どのコードで作られたか特定できない。値は出てしまうので
+    # ここで名指しする。verify_study_integrityのartifact-commitと同じ検査だが，
+    # 実際に毎回動かすのはこちらである。
+    unprovenanced: list[str] = []
     oracle = condition not in PRIMARY_CONDITIONS
     for key, relative, extractor in ARTIFACTS:
         if oracle:
@@ -608,6 +623,8 @@ def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str
         if payload is None:
             missing.append(key)
             continue
+        if provenance_commit(payload) is None:
+            unprovenanced.append(relative)
         values.update(extractor(payload, values))
     if oracle:
         for key, relative, extractor in ORACLE_ONLY:
@@ -615,6 +632,8 @@ def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str
             if payload is None:
                 missing.append(key)
                 continue
+            if provenance_commit(payload) is None:
+                unprovenanced.append(relative)
             values.update(extractor(payload, values))
     epoch = dig(load_json(run_dir / "training_history.json") or {}, "history")
     if isinstance(epoch, list) and epoch:
@@ -623,7 +642,7 @@ def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str
              and isinstance(entry.get("epoch"), int)),
             default=None,
         )
-    return values, missing
+    return values, missing, unprovenanced
 
 
 def discover_runs(results: Path, conditions: Iterable[str], seeds: Iterable[str]) -> list[tuple[str, str, Path]]:
@@ -686,10 +705,11 @@ def main() -> int:
     series: dict[str, Any] = {}
     metric_names: list[str] = []
     for condition, seed, run_dir in runs:
-        values, missing = collect_run(run_dir, condition)
+        values, missing, unprovenanced = collect_run(run_dir, condition)
         row: dict[str, Any] = {"condition": condition, "seed": seed}
         row.update(values)
         row["missing_artifacts"] = ";".join(missing)
+        row["unprovenanced_artifacts"] = ";".join(unprovenanced)
         by_run.append(row)
         series[f"{condition}/seed-{seed}"] = collect_series(run_dir, condition)
         for name in values:
@@ -712,7 +732,8 @@ def main() -> int:
             flat[f"{name}_std"] = entry["std"]
         condition_rows.append(flat)
 
-    run_fields = ["condition", "seed", *metric_names, "missing_artifacts"]
+    run_fields = ["condition", "seed", *metric_names, "missing_artifacts",
+                  "unprovenanced_artifacts"]
     condition_fields = ["condition", "runs", "seeds"]
     for name in metric_names:
         condition_fields += [f"{name}_mean", f"{name}_std"]
@@ -756,6 +777,9 @@ def main() -> int:
         "metric_names": metric_names,
         "pending_artifacts": list(PENDING_ARTIFACTS),
         "dataset_level_metrics": dataset_level,
+        "unprovenanced_artifacts": sorted({
+            relative for row in by_run for relative in row["unprovenanced_artifacts"].split(";")
+            if relative}),
         "partial_metrics": partial_metrics,
         "runs_missing_some_metrics": incomplete_runs,
         "inconsistent_dataset_level_metrics": inconsistent,
@@ -788,6 +812,10 @@ def main() -> int:
     for row in by_run:
         if row["missing_artifacts"]:
             print(f"MISSING [{row['condition']}/seed-{row['seed']}] {row['missing_artifacts']}")
+    for row in by_run:
+        if row["unprovenanced_artifacts"]:
+            print(f"NO-PROVENANCE [{row['condition']}/seed-{row['seed']}] "
+                  f"{row['unprovenanced_artifacts']}")
     if partial_metrics:
         print(f"PARTIAL {len(partial_metrics)} metric(s) exist for only some runs; "
               f"{len(incomplete_runs)} run(s) affected: {', '.join(incomplete_runs[:4])}"
