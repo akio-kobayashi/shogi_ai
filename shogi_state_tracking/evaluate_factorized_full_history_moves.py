@@ -31,7 +31,7 @@ import torch
 from data import load_vocabulary
 from factorized_prompt import (
     BASIC_PIECE_TOKENS, DROP_TOKEN, MOVE_ENCODING, PIECE_TOKENS, PROMOTE_TOKEN,
-    TRAINING_OBJECTIVE, annotation_piece_token, factorize_history_move, factorize_usi,
+    TERMINAL_ENCODING, TRAINING_OBJECTIVE, annotation_piece_token, factorize_usi,
 )
 from models import ModelConfig, build_model
 from new_prompt import square_tokens
