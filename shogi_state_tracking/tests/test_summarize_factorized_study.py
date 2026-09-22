@@ -130,7 +130,7 @@ class SingleSeedFlagTest(unittest.TestCase):
                 )
             namespace = type("A", (), {
                 "bundle": str(bundle), "output": str(root / "summary"),
-                "conditions": summarize.PRIMARY_CONDITIONS[0], "seeds": "",
+                "conditions": summarize.PRIMARY_CONDITIONS[0], "seeds": "", "strict": False,
             })()
             original = summarize.parse_args
             summarize.parse_args = lambda: namespace
@@ -310,3 +310,40 @@ class PartialMetricsTest(unittest.TestCase):
         partial, _ = summarize.find_partial_metrics(
             rows, ["droprel"], ["vanilla-p0.0", "ap-p1.0-proportional-annotation-v1"])
         self.assertEqual(partial, [])
+
+
+class StrictCheckTest(unittest.TestCase):
+    """--strictは，不完全な研究でcollectへ進ませないための検査。"""
+
+    def run_main(self, bundle: Path, output: Path, strict: bool) -> int:
+        namespace = type("A", (), {
+            "bundle": str(bundle), "output": str(output),
+            "conditions": summarize.PRIMARY_CONDITIONS[0], "seeds": "", "strict": strict,
+        })()
+        original = summarize.parse_args
+        summarize.parse_args = lambda: namespace
+        try:
+            return summarize.main()
+        finally:
+            summarize.parse_args = original
+
+    def make_run(self, root: Path, seed: str, provenance: bool) -> None:
+        run = root / "llama-reference/implicit-initial" / summarize.PRIMARY_CONDITIONS[0] / f"seed-{seed}"
+        (run / "evaluation").mkdir(parents=True)
+        payload = {"metrics": {"primary": {"canonical_move_perplexity": 3.7}}}
+        if provenance:
+            payload["provenance"] = {"git_commit": "abc123"}
+        (run / "evaluation/move_metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_incomplete_study_fails_under_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_run(root / "results", "20260802", provenance=True)
+            self.assertEqual(self.run_main(root / "results", root / "s", strict=True), 1)
+
+    def test_incomplete_study_still_summarizes_without_strict(self):
+        """学生用CSVの作成を止めないよう，既定では落とさない。"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_run(root / "results", "20260802", provenance=False)
+            self.assertEqual(self.run_main(root / "results", root / "s", strict=False), 0)

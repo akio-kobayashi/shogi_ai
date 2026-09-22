@@ -182,6 +182,17 @@ stage_eval() {
 
 stage_collect() {
   announce "collect"
+  # 不完全なまま収集しない。成果物の欠落・来歴なし・シード間の不一致が
+  # 1件でもあれば止める。止めたい理由がない限りSKIP_PREFLIGHTは使わない。
+  if [[ "${SKIP_PREFLIGHT:-0}" != 1 ]]; then
+    echo "preflight: strict summary check before collecting" >&2
+    run "${PYTHON_BIN}" -u "${SCRIPT_DIR}/summarize_factorized_study.py" \
+      --bundle "${RESULTS_DIR}" --conditions "${CONDITIONS}" --seeds "${SEEDS}" \
+      --output "${OUTPUT_ROOT}/summary" --strict || {
+        echo "collect refused: fix the problems listed above, then rerun collect" >&2
+        return 1
+      }
+  fi
   local archive="${OUTPUT_ROOT}/analysis_bundle.tar.gz"
   # archiveは再生成できる派生物なので既定で上書きする。段階を冪等に保つため。
   local force=()
@@ -209,7 +220,8 @@ stage_summarize() {
     --bundle "${SUMMARIZE_INPUT:-${RESULTS_DIR}}" \
     --conditions "${CONDITIONS}" \
     --seeds "${SEEDS}" \
-    --output "${OUTPUT_ROOT}/summary"
+    --output "${OUTPUT_ROOT}/summary" \
+    ${SUMMARIZE_STRICT:+--strict}
 }
 
 stage_report() {

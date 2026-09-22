@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="summary出力ディレクトリ")
     parser.add_argument("--conditions", default=",".join(CONDITIONS))
     parser.add_argument("--seeds", default="")
+    parser.add_argument(
+        "--strict", action="store_true",
+        help=("MISSING・NO-PROVENANCE・PARTIAL・INCONSISTENTが1件でもあれば終了コード1で終わる。"
+              "collectの前に通し，不完全なまま収集されるのを防ぐ"),
+    )
     return parser.parse_args()
 
 
@@ -839,6 +844,22 @@ def main() -> int:
               + (" ..." if len(incomplete_runs) > 4 else ""))
         print(f"        examples: {', '.join(partial_metrics[:6])}"
               + (" ..." if len(partial_metrics) > 6 else ""))
+    problems = {
+        "MISSING": [f"{row['condition']}/seed-{row['seed']}" for row in by_run
+                    if row["missing_artifacts"]],
+        "NO-PROVENANCE": [f"{row['condition']}/seed-{row['seed']}" for row in by_run
+                          if row["unprovenanced_artifacts"]],
+        "PARTIAL": incomplete_runs,
+        "INCONSISTENT": inconsistent,
+    }
+    if args.strict:
+        found = {name: values for name, values in problems.items() if values}
+        if found:
+            print("STRICT CHECK FAILED: the study is not complete; do not collect yet")
+            for name, values in found.items():
+                print(f"  {name}: {len(values)} -> {', '.join(values)}")
+            return 1
+        print("STRICT CHECK PASSED: all runs complete, provenanced and consistent")
     if inconsistent:
         # データセット水準の値がrunごとに違うなら，別の評価設定が混ざっている。
         print("INCONSISTENT dataset-level metrics differ across runs: " + ", ".join(inconsistent))
