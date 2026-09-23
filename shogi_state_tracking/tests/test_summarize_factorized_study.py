@@ -347,3 +347,25 @@ class StrictCheckTest(unittest.TestCase):
             root = Path(temporary)
             self.make_run(root / "results", "20260802", provenance=False)
             self.assertEqual(self.run_main(root / "results", root / "s", strict=False), 0)
+
+
+class TerminalLayerSelectionTest(unittest.TestCase):
+    """終端プローブの層は検証損失で選ぶ。評価データの成績で選ぶと楽観的になる。"""
+
+    def payload(self):
+        return {"tasks": {"terminal_next": {
+            "layer_0": {"validation_loss": 0.69, "evaluation": {"accuracy": 0.50},
+                        "majority_baseline": {"accuracy": 0.5}},
+            "layer_5": {"validation_loss": 0.30, "evaluation": {"accuracy": 0.80}},
+            # 評価データでは最良だが，検証損失では選ばれない層。
+            "layer_9": {"validation_loss": 0.40, "evaluation": {"accuracy": 0.95}},
+        }}}
+
+    def test_layer_with_lowest_validation_loss_is_selected(self):
+        values = summarize.extract_terminal_probe(self.payload())
+        self.assertEqual(values["terminal_selected_layer"], 5)
+        self.assertEqual(values["terminal_selected_accuracy"], 0.80)
+
+    def test_evaluation_maximum_is_not_reported(self):
+        values = summarize.extract_terminal_probe(self.payload())
+        self.assertFalse(any(key.startswith("terminal_best") for key in values))

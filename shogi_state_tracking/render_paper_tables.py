@@ -120,8 +120,8 @@ TABLES: tuple[Table, ...] = (
         caption="完全棋譜終端の線形復号",
         columns=(
             Column("入力埋め込み", "terminal_input_accuracy"),
-            Column("最良層", "terminal_best_layer", "int"),
-            Column("最良層の正解率", "terminal_best_accuracy"),
+            Column("選択層", "terminal_selected_layer", "int"),
+            Column("選択層の正解率", "terminal_selected_accuracy"),
             Column("最終層", "terminal_final_accuracy"),
             Column("多数派", "terminal_majority_accuracy"),
         ),

@@ -275,21 +275,23 @@ def extract_token_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def extract_terminal_probe(payload: Mapping[str, Any]) -> dict[str, Any]:
     task = dig(payload, "tasks", "terminal_next") or {}
+    # 層は検証損失で選ぶ。評価データの正解率が最大の層を選ぶと，評価データに
+    # 合わせて選んだことになり値が楽観的に出る。状態プローブの層選択と同じ規則。
     scored = [
-        (dig(block, "evaluation", "accuracy"), name)
+        (block["validation_loss"], name)
         for name, block in task.items()
-        if isinstance(block, Mapping) and dig(block, "evaluation", "accuracy") is not None
+        if isinstance(block, Mapping) and isinstance(block.get("validation_loss"), (int, float))
     ]
     values: dict[str, Any] = {}
     layers = sorted(task, key=layer_index)
     if scored:
-        best_accuracy, best_layer = max(scored)
-        values["terminal_best_accuracy"] = best_accuracy
-        values["terminal_best_layer"] = layer_index(best_layer)
-        values["terminal_best_macro_f1"] = dig(task, best_layer, "evaluation", "macro_f1")
+        _, selected = min(scored)
+        values["terminal_selected_layer"] = layer_index(selected)
+        values["terminal_selected_accuracy"] = dig(task, selected, "evaluation", "accuracy")
+        values["terminal_selected_macro_f1"] = dig(task, selected, "evaluation", "macro_f1")
     else:
-        values.update(terminal_best_accuracy=None, terminal_best_layer=None,
-                      terminal_best_macro_f1=None)
+        values.update(terminal_selected_layer=None, terminal_selected_accuracy=None,
+                      terminal_selected_macro_f1=None)
     values["terminal_input_accuracy"] = dig(task, layers[0], "evaluation", "accuracy") if layers else None
     values["terminal_final_accuracy"] = dig(task, layers[-1], "evaluation", "accuracy") if layers else None
     values["terminal_majority_accuracy"] = (
