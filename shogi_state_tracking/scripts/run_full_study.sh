@@ -211,8 +211,7 @@ stage_summarize() {
   announce "summarize"
   local script="${SCRIPT_DIR}/summarize_factorized_study.py"
   [[ -f "${script}" ]] || {
-    echo "not implemented yet: ${script}" >&2
-    echo "see STUDY_PIPELINE_DESIGN.md section 5.4" >&2
+    echo "missing: ${script}" >&2
     exit 3
   }
   # 集約はresults rootを直接読む。archiveは配布用であり，展開は不要である。
@@ -228,8 +227,7 @@ stage_report() {
   announce "report"
   local script="${SCRIPT_DIR}/render_paper_tables.py"
   [[ -f "${script}" ]] || {
-    echo "not implemented yet: ${script}" >&2
-    echo "see STUDY_PIPELINE_DESIGN.md section 5.5" >&2
+    echo "missing: ${script}" >&2
     exit 3
   }
   run "${PYTHON_BIN}" -u "${script}" \

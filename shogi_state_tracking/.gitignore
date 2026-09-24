@@ -21,3 +21,10 @@ factorized_v3_eos_data/
 factorized_v3_eos_results*/
 .env
 .env.*
+# 論文と実験のメモはNotionで共有し，リポジトリには入れない（直下のみ）。
+/PAPER_*.md
+/*EXPERIMENT*.md
+/*_PLAN.md
+/*_DESIGN.md
+/factorized_v3_analysis_*.md
+/将棋.txt
