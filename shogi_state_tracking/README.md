@@ -23,7 +23,7 @@
 
 `factorized_v3`という名称は指手文法を表す．現行datasetとcheckpointの互換性はschema version 4で管理する．旧schemaのdatasetとcheckpointは再利用できないため，混在させないこと．
 
-詳しい設計根拠は[NEW_EXPERIMENT_DESIGN.md](NEW_EXPERIMENT_DESIGN.md)，プローブの定義は[PROBE_DESIGN.md](PROBE_DESIGN.md)を参照する．
+詳しい設計根拠とプローブの定義は，Notionで共有している設計メモにある．
 
 ## 実験の順序
 
@@ -715,12 +715,10 @@ results rootを自動探索する．自動探索を無効にする場合は
 
 ## 関連文書
 
-- [NEW_EXPERIMENT_DESIGN.md](NEW_EXPERIMENT_DESIGN.md)：現行の語彙・指手文法・実験条件
-- [PROBE_DESIGN.md](PROBE_DESIGN.md)：状態・指手・終端プローブの定義
-- [PAPER_OUTLINE_JA.md](PAPER_OUTLINE_JA.md)：論文構成案
-- [FUTURE_EXPERIMENTS.md](FUTURE_EXPERIMENTS.md)：因果介入，Chain of Moves，探索蒸留などの将来課題
-- [COT_EXPERIMENT.md](COT_EXPERIMENT.md)：旧synthetic reasoning trace実験
+- [docs/](docs/)：学生向けの研究概要，分析手順，CSVの計算内容
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：移植コードと第三者ライセンス
+
+論文原稿，実験計画，設計メモはNotionで共有しており，このリポジトリには含めない．
 
 ## 注意
 
