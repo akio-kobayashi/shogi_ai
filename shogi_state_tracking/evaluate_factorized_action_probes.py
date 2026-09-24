@@ -25,6 +25,11 @@ from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
 from provenance import with_provenance, write_metrics_json
 
+# 出力の版番号。指標の定義や計算方法を変えて，既存の成果物と意味が変わるときだけ上げる。
+# 版番号が古い成果物は，評価の駆動スクリプトが作り直し，集約の厳格検査が拒否する。
+# 名前の変更や表示の修正など，値が変わらない変更では上げない。
+EVALUATOR_VERSION = 1
+
 
 TASK_SPECS = {
     "terminal_next": ("pre", 2),
@@ -503,7 +508,7 @@ def main():
         del task_features, task_labels
     del model, checkpoint, all_queries
     output = Path(args.output_dir); output.mkdir(parents=True, exist_ok=True)
-    write_metrics_json((output / "action_probe_metrics.json"), result)
+    write_metrics_json((output / "action_probe_metrics.json"), result, evaluator_version=EVALUATOR_VERSION)
     torch.save(with_provenance(saved), output / "action_probes.pt")
     print(json.dumps({"event": "action_probe_complete", "output": str(output), "tasks": list(result["tasks"])}, ensure_ascii=False), flush=True)
 

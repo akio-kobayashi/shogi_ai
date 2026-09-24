@@ -32,27 +32,13 @@ SELF_CHECK_GAMES="${SELF_CHECK_GAMES:-2}"
 SELF_CHECK_TOLERANCE="${SELF_CHECK_TOLERANCE:-1e-3}"
 # 自己検査は既定でfp32。採点位置の検証を数値精度から切り離すため。
 SELF_CHECK_AMP="${SELF_CHECK_AMP:-off}"
-# 評価器を変更した後の成果物は指標が欠けるので，ファイルの有無だけでキャッシュ
-# 判定してはいけない。成果物のprovenance.git_commitが，評価器を最後に変更した
-# commitより古ければ作り直す。
-EVALUATOR="${SCRIPT_DIR}/evaluate_factorized_full_history_moves.py"
-
+# ファイルの有無だけで判定すると，評価器を変えた後も古い成果物が残る。
+# 評価器の版番号（EVALUATOR_VERSION）より古い成果物だけを作り直す。
 stale() {
-  local artifact="$1" recorded evaluator_commit
+  local artifact="$1" code=0
   [[ -f "${artifact}" ]] || return 0
-  evaluator_commit="$(git -C "${SCRIPT_DIR}" log -1 --format=%H -- "${EVALUATOR}" 2>/dev/null || true)"
-  [[ -n "${evaluator_commit}" ]] || return 1
-  recorded="$("${PYTHON_BIN}" -c "
-import json,sys
-try:
-    print(json.load(open(sys.argv[1])).get('provenance', {}).get('git_commit') or '')
-except Exception:
-    print('')
-" "${artifact}" 2>/dev/null)"
-  [[ -n "${recorded}" ]] || return 0
-  # 成果物のcommitが評価器の最終変更を含んでいれば新しい。
-  git -C "${SCRIPT_DIR}" merge-base --is-ancestor "${evaluator_commit}" "${recorded}" 2>/dev/null && return 1
-  return 0
+  "${PYTHON_BIN}" "${SCRIPT_DIR}/artifact_versions.py" check "${artifact}" 2>/dev/null || code=$?
+  [[ "${code}" -eq 1 || "${code}" -eq 3 ]]
 }
 COMPARE="${COMPARE:-1}"
 SMOKE=0

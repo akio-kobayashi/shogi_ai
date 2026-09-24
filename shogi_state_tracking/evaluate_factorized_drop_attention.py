@@ -27,6 +27,11 @@ from models import ModelConfig, build_model
 from train_model import amp_context, resolve_amp
 from provenance import write_metrics_json
 
+# 出力の版番号。指標の定義や計算方法を変えて，既存の成果物と意味が変わるときだけ上げる。
+# 版番号が古い成果物は，評価の駆動スクリプトが作り直し，集約の厳格検査が拒否する。
+# 名前の変更や表示の修正など，値が変わらない変更では上げない。
+EVALUATOR_VERSION = 1
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="駒打ち関連attention観測・遮断評価")
@@ -415,7 +420,7 @@ def main():
         ],
     }
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
-    write_metrics_json(output, result)
+    write_metrics_json(output, result, evaluator_version=EVALUATOR_VERSION)
     print(json.dumps({"event": "drop_attention_complete", "output": str(output), "pairs": len(pairs)}, ensure_ascii=False), flush=True)
 
 

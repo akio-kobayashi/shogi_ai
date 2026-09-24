@@ -18,6 +18,11 @@ from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
 from provenance import write_metrics_json
 
+# 出力の版番号。指標の定義や計算方法を変えて，既存の成果物と意味が変わるときだけ上げる。
+# 版番号が古い成果物は，評価の駆動スクリプトが作り直し，集約の厳格検査が拒否する。
+# 名前の変更や表示の修正など，値が変わらない変更では上げない。
+EVALUATOR_VERSION = 1
+
 
 def iter_query_batches(args, vocabulary, config, state_prompt_mode, start_selection, evaluation_annotation_mode, distances, statistics):
     """評価queryを小さなpool内で長さ順に並べ，paddingを抑えて返す。"""
@@ -216,7 +221,7 @@ def main():
     }
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_metrics_json(path, output)
+    write_metrics_json(path, output, evaluator_version=EVALUATOR_VERSION)
     print(json.dumps({"event": "token_probe_complete", "output": str(path), "queries": totals["queries"]}, ensure_ascii=False))
 
 

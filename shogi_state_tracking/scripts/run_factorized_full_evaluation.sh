@@ -65,9 +65,18 @@ selected() {
 }
 
 complete() {
-  local name="$1" relative
+  local name="$1" relative code
   while IFS= read -r relative; do
     [[ -e "${OUTPUT_DIR}/${relative}" ]] || return 1
+    # ファイルがあっても，評価器の版より古いか読めなければ作り直す。
+    if [[ "${relative}" == *.json ]]; then
+      code=0
+      "${PYTHON_BIN}" "${SCRIPT_DIR}/artifact_versions.py" check "${OUTPUT_DIR}/${relative}" 2>/dev/null || code=$?
+      if [[ "${code}" -eq 1 || "${code}" -eq 3 ]]; then
+        echo "stale or unreadable: ${relative}" >&2
+        return 1
+      fi
+    fi
   done < <(stage_artifact "${name}")
   return 0
 }

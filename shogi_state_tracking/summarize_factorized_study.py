@@ -20,6 +20,7 @@ import statistics
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from artifact_versions import status as artifact_status
 from provenance import write_metrics_json
 
 
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", default="")
     parser.add_argument(
         "--strict", action="store_true",
-        help=("MISSING・NO-PROVENANCE・PARTIAL・INCONSISTENTが1件でもあれば終了コード1で終わる。"
+        help=("MISSING・NO-PROVENANCE・STALE・PARTIAL・INCONSISTENTが1件でもあれば終了コード1で終わる。"
               "collectの前に通し，不完全なまま収集されるのを防ぐ"),
     )
     return parser.parse_args()
@@ -667,6 +668,24 @@ def provenance_commit(payload: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def stale_artifacts(run_dir: Path, condition: str) -> list[str]:
+    """評価器の版より古い成果物。値は読めてしまうので，版番号で検出する。"""
+    evaluation = run_dir / "evaluation"
+    oracle = condition not in PRIMARY_CONDITIONS
+    relatives = []
+    for key, relative, _ in ARTIFACTS:
+        if oracle:
+            if key in ORACLE_EXCLUDED:
+                continue
+            relative = ORACLE_REPLACEMENTS.get(key, relative)
+        relatives.append(relative)
+    if oracle:
+        relatives.extend(relative for _, relative, _ in ORACLE_ONLY)
+    return [relative for relative in relatives
+            if (evaluation / relative).is_file()
+            and artifact_status(evaluation / relative)[0] == "stale"]
+
+
 def collect_run(run_dir: Path, condition: str) -> tuple[dict[str, Any], list[str], list[str]]:
     evaluation = run_dir / "evaluation"
     values: dict[str, Any] = {}
@@ -772,6 +791,7 @@ def main() -> int:
         row.update(values)
         row["missing_artifacts"] = ";".join(missing)
         row["unprovenanced_artifacts"] = ";".join(unprovenanced)
+        row["stale_artifacts"] = ";".join(stale_artifacts(run_dir, condition))
         by_run.append(row)
         series[f"{condition}/seed-{seed}"] = collect_series(run_dir, condition)
         for name in values:
@@ -795,7 +815,7 @@ def main() -> int:
         condition_rows.append(flat)
 
     run_fields = ["condition", "seed", *metric_names, "missing_artifacts",
-                  "unprovenanced_artifacts"]
+                  "unprovenanced_artifacts", "stale_artifacts"]
     condition_fields = ["condition", "runs", "seeds"]
     for name in metric_names:
         condition_fields += [f"{name}_mean", f"{name}_std"]
@@ -872,6 +892,8 @@ def main() -> int:
                     for row in by_run if row["missing_artifacts"]],
         "NO-PROVENANCE": [f"{row['condition']}/seed-{row['seed']} [{row['unprovenanced_artifacts']}]"
                           for row in by_run if row["unprovenanced_artifacts"]],
+        "STALE": [f"{row['condition']}/seed-{row['seed']} [{row['stale_artifacts']}]"
+                  for row in by_run if row["stale_artifacts"]],
         "PARTIAL": incomplete_runs,
         "INCONSISTENT": inconsistent,
     }

@@ -23,6 +23,11 @@ from probes import LinearStateProbe, ProbeTargets, binary_classification_metrics
 from train_model import amp_context, resolve_amp
 from provenance import with_provenance, write_metrics_json
 
+# 出力の版番号。指標の定義や計算方法を変えて，既存の成果物と意味が変わるときだけ上げる。
+# 版番号が古い成果物は，評価の駆動スクリプトが作り直し，集約の厳格検査が拒否する。
+# 名前の変更や表示の修正など，値が変わらない変更では上げない。
+EVALUATOR_VERSION = 1
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="新prompt用の層別線形状態プローブ")
@@ -546,7 +551,7 @@ def main():
             ),
         }
         states[source] = probe.cpu().state_dict()
-    write_metrics_json((output / "probe_metrics.json"), result)
+    write_metrics_json((output / "probe_metrics.json"), result, evaluator_version=EVALUATOR_VERSION)
     torch.save(with_provenance({"checkpoint": args.checkpoint, "sources": sources, "probe_state_dicts": states, "board_label_map": board_map, "hand_names": hand_names}), output / "linear_probes.pt")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     feature_cache.cleanup()

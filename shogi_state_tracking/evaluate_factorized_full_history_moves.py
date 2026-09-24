@@ -38,6 +38,11 @@ from new_prompt import square_tokens
 from train_model import amp_context, resolve_amp
 from provenance import write_metrics_json
 
+# 出力の版番号。指標の定義や計算方法を変えて，既存の成果物と意味が変わるときだけ上げる。
+# 版番号が古い成果物は，評価の駆動スクリプトが作り直し，集約の厳格検査が拒否する。
+# 名前の変更や表示の修正など，値が変わらない変更では上げない。
+EVALUATOR_VERSION = 1
+
 
 # 手数の層別．手数別の多数派下限と並べられるよう，境界を固定して記録する．
 PLY_BUCKETS = ((1, 8), (9, 16), (17, 32), (33, 64), (65, 128), (129, 10**9))
@@ -569,7 +574,7 @@ def main() -> int:
         },
         "metrics": metrics,
     }
-    write_metrics_json(Path(args.output), payload)
+    write_metrics_json(Path(args.output), payload, evaluator_version=EVALUATOR_VERSION)
     print(json.dumps({
         "event": "full_history_move_evaluation_complete",
         "output": args.output,
