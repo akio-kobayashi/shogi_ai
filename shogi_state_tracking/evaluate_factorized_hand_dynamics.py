@@ -305,10 +305,10 @@ def evaluate_drop_queries(model, queries, vocabulary, device, amp_dtype, batch_s
                 predicted_drop = unfactorize_usi([DROP_TOKEN, piece_token, square_tokens()[top_destination_local[row]]])
                 counters["forced_drop_top1_legal"] += int(predicted_drop in legal_moves)
                 counters["forced_drop_top1_target"] += int(predicted_drop == item["target"])
-                greedy_move = generated[row][0][0] if generated[row] else None
-                counters["free_greedy_is_drop"] += int(greedy_move is not None and "*" in greedy_move)
-                counters["free_greedy_legal"] += int(greedy_move in legal_moves)
-                counters["free_greedy_target"] += int(greedy_move == item["target"])
+                beam_move = generated[row][0][0] if generated[row] else None
+                counters["free_beam_top1_is_drop"] += int(beam_move is not None and "*" in beam_move)
+                counters["free_beam_top1_legal"] += int(beam_move in legal_moves)
+                counters["free_beam_top1_target"] += int(beam_move == item["target"])
             done = start + len(batch)
             if progress_every and done >= progress_every and done // progress_every != start // progress_every:
                 print(json.dumps({"event": "drop_evaluation_progress", "queries": done, "total": len(ordered), "elapsed_sec": round(time.perf_counter() - started, 1)}), flush=True)
@@ -323,9 +323,9 @@ def evaluate_drop_queries(model, queries, vocabulary, device, amp_dtype, batch_s
         "mean_legal_destination_mass_for_top_piece": _safe_ratio(counters["legal_destination_probability_mass_sum"], n),
         "forced_drop_top1_legal_rate": _safe_ratio(counters["forced_drop_top1_legal"], n),
         "forced_drop_top1_target_accuracy": _safe_ratio(counters["forced_drop_top1_target"], n),
-        "free_greedy_drop_rate": _safe_ratio(counters["free_greedy_is_drop"], n),
-        "free_greedy_legal_rate": _safe_ratio(counters["free_greedy_legal"], n),
-        "free_greedy_target_accuracy": _safe_ratio(counters["free_greedy_target"], n),
+        "free_beam_top1_drop_rate": _safe_ratio(counters["free_beam_top1_is_drop"], n),
+        "free_beam_top1_legal_rate": _safe_ratio(counters["free_beam_top1_legal"], n),
+        "free_beam_top1_target_accuracy": _safe_ratio(counters["free_beam_top1_target"], n),
     }
 
 

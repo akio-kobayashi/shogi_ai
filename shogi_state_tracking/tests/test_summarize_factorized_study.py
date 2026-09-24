@@ -369,3 +369,33 @@ class TerminalLayerSelectionTest(unittest.TestCase):
     def test_evaluation_maximum_is_not_reported(self):
         values = summarize.extract_terminal_probe(self.payload())
         self.assertFalse(any(key.startswith("terminal_best") for key in values))
+
+
+class LegacyFieldNameTest(unittest.TestCase):
+    """評価器の旧名（greedy_*）で作られた成果物も読めること。
+
+    中身は幅5のビーム探索の第1位だったのに greedy_* と名付けられていたため改名した。
+    改名前の成果物を作り直さずに集約できる必要がある。
+    """
+
+    def payload(self, prefix: str) -> dict:
+        return {"metrics": {"primary": {f"{prefix}full_move_top1": 0.56,
+                                        ("beam_top1_legal_rate" if prefix == "beam_" else "greedy_legal_rate"): 0.99}}}
+
+    def test_new_names_are_read(self):
+        values = summarize.extract_moves(self.payload("beam_"))
+        self.assertEqual(values["move_top1"], 0.56)
+        self.assertEqual(values["move_top1_legal"], 0.99)
+
+    def test_legacy_names_are_read(self):
+        values = summarize.extract_moves(self.payload("greedy_"))
+        self.assertEqual(values["move_top1"], 0.56)
+        self.assertEqual(values["move_top1_legal"], 0.99)
+
+    def test_new_name_wins_when_both_exist(self):
+        block = {"beam_full_move_top1": 0.5, "greedy_full_move_top1": 0.1}
+        self.assertEqual(summarize.lookup_field(block, "beam_full_move_top1"), 0.5)
+
+    def test_no_output_column_keeps_the_misleading_name(self):
+        values = summarize.extract_moves(self.payload("greedy_"))
+        self.assertFalse([name for name in values if "greedy" in name])

@@ -99,11 +99,10 @@ MOVE_FIELDS = {
     "move_perplexity_grammar": "grammar_normalized_move_perplexity",
     "move_nll": "canonical_move_nll",
     "move_nll_raw": "move_nll",
-    # greedy_*という名前だが，中身は幅5の文法制約ビーム探索の第1位である
-    # （evaluate_factorized_moves.pyのdefinitions.greedy_and_beam）。論文の定義と一致する。
-    "move_top1": "greedy_full_move_top1",
+    # 幅5の文法制約ビーム探索の第1位。論文の指手top-1の定義と一致する。
+    "move_top1": "beam_full_move_top1",
     "move_top5": "beam_full_move_top5",
-    "move_top1_legal": "greedy_legal_rate",
+    "move_top1_legal": "beam_top1_legal_rate",
     "move_legal_mass": "beam_legal_probability_lower_bound",
     "move_queries": "queries",
     # APだけに存在する正準値。canonical_move_perplexityはAPでは駒種条件付きの
@@ -112,21 +111,41 @@ MOVE_FIELDS = {
 }
 
 
+# 評価器の旧いフィールド名。中身はビーム第1位だったがgreedy_*と名付けられていた。
+# 改名前に作られた成果物も読めるよう，新しい名前が無いときだけ旧名を引く。
+LEGACY_FIELD_NAMES = {
+    "beam_full_move_top1": "greedy_full_move_top1",
+    "beam_top1_legal_rate": "greedy_legal_rate",
+    "beam_top1_syntactic_rate": "greedy_syntactic_rate",
+    "free_beam_top1_drop_rate": "free_greedy_drop_rate",
+    "free_beam_top1_legal_rate": "free_greedy_legal_rate",
+    "free_beam_top1_target_accuracy": "free_greedy_target_accuracy",
+}
+
+
+def lookup_field(block: Mapping[str, Any], key: str) -> Any:
+    """新しい名前で引き，無ければ改名前の名前で引く。"""
+    if key in block:
+        return block[key]
+    legacy = LEGACY_FIELD_NAMES.get(key)
+    return block.get(legacy) if legacy else None
+
+
 def extract_moves(payload: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
     values: dict[str, Any] = {}
     primary = dig(payload, "metrics", "primary") or {}
     for name, key in MOVE_FIELDS.items():
-        values[f"{prefix}{name}"] = primary.get(key)
+        values[f"{prefix}{name}"] = lookup_field(primary, key)
     for distance, block in (dig(payload, "metrics", "by_history_distance") or {}).items():
         if not isinstance(block, Mapping):
             continue
         for name, key in MOVE_FIELDS.items():
-            values[f"{prefix}{name}_h{distance}"] = block.get(key)
+            values[f"{prefix}{name}_h{distance}"] = lookup_field(block, key)
     for scope, block in (dig(payload, "metrics", "by_position_scope") or {}).items():
         if not isinstance(block, Mapping):
             continue
         for name, key in MOVE_FIELDS.items():
-            values[f"{prefix}{name}_{scope}"] = block.get(key)
+            values[f"{prefix}{name}_{scope}"] = lookup_field(block, key)
     complete = dig(payload, "complete_move_evaluation", "primary") or {}
     values[f"{prefix}complete_move_top1"] = complete.get("complete_action_beam_top1_exact")
     values[f"{prefix}complete_move_top5"] = complete.get("complete_action_beam_top5_exact")
@@ -371,7 +390,7 @@ DROP_VALIDITY_FIELDS = (
     "selected_piece_has_legal_destination_rate",
     "mean_legal_destination_mass_for_top_piece",
     "forced_drop_top1_legal_rate", "forced_drop_top1_target_accuracy",
-    "free_greedy_drop_rate", "free_greedy_legal_rate", "free_greedy_target_accuracy",
+    "free_beam_top1_drop_rate", "free_beam_top1_legal_rate", "free_beam_top1_target_accuracy",
 )
 
 
@@ -394,8 +413,8 @@ def extract_hand_dynamics(payload: Mapping[str, Any], context: Mapping[str, Any]
         for field in HAND_FIELDS:
             values[f"hand_{group}_{field}"] = dig(block, field)
     validity = dig(payload, "drop_validity") or {}
-    for field in DROP_VALIDITY_FIELDS:
-        values[f"handdrop_{field}"] = validity.get(field)
+    for name in DROP_VALIDITY_FIELDS:
+        values[f"handdrop_{name}"] = lookup_field(validity, name)
     values["hand_sampled_events"] = dig(payload, "sampling", "sampled_events")
     values["hand_sampled_actual_drops"] = dig(payload, "sampling", "sampled_actual_drops")
     values["hand_games"] = dig(payload, "sampling", "games")

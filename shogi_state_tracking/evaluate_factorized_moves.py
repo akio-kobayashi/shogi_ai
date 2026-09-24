@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """factorized_v3 checkpointの高速な指手評価．
 
-正解接頭辞を使う構成要素評価と，自律的な文法制約greedy生成を分離して報告する。
+正解接頭辞を使う構成要素評価と，自律的な文法制約ビーム生成を分離して報告する。
 全合法手の系列確率を列挙する ``legal probability mass`` は本軽量評価には含めない。
 """
 
@@ -472,10 +472,10 @@ def summarize_complete_moves(total):
         return {"queries": 0}
     return {
         "queries": n,
-        "complete_action_beam_top1_exact": total["greedy_full_move_top1"] / n,
+        "complete_action_beam_top1_exact": total["beam_full_move_top1"] / n,
         "complete_action_beam_top5_exact": total["beam_full_move_top5"] / n,
-        "complete_action_beam_top1_syntactic": total["greedy_syntactic_rate"] / n,
-        "complete_action_beam_top1_legal": total["greedy_legal_rate"] / n,
+        "complete_action_beam_top1_syntactic": total["beam_top1_syntactic_rate"] / n,
+        "complete_action_beam_top1_legal": total["beam_top1_legal_rate"] / n,
         "complete_action_beam_top5_contains_legal": total["beam_top5_contains_legal_rate"] / n,
     }
 
@@ -587,10 +587,10 @@ def main():
                     "promotion_decision_applicable": promotion_applicable,
                     "teacher_forced_full_top1": int(component_top1),
                     "teacher_forced_full_top5": int(component_top5),
-                    "greedy_full_move_top1": int(predicted == query["target"]),
+                    "beam_full_move_top1": int(predicted == query["target"]),
                     "beam_full_move_top5": int(query["target"] in generated_moves[:5]),
-                    "greedy_syntactic_rate": int(predicted is not None),
-                    "greedy_legal_rate": int(predicted in query["legal_moves"]),
+                    "beam_top1_syntactic_rate": int(predicted is not None),
+                    "beam_top1_legal_rate": int(predicted in query["legal_moves"]),
                     "beam_top5_contains_legal_rate": int(any(move in query["legal_moves"] for move in generated_moves[:5])),
                     "beam_legal_probability_lower_bound": legal_beam_mass,
                 }
@@ -663,7 +663,7 @@ def main():
             "legacy_ap_metric_names": "ap_annotated_move_{nll,perplexity} and canonical_move_{nll,perplexity} are retained for compatibility; use ap_canonical_move_* and ap_piece_conditioned_move_* when interpreting AP results",
             "training_objective_expected_for_new_runs": TRAINING_OBJECTIVE,
             "teacher_forced": "destination and later components are conditioned on the gold preceding components",
-            "greedy_and_beam": "legacy greedy_* fields use the first result of the width-5 grammar-constrained beam; complete_move_evaluation names this beam output explicitly; decoding is not constrained by shogi legality",
+            "beam_top1": "beam_full_move_top1, beam_top1_syntactic_rate and beam_top1_legal_rate use the first result of the width-5 grammar-constrained beam; artifacts produced before this rename call them greedy_*; decoding is not constrained by shogi legality",
             "legal_probability_mass": "beam_legal_probability_lower_bound sums only legal moves retained by beam search; exact mass requires scoring every legal move sequence",
         },
     }

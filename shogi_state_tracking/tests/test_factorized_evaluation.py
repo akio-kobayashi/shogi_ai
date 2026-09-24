@@ -490,7 +490,7 @@ class FactorizedEvaluationTest(unittest.TestCase):
                 payload = json.loads(output.read_text(encoding="utf-8"))
                 self.assertEqual(payload["model_type"], model_type)
                 self.assertEqual(payload["metrics"]["primary"]["queries"], 1)
-                self.assertEqual(payload["metrics"]["primary"]["greedy_syntactic_rate"], 1.0)
+                self.assertEqual(payload["metrics"]["primary"]["beam_top1_syntactic_rate"], 1.0)
                 self.assertIn("canonical_perplexity", payload["metrics"]["primary"])
                 self.assertIn("canonical_move_perplexity", payload["metrics"]["primary"])
 
