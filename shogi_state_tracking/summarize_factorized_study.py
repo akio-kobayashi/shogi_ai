@@ -99,6 +99,8 @@ MOVE_FIELDS = {
     "move_perplexity_grammar": "grammar_normalized_move_perplexity",
     "move_nll": "canonical_move_nll",
     "move_nll_raw": "move_nll",
+    # greedy_*という名前だが，中身は幅5の文法制約ビーム探索の第1位である
+    # （evaluate_factorized_moves.pyのdefinitions.greedy_and_beam）。論文の定義と一致する。
     "move_top1": "greedy_full_move_top1",
     "move_top5": "beam_full_move_top5",
     "move_top1_legal": "greedy_legal_rate",
