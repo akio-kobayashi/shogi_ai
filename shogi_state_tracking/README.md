@@ -715,10 +715,12 @@ results rootを自動探索する．自動探索を無効にする場合は
 
 ## 関連文書
 
-- [docs/](docs/)：学生向けの研究概要，分析手順，CSVの計算内容
+- [docs/](docs/)：学生向けの研究概要，分析手順，CSVの計算内容，用語集
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：移植コードと第三者ライセンス
 
 論文原稿，実験計画，設計メモはNotionで共有しており，このリポジトリには含めない．
+
+学生向け文書はNotionにも同じ内容を置いている．正本は`docs/`で，Notionはその写しである．`docs/`を直したら`python scripts/docs_to_notion.py`でNotion用の本文を作り，Notionの各ページの本文をそれで置き換える．Notion側で直したときは，同じ変更を`docs/`にも入れる．
 
 ## 注意
 
