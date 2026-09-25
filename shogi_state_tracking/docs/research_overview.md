@@ -104,7 +104,7 @@ APの数値は2種類に分かれます。混同しやすいので注意して�
 | 「開始局面と指手系列」を入力する。開始局面は85トークンで表す | **今回は開始局面を入力しません**（第2.2節）。開始局面の符号化は将来の拡張として設計してあるだけで、個別トークンは定義すらしていません |
 | 語彙は125語 | 実際に現れるのは101語。残り24語は予約で、学習にも評価にも出ません |
 | チェスのキャスリング、アンパッサン、50手ルール、デッドポジション | 将棋との状態変数の違いを説明するための対比です。**チェスなので当然ですが、今回の実験には対応する測定結果がありません。** 発表で時間を取るべき箇所ではありません |
-| [activation patching](glossary.md)（隠れ状態の置換） | 未実施です。 今回行うのは[注意接続の遮断](glossary.md)で、隠れ状態を差し替えるのではなく、過去の特定位置への参照を切る操作です。別物です |
+| [activation patching](glossary.md)（隠れ状態の置換） | 未実施です。 今回行うのは[注意接続の遮断](glossary.md)で、隠れ状態を差し替えるのではなく、過去の特定位置への注意にマスクをかける操作です。別物です |
 | タイトルの「開始局面と指手系列による」 | 実験に即すなら「指手系列による」です |
 
 ### 3.2 今回やっているが、スライドに書かれていないこと
@@ -114,7 +114,7 @@ APの数値は2種類に分かれます。混同しやすいので注意して�
 | 今回の実験 | スライドでの扱い |
 |---|---|
 | [局面復号の指手依存性](glossary.md)。 同じ履歴に続けて駒打ちを与えたときと通常移動を与えたときで、持ち駒の読み取りやすさが変わるか | 研究課題3として1行のみ |
-| **注意接続の遮断。** 持ち駒を増減させた過去の指手位置への参照を切ると駒種予測が崩れるか。無関係な位置を切った場合と比べる | 記載なし |
+| **注意接続の遮断。** 持ち駒を増減させた過去の指手位置への注意にマスクをかけると駒種予測が崩れるか。無関係な位置にマスクをかけた場合と比べる | 記載なし |
 | RAP挿入率の比較。 q=0、0.15、0.25、AP（1.0）の4条件 | RAPの説明はあるが、比較する率が書かれていない |
 | 3[シード](glossary.md)での再学習 | 記載なし。予備実験は1シードだけでした |
 | 終端プローブ。 棋譜の終わりかどうかを隠れ状態から判定できるか | 記載なし |
@@ -253,13 +253,13 @@ APの数値は2種類に分かれます。混同しやすいので注意して�
 
 **［2］Li et al., "Emergent World Representations," ICLR 2023.** arXiv:2210.13382 — オセロの指手列モデルの内部に盤面が現れることを示した、この分野の起点。
 
-**［3］Nanda, Lee & Wattenberg, BlackboxNLP 2023.** DOI: 10.18653/v1/2023.blackboxnlp-1.2 — ［2］の表現が線形に読み出せることを示した。本研究が線形プローブを使う根拠。
+**［3］Nanda, Lee & Wattenberg, "Emergent Linear Representations in World Models of Self-Supervised Sequence Models," BlackboxNLP 2023.** DOI: 10.18653/v1/2023.blackboxnlp-1.2 — ［2］の表現が線形に読み出せることを示した。本研究が線形プローブを使う根拠。
 
 **［4］Karvonen, "Emergent World Models and Latent Variable Estimation in Chess-Playing Language Models," COLM 2024.** arXiv:2403.15498 — チェスで同様の結果。棋力という潜在変数の推定も扱う。
 
 ### 探索を教師にしたモデル（対比）
 
-**［5］Ruoss et al., "Amortized Planning with Large-Scale Transformers," NeurIPS 2024.** arXiv:2402.04494
+**［5］Ruoss et al., "Amortized Planning with Large-Scale Transformers: A Case Study on Chess," NeurIPS 2024.** arXiv:2402.04494
 
 **［6］Jenner et al., "Evidence of Learned Look-Ahead in a Chess-Playing Neural Network," NeurIPS 2024.** arXiv:2406.00877
 
@@ -279,9 +279,9 @@ APの数値は2種類に分かれます。混同しやすいので注意して�
 
 ### 背景
 
-**［0］Mechner, F., Journal of the Experimental Analysis of Behavior 94(3), 2010.** DOI: 10.1901/jeab.2010.94-373 — 目隠しチェスの研究の書評。盤面を見なくても駒の位置関係を保持できるという、研究の動機にあたる話です。
+**［0］Mechner, F., "Chess as a Behavioral Model for Cognitive Skill Research: Review of Blindfold Chess by Eliot Hearst and John Knott," Journal of the Experimental Analysis of Behavior 94(3), 2010.** DOI: 10.1901/jeab.2010.94-373 — 目隠しチェスの研究の書評。盤面を見なくても駒の位置関係を保持できるという、研究の動機にあたる話です。
 
-**Silver et al., "A General Reinforcement Learning Algorithm...," Science 2018.** DOI: 10.1126/science.aar6404 — AlphaZero。強さを作る研究であり、本研究とは目的が違います。 混同されやすいので、違いを説明できるようにしておいてください。
+**Silver et al., "A General Reinforcement Learning Algorithm That Masters Chess, Shogi and Go through Self-Play," Science 2018.** DOI: 10.1126/science.aar6404 — AlphaZero。強さを作る研究であり、本研究とは目的が違います。 混同されやすいので、違いを説明できるようにしておいてください。
 
 全エントリは[references.bib](../references.bib)にあります。
 
