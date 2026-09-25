@@ -283,8 +283,6 @@ APの数値は2種類に分かれます。混同しやすいので注意して�
 
 **Silver et al., "A General Reinforcement Learning Algorithm That Masters Chess, Shogi and Go through Self-Play," Science 2018.** DOI: 10.1126/science.aar6404 — AlphaZero。強さを作る研究であり、本研究とは目的が違います。 混同されやすいので、違いを説明できるようにしておいてください。
 
-全エントリは[references.bib](../references.bib)にあります。
-
 ---
 
 ## 8　用語
